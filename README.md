@@ -11,6 +11,8 @@
 > **EXPERIMENTAL**, **INTERNAL**, **LEGACY**, or **UNKNOWN** below and in the
 > supported-surface contract.
 
+English | [简体中文](README.zh-CN.md)
+
 ---
 
 ## What is this
