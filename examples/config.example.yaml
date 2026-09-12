@@ -1,0 +1,52 @@
+# Hippocampus — example engine config (PUBLIC ALPHA)
+#
+# Copy to the absolute profile directory you chose (e.g.
+# C:\Users\<you>\.v3-core\profiles\default\config.yaml on Windows)
+# and fill in. All values shown below are placeholders — do not reuse
+# real production credentials or production endpoints. See
+# docs/CONFIGURATION.md for every key.
+#
+# Hard rule for the public alpha:
+#   * Never point this at any production PostgreSQL.
+#   * Always use a disposable pgvector container (pgvector/pgvector:pg17
+#     in Docker is the documented path).
+#   * The path under top-level `basePath` MUST be absolute. The engine
+#     does NOT expand `~` and does NOT default to a particular user path.
+
+profile: default
+
+# Explicit data root. REQUIRED. Replace `<you>` with your own username.
+basePath: "C:\\Users\\<you>\\.v3-core\\profiles\\default"
+
+storage:
+
+  pg:
+    # Local disposable pgvector container — change host/port/db/user/password
+    # to match what `docker run` gave you. See docs/INSTALL.md § 4.
+    host: 127.0.0.1
+    port: 55432
+    database: v3embeddings_alpha
+    user: postgres
+    password: ""   # required via V3CORE_PG_PASSWORD; never commit a real value
+
+  # Embedding is optional. Leave this block commented out to disable vector
+  # recall; keyword recall and durable writes still work. If you uncomment it,
+  # replace every placeholder with a real endpoint, key, model, and dimension.
+  # embed:
+  #   endpoint: "https://your-embedding-host.example/v1/embeddings"
+  #   api_key:  ""
+  #   model:    "your-embedding-model"
+  #   dim:      1024
+
+# LLM is optional. Uncomment and fill it only for observer/E1/topic synthesis.
+# llm:
+#   provider: "openai-compatible-provider-name"
+#   base_url: "https://your-llm-host.example/v1"
+#   api_key:  ""
+#   model:    "your-chat-model"
+
+  # Rerank is optional. Uncomment and fill it only when a rerank endpoint exists.
+  # rerank:
+  #   endpoint: "https://your-rerank-host.example/v1/rerank"
+  #   api_key:  ""
+  #   model:    "your-rerank-model"

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "v3-core"
+version = "4.0.0"
+description = "v3 memory core engine — PostgreSQL/pgvector source ingest and explicit-memory storage"
+requires-python = ">=3.10"
+license = {text = "AGPL-3.0-or-later"}
+authors = [{name = "yuzi"}]
+dependencies = [
+    "pyyaml",
+    "numpy",
+    "requests",
+    "psycopg2-binary",
+    "pgvector",
+    "jieba",
+    "openai",
+    # 2026-09-04 P1.3.1 deadline-closure: Aho-Corasick multi-pattern string
+    # scan replaces the rows×terms nested-substring scan inside
+    # _qa_snapshot_lookup for long-query prefetch.  Required at runtime
+    # to meet the 6.5/8s SLO; the lookup keeps a nested fallback for
+    # environments where the C extension is unavailable, but the
+    # fallback does not meet the long-query SLO.
+    "pyahocorasick>=2.3.0",
+]
+
+[project.optional-dependencies]
+cloud = ["requests", "psycopg2-binary", "pgvector"]
+embed-local = ["sentence-transformers", "onnxruntime"]
+llm-local = ["ollama"]
+full = ["requests", "psycopg2-binary", "pgvector", "sentence-transformers", "onnxruntime", "ollama"]
+
+[project.scripts]
+v3-core = "v3core.__main__:main"
+
+[tool.setuptools]
+packages = {find = {where = ["src"]}}
+
+[tool.setuptools.package-data]
+"v3core" = ["*.json", "*.md", "*.yaml"]
+
+[tool.pytest.ini_options]
+# Isolated PG integration tests live outside this default unit collection root.
+testpaths = ["tests"]

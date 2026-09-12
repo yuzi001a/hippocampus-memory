@@ -1,0 +1,62 @@
+# Release-time gitignore for the public alpha export.
+#
+# This template is dropped into the export output by tools/build_public_export.py
+# to give consumers a sane default. The builder itself enforces a stricter
+# allowlist at copy time; this file is the safety net for downstream edits.
+#
+# Keep this conservative: anything that smells like runtime state, secrets,
+# generated artifacts, or local-only metadata should be ignored here even if
+# it sneaks into the allowlist via a future edit.
+
+# VCS metadata
+# (Note: .gitignore itself is intentionally NOT ignored — it must be tracked
+# so downstream consumers receive the safety net on clone.)
+.git/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local state / runtime databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+
+# Backups / dumps / logs
+*.bak
+*.bak-*
+*.log
+*.tmp
+*.swp
+*.pkl
+
+# Credentials / secrets
+.env
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.*
+secrets.*
+
+# Workspace-only directories
+backups/
+archive/
+sim_data/
+experiments/
+audit_reports/
+design/
+scripts/
+
+# Data / dumps specific to this codebase
+compression_results/
+delta_run_state.json
+snapshot_*/

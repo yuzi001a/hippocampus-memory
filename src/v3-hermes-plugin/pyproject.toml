@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "v3-hermes-plugin"
+version = "4.0.0"
+description = "Hermes adapter for v3-core — 13 host tools plus recall and ingest hooks"
+requires-python = ">=3.10"
+license = {text = "AGPL-3.0-or-later"}
+authors = [{name = "yuzi"}]
+dependencies = [
+    "v3-core>=4.0.0",
+    "requests",
+    "pyyaml",
+]
+
+[tool.setuptools]
+packages = {find = {where = ["src"]}}

@@ -1,0 +1,702 @@
+{
+  "generated_at_utc": "2026-09-12T18:51:06.577025+00:00",
+  "source_root": "<reviewed-source-tree>",
+  "output_root": "<local-public-export>",
+  "file_count": 113,
+  "files": [
+    {
+      "path": "CHANGELOG.md",
+      "size": 8936,
+      "glob": "CHANGELOG.md"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "size": 4955,
+      "glob": "CONTRIBUTING.md"
+    },
+    {
+      "path": "docs/ARCHITECTURE-OVERVIEW.md",
+      "size": 10719,
+      "glob": "docs/ARCHITECTURE-OVERVIEW.md"
+    },
+    {
+      "path": "docs/BACKUP-RESTORE.md",
+      "size": 13085,
+      "glob": "docs/BACKUP-RESTORE.md"
+    },
+    {
+      "path": "docs/CONFIGURATION.md",
+      "size": 10749,
+      "glob": "docs/CONFIGURATION.md"
+    },
+    {
+      "path": "docs/INSTALL.md",
+      "size": 12037,
+      "glob": "docs/INSTALL.md"
+    },
+    {
+      "path": "docs/KNOWN-LIMITATIONS.md",
+      "size": 13570,
+      "glob": "docs/KNOWN-LIMITATIONS.md"
+    },
+    {
+      "path": "docs/PRIVACY-DATA-FLOW.md",
+      "size": 9209,
+      "glob": "docs/PRIVACY-DATA-FLOW.md"
+    },
+    {
+      "path": "docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md",
+      "size": 18402,
+      "glob": "docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md"
+    },
+    {
+      "path": "docs/RELEASE-CHECKLIST.md",
+      "size": 9608,
+      "glob": "docs/RELEASE-CHECKLIST.md"
+    },
+    {
+      "path": "examples/.env.example",
+      "size": 1107,
+      "glob": "examples/.env.example"
+    },
+    {
+      "path": "examples/config.example.yaml",
+      "size": 2071,
+      "glob": "examples/config.example.yaml"
+    },
+    {
+      "path": "LICENSE",
+      "size": 35184,
+      "glob": "LICENSE"
+    },
+    {
+      "path": "README.md",
+      "size": 14367,
+      "glob": "README.md"
+    },
+    {
+      "path": "SECURITY.md",
+      "size": 5268,
+      "glob": "SECURITY.md"
+    },
+    {
+      "path": "src/v3-core/LICENSE",
+      "size": 35184,
+      "glob": "src/v3-core/LICENSE"
+    },
+    {
+      "path": "src/v3-core/pyproject.toml",
+      "size": 1510,
+      "glob": "src/v3-core/pyproject.toml"
+    },
+    {
+      "path": "src/v3-core/README.md",
+      "size": 8185,
+      "glob": "src/v3-core/README.md"
+    },
+    {
+      "path": "src/v3-core/schema/alpha_bootstrap.sql",
+      "size": 15797,
+      "glob": "src/v3-core/schema/*.sql"
+    },
+    {
+      "path": "src/v3-core/schema/explicit_memories.sql",
+      "size": 6188,
+      "glob": "src/v3-core/schema/*.sql"
+    },
+    {
+      "path": "src/v3-core/scripts/backup_alpha.py",
+      "size": 16985,
+      "glob": "src/v3-core/scripts/backup_alpha.py"
+    },
+    {
+      "path": "src/v3-core/scripts/bootstrap_alpha_db.py",
+      "size": 18957,
+      "glob": "src/v3-core/scripts/bootstrap_alpha_db.py"
+    },
+    {
+      "path": "src/v3-core/src/v3core/__init__.py",
+      "size": 202238,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/__main__.py",
+      "size": 10274,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/_deadline.py",
+      "size": 8073,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/_expand_query.py",
+      "size": 5196,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/active_memory_store.py",
+      "size": 29922,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/adapter_chat_md.py",
+      "size": 9062,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/adapter_hermes_state.py",
+      "size": 5245,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/adapter_md.py",
+      "size": 7409,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/adapter_trajectory.py",
+      "size": 14286,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/card_store.py",
+      "size": 33249,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/compression_trigger.py",
+      "size": 11048,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/config.py",
+      "size": 15669,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/config_model.py",
+      "size": 22478,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/daemon.py",
+      "size": 15155,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/dedup.py",
+      "size": 8303,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/dreamer.py",
+      "size": 11609,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/e1.py",
+      "size": 72617,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/embed_topics.py",
+      "size": 2685,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/embedding.py",
+      "size": 23688,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/event_adapter.py",
+      "size": 5497,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/extract.py",
+      "size": 7032,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/graph_recall.py",
+      "size": 4897,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/handbook.py",
+      "size": 4368,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/ingest.py",
+      "size": 48480,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/injector.py",
+      "size": 32062,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/j_writer.py",
+      "size": 5631,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/llm.py",
+      "size": 12209,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/llmstatus.py",
+      "size": 18039,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/mcp_server.py",
+      "size": 8182,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/migrate_to_sqlite.py",
+      "size": 9375,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/moc.py",
+      "size": 6576,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/observer.py",
+      "size": 260417,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/offload.py",
+      "size": 6624,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/pg_pool.py",
+      "size": 48098,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/pg_store.py",
+      "size": 40868,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/prefetch.py",
+      "size": 21161,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/recall_pool.py",
+      "size": 164077,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/rerank.py",
+      "size": 2864,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/runtime.py",
+      "size": 34475,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/runtime_services.py",
+      "size": 28641,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/scheduler.py",
+      "size": 13388,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/serve.py",
+      "size": 15046,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/session_context.py",
+      "size": 3272,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/session_summary.py",
+      "size": 24138,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/signals.py",
+      "size": 4342,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/sqlite_store.py",
+      "size": 22556,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tokenizer.py",
+      "size": 3201,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/__init__.py",
+      "size": 12158,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/affinity.py",
+      "size": 5920,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/api_add.py",
+      "size": 5084,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/api_delete.py",
+      "size": 13613,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/api_get.py",
+      "size": 4605,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/api_manage.py",
+      "size": 5176,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/api_update.py",
+      "size": 4216,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/dedup_tool.py",
+      "size": 1987,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/extract_tool.py",
+      "size": 2455,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/get_tool.py",
+      "size": 12272,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/handbook_tools.py",
+      "size": 4907,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/health.py",
+      "size": 28619,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/import_.py",
+      "size": 56293,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/moc_tools.py",
+      "size": 3166,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/organize.py",
+      "size": 11430,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/search.py",
+      "size": 4230,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/status.py",
+      "size": 5023,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/store.py",
+      "size": 10808,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/topic_correct.py",
+      "size": 13031,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/topic_create.py",
+      "size": 3562,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/topic_edit.py",
+      "size": 6202,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/topic_maintain_tool.py",
+      "size": 2361,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/tools/write_tool.py",
+      "size": 11363,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/topic_cluster.py",
+      "size": 24107,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/topic_fusion.py",
+      "size": 10015,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/topic_maintain.py",
+      "size": 24106,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/topic_recall.py",
+      "size": 34022,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/topic_recall_cache.py",
+      "size": 9915,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/topic_refine.py",
+      "size": 32187,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/topic_store.py",
+      "size": 39660,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/turn_schema.py",
+      "size": 5038,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/types.py",
+      "size": 6077,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/src/v3core/yin_pool.py",
+      "size": 8702,
+      "glob": "src/v3-core/src/v3core/**"
+    },
+    {
+      "path": "src/v3-core/tests/test_active_memory_boundary_contract_red.py",
+      "size": 7855,
+      "glob": "src/v3-core/tests/test_active_memory_boundary_contract_red.py"
+    },
+    {
+      "path": "src/v3-core/tests/test_active_memory_clean_boundary_red.py",
+      "size": 3452,
+      "glob": "src/v3-core/tests/test_active_memory_clean_boundary_red.py"
+    },
+    {
+      "path": "src/v3-core/tests/test_alpha_bootstrap_contract.py",
+      "size": 50890,
+      "glob": "src/v3-core/tests/test_alpha_bootstrap_contract.py"
+    },
+    {
+      "path": "src/v3-core/tests/test_config_pg_password_env.py",
+      "size": 15692,
+      "glob": "src/v3-core/tests/test_config_pg_password_env.py"
+    },
+    {
+      "path": "src/v3-core/tests/test_g4_embed_empty_vs_partial_red.py",
+      "size": 10244,
+      "glob": "src/v3-core/tests/test_g4_embed_empty_vs_partial_red.py"
+    },
+    {
+      "path": "src/v3-hermes-plugin/LICENSE",
+      "size": 35184,
+      "glob": "src/v3-hermes-plugin/LICENSE"
+    },
+    {
+      "path": "src/v3-hermes-plugin/plugin.yaml",
+      "size": 985,
+      "glob": "src/v3-hermes-plugin/plugin.yaml"
+    },
+    {
+      "path": "src/v3-hermes-plugin/pyproject.toml",
+      "size": 480,
+      "glob": "src/v3-hermes-plugin/pyproject.toml"
+    },
+    {
+      "path": "src/v3-hermes-plugin/README.md",
+      "size": 6950,
+      "glob": "src/v3-hermes-plugin/README.md"
+    },
+    {
+      "path": "src/v3-hermes-plugin/src/v3hermes/__init__.py",
+      "size": 45141,
+      "glob": "src/v3-hermes-plugin/src/v3hermes/**"
+    },
+    {
+      "path": ".gitignore",
+      "size": 1186,
+      "glob": "__synthetic__"
+    }
+  ],
+  "skipped_count": 278,
+  "skipped_sample": [
+    {
+      "path": ".gitignore",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "AGENTS.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "analyze_memory.py",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "classify_memory.py",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "decisions/20260802_open_source_and_config.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "do_archive.py",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/04-roadmap.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/architecture-unified-design.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/audit-20260808-pitfalls-and-duplication.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/b-llm-observability-design.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/b-observer-health-semantics-design.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/CAPABILITY-AND-MIGRATION-MAP.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/CURRENT-CAPABILITY-INVENTORY.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/data_source_map.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/eval-dataset-design.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/eval-locomo-20260809.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/eval-report-20260808.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/graph-ablation-20260825.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/p0-observer-recovery-dryrun-20260826.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/p1-a3-a9-lifecycle-ownership-audit.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/p1-candidate-manifest.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/p1-compatibility-audit.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/p1-deployment-delta.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/p1-deployment-procedure.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    },
+    {
+      "path": "docs/p1-go-no-go-checklist.md",
+      "reason": "not in allowlist",
+      "stage": "allowlist"
+    }
+  ],
+  "skipped_total": 278
+}
