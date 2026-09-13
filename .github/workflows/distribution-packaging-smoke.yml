@@ -48,9 +48,8 @@ jobs:
       # docs/COMPARISON.md). This is the *only* host we exercise.
       HERMES_UPSTREAM_REPO: NousResearch/hermes-agent
       HERMES_UPSTREAM_REF: main
-      # Build/install scratch — every artifact and host clone lives
-      # under $RUNNER_TEMP so the runner is left clean.
-      SMOKE_ROOT: ${{ runner.temp }}/dist-smoke
+      # Build/install scratch is exported in the first step from the
+      # runner-provided RUNNER_TEMP variable.
 
     steps:
       - name: Checkout (hippocampus repo)
@@ -87,6 +86,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export SMOKE_ROOT="${RUNNER_TEMP}/dist-smoke"
           mkdir -p "${SMOKE_ROOT}"
           cd "${SMOKE_ROOT}"
           pwd
