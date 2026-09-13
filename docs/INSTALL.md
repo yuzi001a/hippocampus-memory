@@ -83,9 +83,8 @@ versions of v3-core or across different profile names is the most
 common source of "it worked yesterday" bugs.
 
 ```powershell
-py -3.11 -m venv .venv
+uv venv --python 3.11 .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -U pip wheel
 ```
 
 Confirm you're inside the venv:

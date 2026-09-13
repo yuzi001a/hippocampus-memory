@@ -146,9 +146,8 @@ uv build --wheel --sdist --out-dir .\dist\v3-hermes-plugin .\src\v3-hermes-plugi
 ### 2. 全新 venv（不要复用旧的）
 
 ```powershell
-py -3.11 -m venv .venv
+uv venv --python 3.11 .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -U pip wheel
 ```
 
 ### 3. 安装实际构建出的 wheel（非 editable、非源码树）

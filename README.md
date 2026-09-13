@@ -131,9 +131,8 @@ uv build --wheel --sdist --out-dir .\dist\v3-core .\src\v3-core
 uv build --wheel --sdist --out-dir .\dist\v3-hermes-plugin .\src\v3-hermes-plugin
 
 # 2. Fresh venv for the v3 artifacts (do not reuse an old venv)
-py -3.11 -m venv .venv
+uv venv --python 3.11 .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -U pip
 
 # 3. Install the actual built wheels — NOT editable, NOT from source tree
 uv pip install .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
