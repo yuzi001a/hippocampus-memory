@@ -1,0 +1,89 @@
+name: Alpha memory feedback
+description: Report a real long-running Hippocampus memory success, failure, or confusing recall.
+title: "[Alpha memory] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Hippocampus in a real workflow. Bad recalls, stale memories, duplicates, and confusing behavior are especially useful.
+
+        **Do not post API keys, DSNs, private repository contents, personal chat logs, or other sensitive data. Redact aggressively.**
+
+        Before reporting, please check `docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md` and `docs/KNOWN-LIMITATIONS.md`. Experimental behavior is still worth reporting; just label it as such.
+
+  - type: input
+    id: hippocampus_version
+    attributes:
+      label: Hippocampus version / commit
+      description: Release tag or commit SHA if known.
+      placeholder: v0.1-alpha / abc1234
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Host / agent environment
+      description: For example Hermes Agent version, OS, Python version.
+      placeholder: Hermes ..., Windows 11, Python 3.11
+    validations:
+      required: true
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Real scenario
+      description: What were you doing, and what past information should have mattered?
+      placeholder: Describe the project/task and the relevant earlier decision or experience.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect the agent to remember or ignore?
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: What actually happened?
+      description: Include whether the memory was missing, stale, duplicated, irrelevant, or incorrectly treated as current.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Closest category
+      options:
+        - Missing recall
+        - Stale / superseded memory returned as current
+        - Irrelevant recall / context pollution
+        - Duplicate memory
+        - Source / provenance problem
+        - Restart / durability problem
+        - Installation / configuration friction
+        - Experimental Observer / E1 behavior
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction or sequence
+      description: Redacted steps, prompts, or actions that reproduce the behavior if available.
+
+  - type: textarea
+    id: providers
+    attributes:
+      label: Model / provider setup
+      description: LLM, embedding, rerank, or other provider details if they materially affect the case. Do not include credentials.
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Logs, screenshots, or observations after redaction.
