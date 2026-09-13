@@ -16,6 +16,13 @@ Hippocampus 是 V3 memory runtime 的公开产品名。仓库中的 Python 包�
 
 > **版本定位：** v0.1-alpha 是技术预览版，不是稳定生产版本。本文把“已经在公开 Alpha 验收中验证过的路径”和“代码中存在、但仍处于实验或未完成验收的路径”分开写。
 
+### 快速入口
+
+- **想知道为什么做这个项目：** [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md)
+- **正在比较不同 Agent Memory 方案：** [`docs/COMPARISON.zh-CN.md`](docs/COMPARISON.zh-CN.md)
+- **愿意拿真实项目跑 3～7 天：** [`docs/ALPHA-TESTING.zh-CN.md`](docs/ALPHA-TESTING.zh-CN.md) + [Public Alpha Issue #1](https://github.com/yuzi001a/hippocampus-memory/issues/1)
+- **只想确认当前到底支持什么：** [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
+
 ## 这是什么
 
 Hippocampus 把聊天式 Agent 的对话来源和显式记忆保存到可恢复的持久化存储中，再按查询寻找相关内容。当前公开版本由两个包组成：
@@ -294,7 +301,7 @@ Windows 下公开 Alpha 要求 `basePath` 使用绝对路径，不能依赖引�
 
 ### 发现了 bug，应该在哪里反馈？
 
-一般问题和功能建议请使用 [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)。不要在公开 issue 中粘贴 credential、DSN、私有数据或完整配置；安全问题先阅读 [`SECURITY.md`](SECURITY.md)。
+一般问题和功能建议请使用 [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)。记忆质量相关问题建议使用仓库里的 **Alpha memory feedback** 模板。不要在公开 issue 中粘贴 credential、DSN、私有数据或完整配置；安全问题先阅读 [`SECURITY.md`](SECURITY.md)。
 
 ## Documentation map
 
@@ -303,6 +310,8 @@ Windows 下公开 Alpha 要求 `basePath` 使用绝对路径，不能依赖引�
 | 文档 | 用途 |
 |---|---|
 | [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md) | 项目的思想演变：从“让她记住我”、Soul，到“生成即是存在”、记忆治理和连续性问题。 |
+| [`docs/COMPARISON.zh-CN.md`](docs/COMPARISON.zh-CN.md) | 中文方案对比：Hermes 内置记忆、历史搜索、Mem0、Hindsight 与 Hippocampus 分别适合什么。 |
+| [`docs/ALPHA-TESTING.zh-CN.md`](docs/ALPHA-TESTING.zh-CN.md) | 中文 Public Alpha 实测指南：如何跑 3～7 天真实项目并提交有价值的失败案例。 |
 | [`docs/INSTALL.md`](docs/INSTALL.md) | Windows 安装、disposable pgvector、本地源码安装和 bootstrap。 |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | `config.yaml`、环境变量、provider 默认行为和 fail-closed 规则。 |
 | [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | PostgreSQL dump / restore 以及恢复后检查。 |
@@ -316,6 +325,7 @@ Windows 下公开 Alpha 要求 `basePath` 使用绝对路径，不能依赖引�
 
 ## 反馈
 
+- Public Alpha 实测：[`docs/ALPHA-TESTING.zh-CN.md`](docs/ALPHA-TESTING.zh-CN.md) + [Issue #1](https://github.com/yuzi001a/hippocampus-memory/issues/1)
 - Bug 和功能建议：[GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
 - 安全问题：先阅读 [`SECURITY.md`](SECURITY.md)，不要公开提交 credential、DSN 或私有数据
 
