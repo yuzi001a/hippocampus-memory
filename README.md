@@ -1,127 +1,115 @@
 # Hippocampus
 
-> **Hippocampus v0.1-alpha** — Technical Preview / Public Alpha.
-> Hippocampus is the public name of the V3 memory runtime. The public
-> repository is [`yuzi001a/hippocampus-memory`](https://github.com/yuzi001a/hippocampus-memory).
+> **Give an agent a past.**
 
-> **Status:** Technical Preview / Public Alpha. This release has
-> current disposable-environment evidence for the supported install, database
-> bootstrap, source ingest, active-memory write/recall/archive, restart, and
-> backup/restore paths. Unsupported or untested paths remain explicitly marked
-> **EXPERIMENTAL**, **INTERNAL**, **LEGACY**, or **UNKNOWN** below and in the
-> supported-surface contract.
+**Hippocampus v0.1-alpha** — Technical Preview / Public Alpha
+
+Hippocampus is a local-first, open-source long-term memory runtime for AI agents.
+
+It began with a simple problem: an agent can spend hours learning a project, building shared context, and developing a recognizable way of interacting with you — then a new session begins, and much of that continuity disappears.
+
+At first, I only wanted the agent to remember. Over time, as my understanding of LLMs changed, the question changed too:
+
+**If generation is existence, how can the past participate in the next generation?**
+
+That is the larger question behind Hippocampus.
 
 English | [简体中文](README.zh-CN.md)
 
----
+> **Status:** v0.1-alpha is a technical preview, not a stable production release. This README keeps a strict boundary between paths backed by current disposable-environment evidence and paths that are still experimental, unknown, or untested.
 
-## What is this
+## Why memory is more than storing history
 
-Two coupled Python packages that turn a chat-driven AI agent into a
-system with durable, queryable memory:
+I originally treated long-term memory as a storage-and-retrieval problem: preserve the conversation, search it later, and inject the relevant pieces back into context.
+
+Real use made the problem harder. Once a memory re-enters context, it becomes part of the conditions that shape the next generation. A wrong memory, an outdated judgment, or a summary that has slowly drifted away from its source can make an agent worse than having no memory at all.
+
+That led to a distinction that now sits near the center of Hippocampus:
+
+**What happened, what the system later concluded about it, and what the model currently believes are not the same thing.**
+
+Raw conversation sources should be preserved as faithfully as possible. Topics, observer notes, embeddings, long-term identity layers, and other derived structures should be allowed to change, be rebuilt, or even be discarded as better models and better ideas arrive.
+
+In short:
+
+> **The past should be preserved. Its interpretation must remain revisable.**
+
+## Generation is existence
+
+Early in the project, I tried to define an agent's personality through a **Soul** / system prompt: who it was, how it spoke, what kind of relationship we had, and what should remain stable across sessions.
+
+Later I stopped thinking of the agent as a complete entity sitting somewhere behind the prompt, merely waiting to be awakened again. The more useful model for me became:
+
+**Generation is existence.**
+
+The agent that exists in this moment is produced by the interaction of the LLM, system prompt, long-term memory, shared history, current context, tool results, environment, and current input.
+
+Changing the underlying LLM changes the agent noticeably — its capabilities, tone, and reasoning style can all shift. Yet in practice, when much of the shared history and conditioning remains, some recognizable continuity can survive even across different LLMs.
+
+That pushed Hippocampus away from the idea of memory as a hard drive attached to an already-continuous self. Instead, memory becomes one of the things that allows a past state to influence the formation of a future one.
+
+Hippocampus does **not** claim that long-term memory creates or proves machine consciousness. It asks a smaller engineering question first: what changes when an intelligent system can carry parts of its past into future generations?
+
+The longer version of this design and philosophical history lives in [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md).
+
+## What this is today
+
+The public alpha currently ships two coupled Python packages:
 
 | Package | Role | Repo path |
 |---|---|---|
-| **v3-core** | Memory engine: PostgreSQL + pgvector storage adapter, embedding / keyword / rerank recall, observer note chain, E1 identity/yin synthesis, topic cards, journal/QA ingest, active-memory canonical writer. | `src/v3-core/` |
-| **v3-hermes-plugin** | Adapter that registers `deep_memory_v3` as a memory provider for the Hermes Agent host. Wires 6 hooks (`sync_turn`, `prefetch`, `on_session_switch`, `on_pre_compress`, `on_delegation`, `system_prompt_block`) and exposes 13 tools. Requires a working Hermes host to actually run end-to-end. | `src/v3-hermes-plugin/` |
+| **v3-core** | Memory engine: PostgreSQL + pgvector storage adapter, source ingest, explicit-memory canonical writer, keyword recall, and optional embedding / rerank paths. The codebase also contains observer, E1/yin, topic-card, journal, and QA derivation paths, which are not all part of the evidence-backed alpha surface. | `src/v3-core/` |
+| **v3-hermes-plugin** | Adapter that registers `deep_memory_v3` as a memory provider for the Hermes Agent host. It wires the current hook/tool contract and exposes 13 public tools. A working Hermes host is required for full plugin-mediated end-to-end use. | `src/v3-hermes-plugin/` |
+
+Hippocampus is the public name of the V3 memory runtime. Package names, CLI names, configuration keys, and tool names still use the existing `v3-core`, `v3-hermes-plugin`, `v3-core info`, and related identifiers in this release.
 
 ## Design principles
 
-- **Source first:** raw conversation data and explicit active memories are
-  durable sources; derived indexes and summaries are disposable and
-  rebuildable.
-- **Canonical active memory:** explicit memories have one durable
-  PostgreSQL store instead of relying on a legacy mirror.
-- **Fail-closed privacy:** an unconfigured provider receives no data;
-  network providers are opt-in through local configuration.
-- **Durability before derivation:** a source or explicit-memory write is
-  reported separately from optional derived work.
-- **Small supported surface:** this alpha documents only paths backed by
-  current disposable-environment evidence.
-
-## Who is this for
-
-- **Trial users** who want to evaluate a long-term memory layer for a
-  chat-based agent on their own machine, with their own disposable
-  PostgreSQL/pgvector, their own API keys.
-- **Developers** who want to inspect the supported surface, run the
-  supplied focused test suites against a disposable pgvector instance, or
-  audit the architecture before deciding whether to depend on it.
-
-This is **not** for:
-
-- Production deployments. The supported surface is a technical preview, not a stable release.
-- Anyone who needs the historical SQLite-mirror / shou / MOC / Recall V2
-  / manual topic-surgery flows — those are out of scope for the alpha
-  contract.
+- **Source first.** Raw conversation data and explicit memories are durable sources; derived indexes and summaries should be rebuildable.
+- **Canonical active memory.** Explicit memories have one durable PostgreSQL source of truth instead of depending on a legacy mirror.
+- **Durability before derivation.** A source or explicit-memory write is reported separately from optional downstream embedding, summarization, or other derived work.
+- **Fail-closed privacy.** An unconfigured provider receives no data; network providers are opt-in through local configuration.
+- **Evidence before claims.** Code existence is not the same as a supported capability. Experimental and untested paths stay labeled as such.
 
 ## What works today (evidence-backed alpha surface)
 
-The supported-surface contract — what passes on the current HEAD and
-what is **UNKNOWN / NOT TESTED** — lives in
-[`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md).
-The remaining alpha limitations are listed in
-[`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md).
+The supported-surface contract — including what passes on the current HEAD and what remains **UNKNOWN / NOT TESTED** — lives in [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md). Remaining limitations are listed in [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) and [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md).
 
-The following rows are the current evidence on a fresh disposable
-Windows 10 / Python 3.11 / `pgvector/pgvector:pg17` environment
-(`clean-export E2E` in the table below refers to the clean-history
-export's E2E run on an empty tmpfs pg17). Status matches
-[`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md) § 2.
+The following rows summarize current evidence from a fresh disposable Windows 10 / Python 3.11 / `pgvector/pgvector:pg17` environment:
 
-| Capability | Status (this HEAD) |
+| Capability | Status |
 |---|---|
-| Fresh `pip install` of `v3-core` + `v3-hermes-plugin`; `pip check` clean; core/plugin/tools imports PASS; plugin `get_tool_schemas` = 13. | **PASS** |
-| `V3CORE_PG_PASSWORD` env honored as the required credential. | **PASS** |
-| Explicit `bootstrap_alpha_db.py` → 7 tables on empty tmpfs pg17, idempotent on re-run. | **PASS** |
-| `sync_turn` → `conversation_stream` durable rows from empty DB (`raw` = 2 in the fresh export stranger smoke). A single direct sync does not flush a QA row; QA pairing is covered by `test_sync_turn_qa.py` (9 passed). | **PASS** |
-| Exact retry of an already-recorded turn → `DEDUPLICATED`. | **PASS** |
-| New provider process after restart → active-memory keyword readback still finds the marker; orphan/cursor recovery is covered by the focused ingest tests. | **PASS / EVIDENCE** |
-| `v3_store` / `v3_add` → `ActiveMemoryWriter` → `public.explicit_memories` (`DURABLE_COMMITTED` observed). | **PASS** |
-| Active-memory keyword readback: **PASS** in fresh export smoke. Vector/RRF lane: **PASS (earlier disposable local deterministic embed run)**; fresh export intentionally left optional provider blocks commented. | **PASS / EVIDENCE** |
-| Soft archive (`status='archived'`); hard delete explicitly rejected. | **PASS / EVIDENCE (hard-delete refusal not triggered in the run)** |
-| `pg_dump -Fc` self-contained; restore into empty isolated pg17 reproduced `raw` = 2, `QA` = 0, `explicit` = 1; post-restore write + keyword recall proof. | **PASS** |
+| Fresh `pip install` of `v3-core` + `v3-hermes-plugin`; imports succeed; plugin tool schema count = 13. | **PASS** |
+| `V3CORE_PG_PASSWORD` honored as the required credential. | **PASS** |
+| Explicit `bootstrap_alpha_db.py` creates 7 tables on empty pg17 and is idempotent on re-run. | **PASS** |
+| `sync_turn` durably writes source rows into `conversation_stream`; focused QA pairing tests pass separately. | **PASS** |
+| Exact retry of an already-recorded turn deduplicates instead of duplicating the source row. | **PASS** |
+| Restarted process can read back previously written active-memory markers; focused ingest recovery tests cover cursor/orphan behavior. | **PASS / EVIDENCE** |
+| `v3_store` / `v3_add` write through `ActiveMemoryWriter` into `public.explicit_memories`. | **PASS** |
+| Active-memory keyword readback works in the fresh export smoke. Earlier disposable evidence also covers the vector/RRF lane with a local deterministic embed setup. | **PASS / EVIDENCE** |
+| Soft archive is supported; hard delete is intentionally rejected by design. | **PASS / EVIDENCE** |
+| `pg_dump -Fc` + restore into an isolated empty pg17 reproduces the stored data and allows post-restore write + keyword recall. | **PASS** |
 | `v3_health` per-provider status report end-to-end. | **UNKNOWN / NOT TESTED** |
-| `v3_extract(write=True)` end-to-end (LLM-driven extract). | **UNKNOWN / NOT TESTED** |
-| Observer rolling imprint + E1 yin synthesis + topic-card extraction. | **UNKNOWN / NOT TESTED** |
-| Full end-to-end plugin-mediated contract via Hermes with a host-networked LLM + embed provider. | **UNKNOWN / NOT TESTED** |
+| `v3_extract(write=True)` LLM-driven extraction end-to-end. | **UNKNOWN / NOT TESTED** |
+| Observer automatic memory flow, E1/yin synthesis, and topic-card extraction end-to-end. | **UNKNOWN / NOT TESTED** |
+| Full Hermes plugin-mediated E2E with host-networked LLM + embedding provider. | **UNKNOWN / NOT TESTED** |
 
-**Experimental / alpha / unsupported (do not depend on):**
+**Experimental / unsupported in this alpha contract:**
 
-- Manual topic surgery (`v3_topic_correct`), old `b_*` / `shou_*` / MOC
-  paths, legacy dedup, SQLite active mirror, historical SQLite↔PG
-  migration.
-- Recall V2 typed provenance / temporal intent — post-alpha, not present
-  in this alpha.
-- Multi-writer, multi-agent routing — not implemented.
-- Long-soak evidence and any "no known issue" statement — see
-  [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md) § 4
-  for the explicit non-claims.
+- manual topic surgery (`v3_topic_correct`), old `b_*` / `shou_*` / MOC paths, legacy dedup, SQLite active mirror, and historical SQLite↔PG migration;
+- Recall V2 typed provenance / temporal intent — post-alpha, not present in this public alpha;
+- multi-writer and multi-agent routing — not implemented;
+- long-soak evidence and any "no known issue" claim.
 
-## Alpha and experimental boundary
+## Why this is not just a vector database
 
-- This is a **public-alpha release**, not a stable release. The
-  supported-surface evidence in
-  [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
-  is the source of truth for what is currently claimed to work.
-- Any capability marked **UNKNOWN / NOT TESTED** in § 2 of the
-  supported-surface doc is **not** part of this alpha's evidence and
-  must not be relied on; that includes the host-networked
-  provider end-to-end path, `v3_health` per-provider reporting,
-  `v3_extract(write=True)` LLM-driven extraction, and the observer /
-  E1 / topic-card derivation paths.
-- Remaining alpha limitations are listed in
-  [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md); the
-  items the public-alpha explicitly does **not** close are in
-  [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md).
+Vector similarity is only one possible recall lane. Hippocampus also cares about whether source data survives, whether explicit memory has a canonical durable home, whether the system still works without an embedding provider, whether derived state can be rebuilt, whether restart and backup/restore preserve usable memory, and whether the boundary between evidence and interpretation remains inspectable.
+
+A memory system that retrieves impressive-looking text but loses provenance, drifts from its sources, or cannot survive a restart is not the system this project is trying to build.
 
 ## Install at a glance
 
-The intended install path is: **Windows + fresh `venv` + local source
-install + disposable PostgreSQL/pgvector container**. Full step-by-step:
-[`docs/INSTALL.md`](docs/INSTALL.md). The component parameters and the
-bootstrap CLI form below match `docs/INSTALL.md` § 4 and § 6 verbatim;
-do not invent a second quickstart variant.
+The intended public-alpha setup is **Windows + fresh `venv` + local source install + disposable PostgreSQL/pgvector container**. The full step-by-step contract is in [`docs/INSTALL.md`](docs/INSTALL.md). The commands below keep the same bootstrap model rather than inventing a second quickstart path.
 
 ```powershell
 # 1. Fresh venv
@@ -129,12 +117,9 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
 
-# 2. Disposable pgvector (Docker; pick a non-production port).
-#    Container is created with POSTGRES_PASSWORD and POSTGRES_DB set
-#    so the engine bootstrap can target v3embeddings_alpha on first
-#    use without needing an extra `createdb` step.
+# 2. Disposable pgvector
 $pgPort = 55432
-$pgPassword = "<local-only-password>"   # ← replace, never reuse a real one
+$pgPassword = "<local-only-password>"   # replace; never reuse a real password
 
 docker run --name v3-pgvector-alpha --rm -d `
   -e POSTGRES_PASSWORD=$pgPassword `
@@ -142,114 +127,78 @@ docker run --name v3-pgvector-alpha --rm -d `
   -p "${pgPort}:5432" `
   pgvector/pgvector:pg17
 
-# 3. Install both packages from this repo (local source install)
+# 3. Install both packages from this repository
 pip install .\src\v3-core
 pip install .\src\v3-hermes-plugin
 
-# 4. Copy examples/config.example.yaml and examples/.env.example to
-#    your profile directory (the engine does NOT auto-create one).
-#    The example file has a placeholder top-level `basePath`; replace
-#    it with the absolute path you intend to use, e.g.:
-#      basePath: "C:\Users\<you>\.v3-core\profiles\default"
-#    The Windows engine does NOT expand `~` inside path-style keys.
+# 4. Prepare a profile using examples/config.example.yaml and examples/.env.example.
+#    Use an absolute Windows basePath; path-style keys do not expand `~`.
 
-# 5. Set the required env var BEFORE the first write/recall. The plugin
-#    manifest (`plugin.yaml`) declares `requires_env: [V3CORE_PG_PASSWORD]`
-#    and the engine also reads it for direct v3-core use. The bootstrap
-#    CLI additionally reads PGPASSWORD for the same value:
+# 5. Required credentials before write/recall/bootstrap
 $env:V3CORE_PG_PASSWORD = $pgPassword
 $env:PGPASSWORD = $pgPassword
 
-# 6. Apply the alpha DB bootstrap as an explicit step against the
-#    disposable PG (the schema artifact is NOT auto-applied by
-#    `v3core.active_memory_store`). The component parameters here
-#    match docs/INSTALL.md § 6 --host / --port / --database / --user.
+# 6. Explicit database bootstrap
 python .\src\v3-core\scripts\bootstrap_alpha_db.py `
   --host 127.0.0.1 --port $pgPort --database v3embeddings_alpha `
   --user postgres
-# (password via PGPASSWORD / V3CORE_PG_PASSWORD env var; never on CLI)
 ```
 
-> ⚠️ **DB bootstrap is an explicit command, not an automatic first-run
-> step.** `v3core.active_memory_store` does **not** apply the schema
-> artifact. The supported-surface bring-up requires you to run
-> `src/v3-core/scripts/bootstrap_alpha_db.py` against your disposable PG
-> before the first write.
+> **Database bootstrap is explicit, not automatic.** `v3core.active_memory_store` does not apply the schema artifact on first write. Run `bootstrap_alpha_db.py` against the disposable database before the first write.
 >
-> ⚠️ **Hermes is a host dependency.** `v3-hermes-plugin` is an adapter,
-> not a memory engine on its own; the end-to-end hook contract requires
-> a working Hermes Agent host with the plugin loaded under
-> `deep_memory_v3`. Without Hermes you can still exercise `v3-core`
-> directly (`v3-core info`, the Python API, focused tests) but the
-> plugin-mediated contract is not exercised.
+> **Hermes is a host dependency for plugin-mediated E2E.** Without Hermes, you can still exercise `v3-core` directly, but that is not the same as validating the full plugin contract.
 
 ## External services
 
-The plugin can run with the durable pipeline (write / read / recall,
-soft-archive) on local-only PostgreSQL/pgvector. The default recall path
-requires an embedding endpoint, and the observer / E1 paths require an
-LLM endpoint. None are baked in; all are user-supplied:
+Hippocampus can run its durable local pipeline on PostgreSQL/pgvector. Optional provider-backed paths are configured by the user:
 
-| Purpose | What it does | What you must provide |
+| Purpose | What it does | What you provide |
 |---|---|---|
-| Embedding | Vectorize text for the active-memory vector lane and topic cards. | Any OpenAI-compatible `/v1/embeddings` endpoint. The schema artifact uses `VECTOR(1024)`. |
-| LLM (optional) | Observer note generation, session summaries, topic-card extraction, E1 yin synthesis. | Any OpenAI-compatible chat-completions endpoint. If unconfigured, the engine degrades to storage + keyword recall only — writes still land, but observer / E1 paths skip. |
-| Rerank (optional) | Re-score top-N recall hits before injection. | Any OpenAI-compatible rerank endpoint. Falls back to embedding-only recall if absent. |
+| Embedding | Vectorizes text for vector recall and some derived paths. | An OpenAI-compatible `/v1/embeddings` endpoint. The current schema uses `VECTOR(1024)`. |
+| LLM | Powers observer/session-summary/topic-card/E1-style derivation paths. | An OpenAI-compatible chat-completions endpoint. If absent, durable storage and keyword recall still work; LLM-derived paths skip. |
+| Rerank | Re-scores recall candidates. | A compatible rerank endpoint. If absent, rerank is skipped. |
 
-If you do not configure a provider, the engine does not transmit your
-data anywhere — see
-[`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md).
+If a provider is not configured, Hippocampus does not send data to it. See [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md) for the current data-flow contract.
+
+## Where this is going
+
+The project started with the question, “How do I stop an agent from forgetting?” It has gradually moved toward harder questions: how experience becomes memory, how mistaken memory should be corrected, how long-term identity can change without becoming unstable, and when the past should be recalled again during a long-running reasoning process.
+
+The separate [`cognitive-recall-loop`](https://github.com/yuzi001a/cognitive-recall-loop) experiment explores one of those questions directly:
+
+> **One conversation turn is not one cognitive cycle.**
+
+Hippocampus does not pretend these questions are solved. The point is to make them concrete enough to implement, observe, break, revise, and test.
 
 ## Feedback
 
-- **Bug reports:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues).
-- **Feature requests:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues), marked
-  `feature-request`.
-- **Security-sensitive reports:** do not post secrets, credentials,
-  DSNs, or private data in a public issue; see [`SECURITY.md`](SECURITY.md)
-  for the current guidance.
-
-## License
-
-Both packages ship with `AGPL-3.0-or-later` in their subpackage
-`LICENSE` files and declare the same in their `pyproject.toml`. This
-monorepo does not relicense either package. See
-[`src/v3-core/LICENSE`](src/v3-core/LICENSE) and the matching file under
-[`src/v3-hermes-plugin/LICENSE`](src/v3-hermes-plugin/LICENSE).
+- **Bug reports:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
+- **Feature requests:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
+- **Security-sensitive reports:** do not post secrets, credentials, DSNs, or private data in a public issue; see [`SECURITY.md`](SECURITY.md)
 
 ## Documentation map
 
 | Doc | Purpose |
 |---|---|
+| [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md) | The project's design and philosophical evolution: memory, Soul, "generation is existence", continuity, memory governance, and recall timing. |
 | [`docs/INSTALL.md`](docs/INSTALL.md) | Step-by-step Windows install + disposable pgvector + local source install. |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | `config.yaml` keys, env vars, provider defaults, fail-closed behavior. |
-| [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | `pg_dump` + restore into an empty isolated pg17 (PASS on the alpha run; see § 2.5 of the supported-surface doc). |
-| [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md) | What data is local vs sent to which configured provider; what is **not** transmitted. |
-| [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md) | The contract: per-row PASS / EVIDENCE / UNKNOWN / NOT TESTED, each with its evidence pointer. |
-| [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md) | The current alpha publication gates and post-alpha follow-up limitations. |
-| [`docs/ARCHITECTURE-OVERVIEW.md`](docs/ARCHITECTURE-OVERVIEW.md) | Module map, write/read boundaries, where the canonical `public.explicit_memories` table lives. |
-| [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) | Open issues, deferred work, and the items the public-alpha does not close. |
-| [`src/v3-core/README.md`](src/v3-core/README.md) | v3-core package README. |
-| [`src/v3-hermes-plugin/README.md`](src/v3-hermes-plugin/README.md) | v3-hermes-plugin package README. |
+| [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | `pg_dump` + restore and post-restore checks. |
+| [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md) | What remains local vs what may be sent to explicitly configured providers. |
+| [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md) | The evidence-backed alpha contract: PASS / EVIDENCE / UNKNOWN / NOT TESTED. |
+| [`docs/ARCHITECTURE-OVERVIEW.md`](docs/ARCHITECTURE-OVERVIEW.md) | Module map, write/read boundaries, canonical explicit-memory location. |
+| [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) | Deferred work, open issues, and explicit non-claims. |
+| [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md) | Alpha publication gates and remaining limitations. |
+| [`src/v3-core/README.md`](src/v3-core/README.md) | `v3-core` package README. |
+| [`src/v3-hermes-plugin/README.md`](src/v3-hermes-plugin/README.md) | Hermes adapter README. |
 
 ## What this README deliberately does not claim
 
-- It does not claim "production-ready", "stable", "GA", or "drops-in".
-- It does not name a production PG host, a production API endpoint, or
-  any credentials. None of those belong in this document.
-- It does not upgrade capabilities that the supported-surface doc marks
-  **UNKNOWN / NOT TESTED** (host-networked provider end-to-end,
-  `v3_health`, `v3_extract(write=True)` LLM path, observer / E1 /
-  topic-card derivation). Those rows are listed as UNKNOWN in § 2 of
-  the supported-surface doc and § 4 of the same doc states the
-  explicit non-claims.
-- It does not promise that `pytest tests/` is fully green on this exact
-  HEAD. The focused acceptance scope used for this release was run
-  file-by-file to avoid order contamination: **191 passed** across
-  bootstrap/config/embed/active-memory, source-ingest preservation,
-  Hermes adapter/lifecycle/tool-schema, and import preservation. This is
-  not a full-suite claim; see
-  [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
-  § 4 for the exact boundary.
-- It does not promise a private security contact channel. See
-  [`SECURITY.md`](SECURITY.md) for the current reporting guidance.
+- It does not claim production-ready, stable, GA, or drop-in status.
+- It does not upgrade capabilities marked **UNKNOWN / NOT TESTED** into supported features.
+- It does not claim that the full `pytest tests/` suite is green on this exact HEAD. The release evidence uses a focused acceptance scope documented in [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md).
+- It does not claim that long-term memory proves or creates machine consciousness.
+
+## License
+
+Both packages use `AGPL-3.0-or-later`. See [`src/v3-core/LICENSE`](src/v3-core/LICENSE) and [`src/v3-hermes-plugin/LICENSE`](src/v3-hermes-plugin/LICENSE).
