@@ -18,6 +18,13 @@ English | [简体中文](README.zh-CN.md)
 
 > **Status:** v0.1-alpha is a technical preview, not a stable production release. This README keeps a strict boundary between paths backed by current disposable-environment evidence and paths that are still experimental, unknown, or untested.
 
+### Start here
+
+- **Want to understand the idea?** Read [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md).
+- **Choosing between memory approaches?** Read [`docs/COMPARISON.md`](docs/COMPARISON.md).
+- **Want to test the alpha on a real project?** Follow [`docs/ALPHA-TESTING.md`](docs/ALPHA-TESTING.md) and join [Public Alpha issue #1](https://github.com/yuzi001a/hippocampus-memory/issues/1).
+- **Need the exact supported boundary?** Read [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md).
+
 ## Why memory is more than storing history
 
 I originally treated long-term memory as a storage-and-retrieval problem: preserve the conversation, search it later, and inject the relevant pieces back into context.
@@ -172,8 +179,9 @@ Hippocampus does not pretend these questions are solved. The point is to make th
 
 ## Feedback
 
-- **Bug reports:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
-- **Feature requests:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
+- **Public Alpha testers:** start with [`docs/ALPHA-TESTING.md`](docs/ALPHA-TESTING.md) and [issue #1](https://github.com/yuzi001a/hippocampus-memory/issues/1).
+- **Memory-quality reports:** use the **Alpha memory feedback** issue template so stale, missing, duplicated, or misleading recalls are easier to compare.
+- **Bug reports and feature requests:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
 - **Security-sensitive reports:** do not post secrets, credentials, DSNs, or private data in a public issue; see [`SECURITY.md`](SECURITY.md)
 
 ## Documentation map
@@ -181,6 +189,8 @@ Hippocampus does not pretend these questions are solved. The point is to make th
 | Doc | Purpose |
 |---|---|
 | [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md) | The project's design and philosophical evolution: memory, Soul, "generation is existence", continuity, memory governance, and recall timing. |
+| [`docs/COMPARISON.md`](docs/COMPARISON.md) | A factual guide to when Hermes built-in memory, history search, Mem0, Hindsight, or Hippocampus may fit. |
+| [`docs/ALPHA-TESTING.md`](docs/ALPHA-TESTING.md) | A 3–7 day real-project test plan and a guide to reporting useful failures. |
 | [`docs/INSTALL.md`](docs/INSTALL.md) | Step-by-step Windows install + disposable pgvector + local source install. |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | `config.yaml` keys, env vars, provider defaults, fail-closed behavior. |
 | [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | `pg_dump` + restore and post-restore checks. |
