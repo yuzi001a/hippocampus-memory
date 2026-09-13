@@ -67,7 +67,6 @@ jobs:
       - name: Setup uv (official Astral action)
         uses: astral-sh/setup-uv@v3
         with:
-          python-version: "3.11"
           # Pin a stable channel so CI does not silently flip.
           version: "0.5.x"
 
