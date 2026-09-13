@@ -44,7 +44,7 @@ from v3core._deadline import (
     PrefetchDeadlineExceeded,
 )
 from v3core.session_context import V3SessionContext
-from v3core.config import resolve_config
+from v3core.config import _find_config, resolve_config
 from v3core.pg_pool import PgPool
 from v3core.runtime import RuntimeIdentity, RuntimeRegistry, RuntimeState, StaleRuntimeError
 from v3core.tools import get_tool_schemas as _get_schemas, handle_tool_call as _handle_tool
@@ -184,10 +184,19 @@ class V3HermesProvider(MemoryProvider):
             # 绝不能返回 False —— agent_init 在 initialize() 之前调 is_available()
             # 决定是否 add_provider；False 导致 provider 不激活 → sync_all 无 providers
             # → v3 写入完全断链（2026-07-31 19:25 后 qa_pairs 停更实证）。
-            # 也不能建临时 V3Core（旧实现泄漏连接）。
+            # 也不能建临时 V3Core（旧实现泄漏连接）或解析 YAML/连 DB/调网络
+            # —— 只复用 v3core.config._find_config 做文件系统存在性检查,
+            # 路径来源: HERMES_PROFILE > V3CORE_PROFILE > "default",
+            # HERMES_HOME 缺省时按空串透传 (与 _find_config 契约一致)。
             import os as _os
-            _cfg = _os.path.expanduser("~/.v3-core/profiles/default/config.yaml")
-            return _os.path.exists(_cfg)
+            _profile = (
+                _os.environ.get("HERMES_PROFILE")
+                or _os.environ.get("V3CORE_PROFILE")
+                or "default"
+            )
+            _hermes_home = _os.environ.get("HERMES_HOME", "") or ""
+            _cfg = _find_config(_profile, hermes_home=_hermes_home)
+            return _cfg is not None
         except Exception:
             return False
 

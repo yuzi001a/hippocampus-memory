@@ -1,0 +1,407 @@
+name: distribution-packaging-smoke
+
+# Mandatory Windows distribution-packaging smoke workflow.
+#
+# This workflow proves that the *built artifacts* (v3-core + v3-hermes-plugin
+# wheel+sdist) install cleanly into a *real* current upstream Hermes host
+# venv — not into an agent stub. It exists because the existing test
+# matrix only exercises source-tree paths; this one exercises the exact
+# post-pip-install path that downstream operators hit.
+#
+# Strict constraints:
+#   * Windows runner is mandatory (the only matrix entry).
+#   * triggers: pull_request + workflow_dispatch.
+#   * permissions: contents: read.
+#   * Python 3.11 via astral-sh/setup-uv.
+#   * No credential interpolation is used.
+#   * No shell-pipeline installer and no package publishing.
+#   * Uses `uv build` for the two source packages; installs the built
+#     wheels into a fresh host venv that was created by running the
+#     official upstream Hermes repo's own `uv sync` (source-supported
+#     path; we do NOT assume Hermes publishes a wheel).
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distribution-packaging-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-distribution-smoke:
+    name: windows / distribution-packaging smoke
+    runs-on: windows-latest
+    timeout-minutes: 25
+    # Single Windows job — Linux matrix is intentionally out of scope.
+
+    env:
+      # Force a portable, PowerShell-safe runner shell everywhere.
+      SHELL: bash
+      # Pin the v3 stack explicitly so the smoke never drifts.
+      V3_CORE_DIR: src/v3-core
+      V3_HERMES_PLUGIN_DIR: src/v3-hermes-plugin
+      # Real current upstream Hermes host (matches docs/INSTALL.md and
+      # docs/COMPARISON.md). This is the *only* host we exercise.
+      HERMES_UPSTREAM_REPO: NousResearch/hermes-agent
+      HERMES_UPSTREAM_REF: main
+      # Build/install scratch — every artifact and host clone lives
+      # under $RUNNER_TEMP so the runner is left clean.
+      SMOKE_ROOT: ${{ runner.temp }}/dist-smoke
+
+    steps:
+      - name: Checkout (hippocampus repo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          # Shallow checkout — we only need pyproject + src/ for `uv build`.
+          submodules: false
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup uv (official Astral action)
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.11"
+          # Pin a stable channel so CI does not silently flip.
+          version: "0.5.x"
+
+      - name: Show uv + python versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv --version
+          python --version
+          python -c "import sys; print('executable=', sys.executable)"
+          echo "::group::uv help"
+          uv --help
+          echo "::endgroup::"
+
+      - name: Prepare smoke scratch dir
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${SMOKE_ROOT}"
+          cd "${SMOKE_ROOT}"
+          pwd
+          # `uv build` and `uv sync` write into the runner temp dir so
+          # we never pollute $GITHUB_WORKSPACE.
+          echo "SMOKE_ROOT=${SMOKE_ROOT}" >> "${GITHUB_ENV}"
+
+      # ─────────────────────────────────────────────────────────────────
+      # 1. Build v3-core + v3-hermes-plugin (wheel + sdist) into a
+      #    dedicated dist directory using `uv build`. No publish.
+      # ─────────────────────────────────────────────────────────────────
+      - name: Build v3-core (wheel + sdist)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${SMOKE_ROOT}/dist/v3-core"
+          cd "${GITHUB_WORKSPACE}/${V3_CORE_DIR}"
+          uv build \
+            --out-dir "${SMOKE_ROOT}/dist/v3-core" \
+            --wheel --sdist
+          python -c "from pathlib import Path; p=Path(r'${SMOKE_ROOT}/dist/v3-core'); print('core artifacts:', [x.name for x in p.iterdir()])"
+
+      - name: Build v3-hermes-plugin (wheel + sdist)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${SMOKE_ROOT}/dist/v3-hermes-plugin"
+          cd "${GITHUB_WORKSPACE}/${V3_HERMES_PLUGIN_DIR}"
+          uv build \
+            --out-dir "${SMOKE_ROOT}/dist/v3-hermes-plugin" \
+            --wheel --sdist
+          python -c "from pathlib import Path; p=Path(r'${SMOKE_ROOT}/dist/v3-hermes-plugin'); print('plugin artifacts:', [x.name for x in p.iterdir()])"
+
+      - name: Enumerate four built artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          root = Path(os.environ["SMOKE_ROOT"]) / "dist"
+          wheels = list(root.rglob("*.whl"))
+          sdists = list(root.rglob("*.tar.gz"))
+          print("wheels=", len(wheels), "sdists=", len(sdists))
+          print("wheel names=", [p.name for p in wheels])
+          print("sdist names=", [p.name for p in sdists])
+          assert len(wheels) == 2, wheels
+          assert len(sdists) == 2, sdists
+          PY
+
+      # ─────────────────────────────────────────────────────────────────
+      # 2. Clone the *real current* upstream Hermes Agent repo at shallow
+      #    depth and run its official `uv sync`. The resulting host venv
+      #    is what we install our four artifacts into.
+      # ─────────────────────────────────────────────────────────────────
+      - name: Clone current upstream Hermes (shallow)
+        shell: bash
+        run: |
+          set -euo pipefail
+          HERMES_HOST_DIR="${SMOKE_ROOT}/hermes-host"
+          git clone --depth 1 --branch "${HERMES_UPSTREAM_REF}" \
+            "https://github.com/${HERMES_UPSTREAM_REPO}.git" \
+            "${HERMES_HOST_DIR}"
+          cd "${HERMES_HOST_DIR}"
+          echo "checked out Hermes upstream:"
+          git rev-parse HEAD
+          git log -1 --oneline || true
+
+      - name: uv sync official Hermes host venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${SMOKE_ROOT}/hermes-host"
+          # `uv sync` is Hermes's own source-supported bootstrap. We do
+          # NOT assume Hermes ships a wheel on PyPI; source install is
+          # the documented path for both PyPI and source checkouts.
+          uv sync --frozen --no-dev || uv sync --no-dev
+          # Surface the venv interpreter so the install step below
+          # targets exactly the host venv (not a side venv).
+          HERMES_VENV="${SMOKE_ROOT}/hermes-host/.venv"
+          echo "HERMES_VENV=${HERMES_VENV}" >> "${GITHUB_ENV}"
+          "${HERMES_VENV}/Scripts/python.exe" -V
+          "${HERMES_VENV}/Scripts/python.exe" -c "import agent, sys; print('agent module path:', agent.__file__)"
+          # Sanity-check the host actually exposes the memory provider
+          # discovery group we depend on. Hermes must import cleanly
+          # *before* we install our plugin so the host's `agent`
+          # package is registered as the canonical package.
+          "${HERMES_VENV}/Scripts/python.exe" -c \
+            "import importlib.metadata as m; eps=m.entry_points(group='hermes_agent.memory_providers'); print('host baseline memory providers:', [(e.name, e.value) for e in eps])" \
+            || echo "::warning::baseline memory_providers group not enumerable yet (ok; install step below registers it)"
+
+      # ─────────────────────────────────────────────────────────────────
+      # 3. Install pytest + the four built Hippocampus artifacts into the
+      #    host venv. Then run `uv pip check` to assert the dependency
+      #    graph is consistent (no broken / duplicate installs).
+      # ─────────────────────────────────────────────────────────────────
+      - name: Install pytest into host venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${SMOKE_ROOT}/hermes-host"
+          uv pip install --python "${HERMES_VENV}/Scripts/python.exe" pytest
+          "${HERMES_VENV}/Scripts/python.exe" -m pytest --version
+
+      - name: Install built artifacts into host venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${SMOKE_ROOT}/hermes-host"
+          # Install the *built* wheels from SMOKE_ROOT/dist, not the
+          # source checkouts. This is the exact install path downstream
+          # operators hit.
+          uv pip install --python "${HERMES_VENV}/Scripts/python.exe" \
+            "${SMOKE_ROOT}/dist/v3-core"/*.whl \
+            "${SMOKE_ROOT}/dist/v3-hermes-plugin"/*.whl
+          # `uv pip check` proves no two distributions disagree about
+          # a dependency version. Hard-fails on broken graphs.
+          uv pip check --python "${HERMES_VENV}/Scripts/python.exe"
+
+      # ─────────────────────────────────────────────────────────────────
+      # 4. Assert both packages import from site-packages (not the repo),
+      #    enumerate hermes_agent.memory_providers, and confirm the
+      #    deep_memory_v3 → v3hermes:register entry point is registered.
+      # ─────────────────────────────────────────────────────────────────
+      - name: Assert real-installed paths + provider entry point
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${SMOKE_ROOT}/hermes-host"
+          "${HERMES_VENV}/Scripts/python.exe" - <<'PY'
+          import importlib, importlib.metadata as md, os, sys
+          from pathlib import Path
+
+          failures = []
+
+          for mod_name in ("v3core", "v3hermes"):
+              mod = importlib.import_module(mod_name)
+              f = Path(mod.__file__).resolve()
+              # site-packages may be spelled site-packages OR
+              # dist-packages depending on platform / virtualenv.
+              # We assert the file is *not* under any /src/ tree
+              # (i.e. not the repo checkout) and ends in the canonical
+              # pythonX.Y / site-packages layout.
+              s = str(f).lower().replace("\\", "/")
+              assert "/src/" not in s, (
+                  f"{mod_name}.__file__ looks like a source checkout: {f}"
+              )
+              assert ("site-packages" in s) or ("dist-packages" in s), (
+                  f"{mod_name}.__file__ not under site-packages: {f}"
+              )
+              print(f"OK {mod_name} imported from {f}")
+
+          eps = md.entry_points(group="hermes_agent.memory_providers")
+          names = [(e.name, e.value) for e in eps]
+          print("hermes_agent.memory_providers entry points:", names)
+          assert ("deep_memory_v3", "v3hermes:register") in names, (
+              "deep_memory_v3 → v3hermes:register entry point missing. "
+              f"got: {names}"
+          )
+
+          # Resolve the dist that registered deep_memory_v3 + verify
+          # it is the *built* wheel (not the repo source tree).
+          deep_ep = next(
+              e for e in eps if e.name == "deep_memory_v3"
+          )
+          dist = deep_ep.dist
+          print(
+              "deep_memory_v3 distribution:",
+              getattr(dist, "name", "?"),
+              getattr(dist, "version", "?"),
+              "loc=",
+              getattr(dist, "locator", lambda: "?")(),
+          )
+          dist_files = list(dist.files or [])
+          whl_files = [
+              str(f) for f in dist_files
+              if str(f).endswith(".whl")
+          ]
+          if whl_files:
+              print("deep_memory_v3 dist.whl_files (sample):", whl_files[:3])
+          # Sanity: confirm packaged plugin.yaml is shipped inside the
+          # installed v3hermes package.
+          v3hermes_files = sorted(
+              str(f) for f in dist_files
+              if "v3hermes" in str(f)
+          )
+          assert any(f.endswith("plugin.yaml") for f in v3hermes_files), (
+              "v3hermes/plugin.yaml is not packaged inside the wheel: "
+              + repr(v3hermes_files)
+          )
+          print("OK deep_memory_v3 entry point + packaged plugin.yaml")
+
+          # Sanity: packaged SQL resources shipped inside v3core.
+          v3core_dist = md.distribution("v3-core")
+          v3core_files = [str(f) for f in (v3core_dist.files or [])]
+          assert any(f.endswith("alpha_bootstrap.sql") for f in v3core_files), (
+              "v3core wheel does not ship alpha_bootstrap.sql"
+          )
+          assert any(f.endswith("explicit_memories.sql") for f in v3core_files), (
+              "v3core wheel does not ship explicit_memories.sql"
+          )
+          print("OK v3-core wheel ships packaged SQL resources")
+          PY
+
+      # ─────────────────────────────────────────────────────────────────
+      # 5. `hippocampus doctor --static` must exit 0 / status ok.
+      # ─────────────────────────────────────────────────────────────────
+      - name: hippocampus doctor --static
+        id: doctor_static
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${SMOKE_ROOT}/hermes-host"
+          # `hippocampus` is the v3-core console script installed by
+          # the wheel above. The venv's Scripts dir (Windows) puts it
+          # there; we resolve via `python -m` instead to stay portable.
+          rc=0
+          output="$(
+            "${HERMES_VENV}/Scripts/python.exe" -m v3core.distribution_cli \
+              doctor --static 2>&1
+          )" || rc=$?
+          echo "doctor exit code: ${rc}"
+          echo "doctor output:"
+          printf '%s\n' "${output}"
+          # The contract: rc 0 means every required check is OK;
+          # rc 1 means warnings; rc 2 means hard error. For the
+          # *static* path on a clean host venv we require rc 0.
+          test "${rc}" = "0" || {
+            echo "::error::hippocampus doctor --static exited ${rc}"
+            exit 1
+          }
+          # Cross-check status ok inside the JSON payload.
+          printf '%s\n' "${output}" \
+            | "${HERMES_VENV}/Scripts/python.exe" -c "
+          import json, sys
+          payload = json.loads(sys.stdin.read())
+          assert payload.get('command') == 'doctor', payload
+          assert payload.get('static') is True, payload
+          assert not payload.get('errors'), ('errors present', payload.get('errors'))
+          print('OK doctor status ok')
+          "
+
+      # ─────────────────────────────────────────────────────────────────
+      # 6. Run the focused packaging test file with the correct cwd /
+      #    PYTHONPATH. We deliberately run the *test file* from the repo
+      #    (the test itself reads pyproject.toml + schema/ + plugin.yaml
+      #    via repo-relative paths) but the *assertions* it makes about
+      #    packaged SQL + plugin.yaml + entry points are all satisfied
+      #    by the wheel installed into the host venv.
+      #
+      #    PYTHONPATH must include both src trees so the test can
+      #    `import v3core.distribution_cli` and `import v3hermes`. We do
+      #    NOT add the host venv here — the test exercises source-tree
+      #    paths intentionally to compare against the packaged copies.
+      # ─────────────────────────────────────────────────────────────────
+      - name: Run focused distribution_packaging test
+        id: focused_test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/${V3_CORE_DIR}"
+          # Test-relative paths inside test_distribution_packaging.py
+          # are computed from `parents[2]` (= /src) so cwd must be
+          # ${V3_CORE_DIR} for the file system layout to resolve.
+          export PYTHONPATH="${GITHUB_WORKSPACE}/${V3_CORE_DIR}/src:${GITHUB_WORKSPACE}/${V3_HERMES_PLUGIN_DIR}/src:${PYTHONPATH:-}"
+          # Use the *host* venv's pytest — i.e. the same interpreter we
+          # installed our wheels into — so the test runner cannot
+          # silently fall back to a different Python.
+          mkdir -p "${SMOKE_ROOT}/test-output"
+          set +e
+          "${HERMES_VENV}/Scripts/python.exe" -m pytest \
+            tests/test_distribution_packaging.py \
+            -v \
+            --tb=short \
+            --color=no \
+            -p no:cacheprovider \
+            > "${SMOKE_ROOT}/test-output/pytest_distribution_packaging.txt" 2>&1
+          rc=$?
+          set -e
+          python -c "from pathlib import Path; print(Path(r'${SMOKE_ROOT}/test-output/pytest_distribution_packaging.txt').read_text())"
+          test "${rc}" = "0" || {
+            echo "::error::focused distribution_packaging test failed (rc=${rc})"
+            exit "${rc}"
+          }
+
+      # ─────────────────────────────────────────────────────────────────
+      # 7. Upload the four built artifacts + focused test output. No
+      #    credentials, signing keys, or provenance bundles.
+      # ─────────────────────────────────────────────────────────────────
+      - name: Upload built wheels + sdists
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-packaging-artifacts
+          path: |
+            ${{ runner.temp }}/dist-smoke/dist/v3-core/*.whl
+            ${{ runner.temp }}/dist-smoke/dist/v3-core/*.tar.gz
+            ${{ runner.temp }}/dist-smoke/dist/v3-hermes-plugin/*.whl
+            ${{ runner.temp }}/dist-smoke/dist/v3-hermes-plugin/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload focused test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-packaging-test-output
+          path: ${{ runner.temp }}/dist-smoke/test-output/pytest_distribution_packaging.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Final status
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "doctor_static=${{ steps.doctor_static.outcome }}"
+          echo "focused_test=${{ steps.focused_test.outcome }}"
+          echo "OK distribution-packaging-smoke completed"

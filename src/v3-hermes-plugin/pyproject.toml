@@ -6,14 +6,53 @@ build-backend = "setuptools.build_meta"
 name = "v3-hermes-plugin"
 version = "4.0.0"
 description = "Hermes adapter for v3-core — 13 host tools plus recall and ingest hooks"
+readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "AGPL-3.0-or-later"}
+license = "AGPL-3.0-or-later"
 authors = [{name = "yuzi"}]
+maintainers = [{name = "yuzi"}]
+keywords = ["hermes", "memory-provider", "hippocampus", "v3-core", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
-    "v3-core>=4.0.0",
+    "v3-core>=4.0.0,<5.0.0",
     "requests",
     "pyyaml",
 ]
 
+[project.urls]
+Homepage = "https://github.com/yuzi001a/hippocampus-memory"
+Repository = "https://github.com/yuzi001a/hippocampus-memory"
+Documentation = "https://github.com/yuzi001a/hippocampus-memory/tree/main/docs"
+Source = "https://github.com/yuzi001a/hippocampus-memory/tree/main/src/v3-hermes-plugin"
+Issues = "https://github.com/yuzi001a/hippocampus-memory/issues"
+Changelog = "https://github.com/yuzi001a/hippocampus-memory/blob/main/CHANGELOG.md"
+
+# ── Hermes plugin entry point (frozen by Gate 0/1) ──
+# Group: hermes_agent.memory_providers
+# Name:  deep_memory_v3
+# Target: v3hermes:register  (the existing register() callable in
+# src/v3hermes/__init__.py)
+# Hermes host discovers memory providers via this group; the name MUST
+# equal the manifest `name: deep_memory_v3` declared in plugin.yaml so
+# Hermes matches it against `memory.provider: deep_memory_v3`.
+[project.entry-points."hermes_agent.memory_providers"]
+deep_memory_v3 = "v3hermes:register"
+
 [tool.setuptools]
 packages = {find = {where = ["src"]}}
+
+# Ship plugin.yaml INSIDE the installed v3hermes package so any
+# downstream Hermes host (or operator inspection) can read the manifest
+# from a stable package-owned path rather than the repo root.
+[tool.setuptools.package-data]
+"v3hermes" = ["plugin.yaml"]

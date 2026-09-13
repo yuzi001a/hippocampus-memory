@@ -138,9 +138,17 @@ What this does:
   `psycopg2-binary`, `pgvector`, `pyyaml`, `numpy`, `requests`,
   `openai`, `jieba`, `pyahocorasick>=2.3.0`).
 - Builds `v3-hermes-plugin` from
-  `src/v3-hermes-plugin/pyproject.toml` (declares `v3-core>=4.0.0`,
-  `requests`, `pyyaml`).
-- Installs a `v3-core` console script (`v3-core info`).
+  `src/v3-hermes-plugin/pyproject.toml` (declares
+  `v3-core>=4.0.0,<5.0.0`, `requests`, `pyyaml`).
+- Installs two `v3-core` console scripts:
+  - `v3-core` — preserved verbatim (e.g. `v3-core info`).
+  - `hippocampus` — distribution-facing console (Gate 2). Provides
+    `hippocampus doctor` (read-only install check) and
+    `hippocampus bootstrap` (apply packaged SQL to an explicit
+    target; refuses production-boundary DSNs unconditionally).
+- Registers the Hermes memory provider entry point
+  `hermes_agent.memory_providers / deep_memory_v3 →
+  v3hermes:register` (matches the manifest `name: deep_memory_v3`).
 
 > 💡 The `pyahocorasick` dependency is a C extension. On Windows this
 > needs a working C compiler (e.g. the MSVC build tools that match
@@ -181,13 +189,13 @@ What this does:
   includes the canonical `explicit_memories.sql` artifact.
 - Is idempotent: every DDL uses `IF NOT EXISTS` / `ADD COLUMN IF NOT
   EXISTS`. Running twice is a no-op.
-- Refuses to run against a default production boundary DSN by
-  default; the placeholder DSN above is the documented disposable one.
+- Refuses to run against a production boundary DSN; the placeholder DSN
+  above is the documented disposable one.
 
-> 🛑 **Never point this at a production PG.** The script refuses the
-> default production boundary DSN by default; if you pass a different
-> production-looking DSN, you accept the risk. The alpha contract
-> assumes a disposable PG.
+> 🛑 **Never point this at a production PG.** Both the legacy script and
+> the packaged command are for disposable PG only. The packaged command
+> refuses port `5433` and local `v3embeddings` unconditionally; there is
+> no production override. The alpha contract assumes a disposable PG.
 
 ---
 
@@ -234,6 +242,33 @@ Fill in:
 
 > Never put a real `config.yaml` or `.env` in version control. The
 > example files in `examples/` contain placeholder values only.
+
+---
+
+## 7.5 (Optional) `hippocampus doctor` — read-only install check
+
+After `pip install`, run the distribution-facing read-only sanity
+check:
+
+```powershell
+hippocampus doctor --static
+```
+
+Expected: a single JSON object on stdout with `status: ok` and
+`checks.packaged_sql` listing `alpha_bootstrap.sql` and
+`explicit_memories.sql` (both with sha256). The `--static` flag
+skips config resolution so the command is safe in packaging / CI
+contexts. Without `--static`, doctor also resolves the active
+profile's config (read-only) and prints a secret-redacted summary.
+
+For the mutation side, `hippocampus bootstrap --target <DSN>`
+applies the packaged `alpha_bootstrap.sql` against an explicit
+target. The production-boundary DSN
+(`127.0.0.1:5433 / v3embeddings`) is refused unconditionally;
+there is no override flag. The legacy
+`scripts/bootstrap_alpha_db.py` recipe in § 6 above remains the
+source-tree path; `hippocampus bootstrap` is the packaged equivalent
+and shares the same refusal policy.
 
 ---
 
