@@ -484,7 +484,10 @@ def _doctor_resolve_config(profile: str) -> tuple[str | None, dict[str, Any] | N
     except Exception:
         return (None, None, False, "config loader unavailable")
     try:
-        cfg_file = _find_config(profile)  # type: ignore[attr-defined]
+        cfg_file = _find_config(
+            profile,
+            hermes_home=os.environ.get("HERMES_HOME", "") or "",
+        )  # type: ignore[attr-defined]
     except Exception:
         cfg_file = None
     if cfg_file is None:
