@@ -86,9 +86,9 @@ The following rows summarize current evidence from a fresh disposable Windows 10
 
 | Capability | Status |
 |---|---|
-| Fresh `pip install` of `v3-core` + `v3-hermes-plugin`; imports succeed; plugin tool schema count = 13. | **PASS** |
+| Fresh non-editable wheel install of `v3-core` + `v3-hermes-plugin`; imports succeed; plugin tool schema count = 13. | **PASS** |
 | `V3CORE_PG_PASSWORD` honored as the required credential. | **PASS** |
-| Explicit `bootstrap_alpha_db.py` creates 7 tables on empty pg17 and is idempotent on re-run. | **PASS** |
+| Packaged `hippocampus bootstrap` creates the 7-table disposable schema and is idempotent on re-run. | **PASS** |
 | `sync_turn` durably writes source rows into `conversation_stream`; focused QA pairing tests pass separately. | **PASS** |
 | Exact retry of an already-recorded turn deduplicates instead of duplicating the source row. | **PASS** |
 | Restarted process can read back previously written active-memory markers; focused ingest recovery tests cover cursor/orphan behavior. | **PASS / EVIDENCE** |
@@ -116,15 +116,31 @@ A memory system that retrieves impressive-looking text but loses provenance, dri
 
 ## Install at a glance
 
-The intended public-alpha setup is **Windows + fresh `venv` + local source install + disposable PostgreSQL/pgvector container**. The full step-by-step contract is in [`docs/INSTALL.md`](docs/INSTALL.md). The commands below keep the same bootstrap model rather than inventing a second quickstart path.
+The intended public-alpha setup is **Windows + fresh `venv` + non-editable wheel artifacts built from this repo + disposable PostgreSQL/pgvector container + a separately-installed Hermes Agent host**. The full step-by-step contract is in [`docs/INSTALL.md`](docs/INSTALL.md) ([中文](docs/INSTALL.zh-CN.md)). The commands below keep the same bootstrap model rather than inventing a second quickstart path.
+
+> **Hermes is a separate prerequisite, not a host package dependency here.** The sprint used current upstream [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent) installed with `uv sync`; this public repo does not claim a Hermes wheel/sdist exists. Install Hermes first using its official docs and only then install the `v3-hermes-plugin` artifact into the **same** Hermes host environment.
 
 ```powershell
-# 1. Fresh venv
+# 0. Prerequisite: a working Hermes Agent host (separate repo).
+#    Follow the official install: https://github.com/NousResearch/hermes-agent
+#    No Hippocampus-controlled Hermes wheel — install upstream and verify with
+#    `hermes --version` before continuing.
+
+# 1. Build non-editable wheel + sdist artifacts for both packages
+uv build --wheel --sdist --out-dir .\dist\v3-core .\src\v3-core
+uv build --wheel --sdist --out-dir .\dist\v3-hermes-plugin .\src\v3-hermes-plugin
+
+# 2. Fresh venv for the v3 artifacts (do not reuse an old venv)
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
 
-# 2. Disposable pgvector
+# 3. Install the actual built wheels — NOT editable, NOT from source tree
+uv pip install .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
+uv pip install .\dist\v3-hermes-plugin\v3_hermes_plugin-4.0.0-py3-none-any.whl
+uv pip check   # pip-compatible; verifies the two wheels are compatible
+
+# 4. Disposable pgvector on a non-production port (port 5433 is refused)
 $pgPort = 55432
 $pgPassword = "<local-only-password>"   # replace; never reuse a real password
 
@@ -134,26 +150,23 @@ docker run --name v3-pgvector-alpha --rm -d `
   -p "${pgPort}:5432" `
   pgvector/pgvector:pg17
 
-# 3. Install both packages from this repository
-pip install .\src\v3-core
-pip install .\src\v3-hermes-plugin
-
-# 4. Prepare a profile using examples/config.example.yaml and examples/.env.example.
-#    Use an absolute Windows basePath; path-style keys do not expand `~`.
-
-# 5. Required credentials before write/recall/bootstrap
+# 5. Required credentials before doctor / bootstrap / write
 $env:V3CORE_PG_PASSWORD = $pgPassword
-$env:PGPASSWORD = $pgPassword
+$env:PGPASSWORD        = $pgPassword
 
-# 6. Explicit database bootstrap
-python .\src\v3-core\scripts\bootstrap_alpha_db.py `
-  --host 127.0.0.1 --port $pgPort --database v3embeddings_alpha `
-  --user postgres
+# 6. Static read-only install check
+hippocampus doctor --static
+
+# 7. Explicit database bootstrap against the disposable target.
+#    Port 5433 and local `v3embeddings` are unconditionally refused — no override.
+hippocampus bootstrap --target "postgres://postgres@127.0.0.1:${pgPort}/v3embeddings_alpha"
 ```
 
-> **Database bootstrap is explicit, not automatic.** `v3core.active_memory_store` does not apply the schema artifact on first write. Run `bootstrap_alpha_db.py` against the disposable database before the first write.
+> **Database bootstrap is explicit, not automatic.** `v3core.active_memory_store` does not apply the schema artifact on first write. `hippocampus bootstrap` is the documented packaged command; it refuses port `5433` and local `v3embeddings` unconditionally, with no override flag.
 >
-> **Hermes is a host dependency for plugin-mediated E2E.** Without Hermes, you can still exercise `v3-core` directly, but that is not the same as validating the full plugin contract.
+> **Configure `memory: provider: deep_memory_v3` in your Hermes host.** The plugin entry point is `hermes_agent.memory_providers` → `deep_memory_v3 = v3hermes:register`. `HERMES_HOME` / profile config is supported; no production profile is shipped.
+>
+> **The legacy `src/v3-core/scripts/bootstrap_alpha_db.py` remains source-tree / development-only.** Use `hippocampus bootstrap` for the packaged distribution path.
 
 ## External services
 
@@ -191,7 +204,7 @@ Hippocampus does not pretend these questions are solved. The point is to make th
 | [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md) | The project's design and philosophical evolution: memory, Soul, "generation is existence", continuity, memory governance, and recall timing. |
 | [`docs/COMPARISON.md`](docs/COMPARISON.md) | A factual guide to when Hermes built-in memory, history search, Mem0, Hindsight, or Hippocampus may fit. |
 | [`docs/ALPHA-TESTING.md`](docs/ALPHA-TESTING.md) | A 3–7 day real-project test plan and a guide to reporting useful failures. |
-| [`docs/INSTALL.md`](docs/INSTALL.md) | Step-by-step Windows install + disposable pgvector + local source install. |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Step-by-step Windows artifact build/install + disposable pgvector + Hermes host path. |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | `config.yaml` keys, env vars, provider defaults, fail-closed behavior. |
 | [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | `pg_dump` + restore and post-restore checks. |
 | [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md) | What remains local vs what may be sent to explicitly configured providers. |

@@ -122,24 +122,48 @@ embedding、LLM 和 rerank 都由用户在本地配置。没有配置 provider �
 
 ## Quick Start
 
-当前公开 Alpha 的推荐试用环境是 Windows + 全新 Python `venv` + 本地源码安装 + disposable PostgreSQL/pgvector。下面的命令沿用英文 README 和 [`docs/INSTALL.md`](docs/INSTALL.md) 的安装契约，没有另造一套 Hippocampus CLI 或简化掉数据库 bootstrap。
+当前公开 Alpha 的推荐试用环境是 Windows + 全新 Python `venv` + 本仓库构建的不可编辑 wheel 包 + disposable PostgreSQL/pgvector + 单独安装的 Hermes Agent host。下面的命令与 [`docs/INSTALL.md`](docs/INSTALL.md)（[中文](docs/INSTALL.zh-CN.md)）保持完全一致的安装契约，没有另造一套 Hippocampus CLI 或简化掉数据库 bootstrap。中文和英文 README 描述的步骤数和手动步骤完全一致。
 
-### 1. 克隆仓库并创建虚拟环境
+> **Hermes 是单独的前置条件，不是这里的 host 包依赖。** Sprint 使用的是上游 [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent) 通过 `uv sync` 安装；本公开仓库不声明 Hermes wheel/sdist 存在。请先按官方文档安装 Hermes，再把 `v3-hermes-plugin` 的构建产物装到**同一个** Hermes host 环境中。
+
+### 0. 前置：先安装 Hermes Agent host（独立仓库）
+
+按官方文档安装并验证：
+
+- 上游仓库：<https://github.com/NousResearch/hermes-agent>
+- 官方安装与配置文档：<https://github.com/NousResearch/hermes-agent>（README + `website/docs/`）
+- 本仓库不打包 Hermes wheel，请不要把 Hermes 当成可从这里 `pip install` 的依赖。
+
+### 1. 构建不可编辑的 wheel + sdist 产物
 
 ```powershell
-git clone https://github.com/yuzi001a/hippocampus-memory
-cd hippocampus-memory
+uv build --wheel --sdist --out-dir .\dist\v3-core .\src\v3-core
+uv build --wheel --sdist --out-dir .\dist\v3-hermes-plugin .\src\v3-hermes-plugin
+```
 
+构建完成后会得到两个 wheel：`v3_core-4.0.0-py3-none-any.whl` 和 `v3_hermes_plugin-4.0.0-py3-none-any.whl`（同时还会产出对应 sdist）。中文和英文 README 都使用完全相同的文件名。
+
+### 2. 全新 venv（不要复用旧的）
+
+```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip wheel
 ```
 
-每次试用建议使用全新的虚拟环境，不要混用不同版本的 `v3-core`、不同 profile 或旧依赖。
+### 3. 安装实际构建出的 wheel（非 editable、非源码树）
 
-### 2. 启动 disposable pgvector
+```powershell
+uv pip install .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
+uv pip install .\dist\v3-hermes-plugin\v3_hermes_plugin-4.0.0-py3-none-any.whl
+uv pip check   # 与 pip 兼容；检查两个 wheel 之间依赖一致性
+```
 
-不要把试用环境指向生产 PostgreSQL。选择一个本地、非生产端口；下面的 `55432` 只是 disposable 环境示例端口。
+不要把"从 `src/v3-core/` 目录直接 `pip install`"作为公开发布的安装路径。`src/v3-core/scripts/bootstrap_alpha_db.py` 仍保留为 source-tree / development-only 脚本，仅供源码调试使用。
+
+### 4. 启动 disposable pgvector（非生产端口）
+
+不要把试用环境指向生产 PostgreSQL。选择一个本地、非生产端口（端口 `5433` 会被 `hippocampus bootstrap` 无条件拒绝）；下面的 `55432` 只是 disposable 环境示例端口。
 
 ```powershell
 $pgPort = 55432
@@ -159,60 +183,32 @@ docker exec v3-pgvector-alpha psql -U postgres -d v3embeddings_alpha `
   -c "CREATE EXTENSION IF NOT EXISTS vector; SELECT extversion FROM pg_extension WHERE extname='vector';"
 ```
 
-### 3. 从本地源码安装两个包
-
-```powershell
-pip install .\src\v3-core
-pip install .\src\v3-hermes-plugin
-```
-
-这会安装核心包、Hermes 适配器及其依赖，并提供 `v3-core info` 命令。Windows 上如果 `pyahocorasick` 编译依赖导致安装失败，先看 [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md)，不要把失败的半安装环境当作有效验收结果。
-
-### 4. 准备 profile 配置
-
-公开 Alpha 不会自动创建 profile 配置。复制示例文件到你自己选择的 profile 目录：
-
-```powershell
-New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.v3-core\profiles\default"
-Copy-Item .\examples\config.example.yaml "$env:USERPROFILE\.v3-core\profiles\default\config.yaml"
-Copy-Item .\examples\.env.example "$env:USERPROFILE\.v3-core\profiles\default\.env"
-notepad "$env:USERPROFILE\.v3-core\profiles\default\config.yaml"
-```
-
-至少检查以下内容：
-
-- 顶层 `basePath` 填写你实际使用的绝对路径；Windows 不会在这些路径配置中展开 `~`；
-- `storage.pg.host`、`port`、`database`、`user` 与 disposable 容器一致；
-- `storage.pg.password` 保持为空，把密码放入环境变量；
-- 没有 provider 时可以继续保留 embedding、LLM、rerank 配置块为注释状态；
-- 不要把包含真实 credential 的 `config.yaml` 或 `.env` 提交到 Git。
-
-配置键和环境变量的完整说明见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)。
-
-### 5. 显式执行数据库 bootstrap
-
-数据库 schema 不是第一次写入时自动应用的。先设置密码，再运行 bootstrap：
+### 5. 设置凭据（doctor / bootstrap / 写入前）
 
 ```powershell
 $env:V3CORE_PG_PASSWORD = $pgPassword
-$env:PGPASSWORD = $pgPassword
-
-python .\src\v3-core\scripts\bootstrap_alpha_db.py `
-  --host 127.0.0.1 `
-  --port $pgPort `
-  --database v3embeddings_alpha `
-  --user postgres
+$env:PGPASSWORD        = $pgPassword
 ```
 
-密码通过环境变量传递，不要放在命令行参数中。该脚本针对 disposable 数据库设计，并且在空数据库上重复运行应保持幂等。
+`V3CORE_PG_PASSWORD` 是 `v3-core` 与 `v3-hermes-plugin` 双方都要求的凭据；`PGPASSWORD` 由 `psycopg2` 与 `bootstrap` 子命令识别。密码通过环境变量传递，不要放在命令行参数中。
 
-### 6. 做最小 smoke check
+### 6. 只读安装体检
 
 ```powershell
-v3-core info
+hippocampus doctor --static
 ```
 
-这个命令只输出最小引擎状态摘要，不等于 provider health 报告，也不是稳定的固定输出契约。要验证持久化写入、备份和恢复，请继续看 [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) 以及 supported-surface 文档。
+预期：stdout 输出一段 JSON，`status` 为 `ok`，`checks.packaged_sql` 列出 `alpha_bootstrap.sql` 与 `explicit_memories.sql`（带 sha256）。`--static` 跳过配置解析，可在打包/CI 环境安全运行。
+
+### 7. 显式执行数据库 bootstrap
+
+```powershell
+hippocampus bootstrap --target "postgres://postgres@127.0.0.1:${pgPort}/v3embeddings_alpha"
+```
+
+端口 `5433` 与本机 `v3embeddings` 数据库会被该命令**无条件拒绝**，没有绕过开关；这是和 legacy `bootstrap_alpha_db.py` 共享的拒绝策略。生产边界 DSN（如 `postgres://postgres@127.0.0.1:5433/v3embeddings`）**永远不可能**通过 `hippocampus bootstrap` 执行。
+
+> **数据库 bootstrap 是显式步骤，不是自动首次运行步骤。** `v3core.active_memory_store` 不会自动应用 schema。请先对 disposable PostgreSQL 执行 `hippocampus bootstrap --target ...`，再开始任何写入或召回。
 
 ### 清理 disposable 环境
 
@@ -228,16 +224,27 @@ Remove-Item -Recurse -Force .\.venv
 
 当前 Public Alpha 包含 Hermes adapter。核心记忆能力位于 `v3-core`，适配器位于 `v3-hermes-plugin`；要测试 plugin-mediated hook contract，需要一个正常运行的 Hermes Agent host。
 
-在 Hermes 的 `config.yaml` 中选择公开的 provider 名称：
+**Hermes 是单独的前置仓库，不是这里的 host 包依赖。** Sprint 使用的是上游 [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent) 通过 `uv sync` 安装到当前 Hermes host 环境；本公开仓库不打包 Hermes wheel/sdist。安装路径与文档以 Hermes 上游仓库为准：<https://github.com/NousResearch/hermes-agent>。
+
+把构建出的 `v3-hermes-plugin` wheel 装到**同一个** Hermes host 环境中（见 Quick Start 第 3 步）。然后在 Hermes 的 `config.yaml` 中选择公开的 provider 名称：
 
 ```yaml
 memory:
   provider: deep_memory_v3
 ```
 
-同时确保 Hermes 加载插件前已经设置 `V3CORE_PG_PASSWORD`。然后使用刚才创建的 Python 环境启动 Hermes。没有 Hermes host 时，仍可以直接使用 `v3-core` 和其 Python API，但不能把核心包直连测试等同于完整的 Hermes plugin contract 验收。
+该 provider 名称来自 `v3-hermes-plugin` 的入口点声明：
 
-更详细的安装步骤和约束见 [`docs/INSTALL.md`](docs/INSTALL.md)。
+```toml
+[project.entry-points."hermes_agent.memory_providers"]
+deep_memory_v3 = "v3hermes:register"
+```
+
+入口点名 `deep_memory_v3` 与 `plugin.yaml` 中的 `name: deep_memory_v3` 严格一致，Hermes 据此把 `memory.provider` 解析到 `v3hermes:register`。`v3-core` 依赖范围固定为 `>=4.0.0,<5.0.0`。
+
+Hermes 的 profile / 路径配置支持 `HERMES_HOME` 与 Hermes 自带的 profile 机制；本仓库**不提供**生产 profile，请使用 Hermes 上游默认 profile 或你自己的 profile。启动 Hermes 前确保 `V3CORE_PG_PASSWORD` 已经在该环境中设置（`v3-hermes-plugin/plugin.yaml` 中 `requires_env` 已声明）。然后使用刚才创建的环境启动 Hermes。没有 Hermes host 时，仍可以直接使用 `v3-core` 和其 Python API，但不能把核心包直连测试等同于完整的 Hermes plugin contract 验收。
+
+更详细的安装步骤和约束见 [`docs/INSTALL.md`](docs/INSTALL.md)（[中文](docs/INSTALL.zh-CN.md)）。
 
 ## 外部模型与 provider 配置
 
@@ -285,7 +292,7 @@ Hippocampus 的数据边界可以这样理解：
 
 ### 为什么第一次写入时报表不存在？
 
-数据库 bootstrap 是显式步骤，不是自动首次运行步骤。确认你已经对 disposable PostgreSQL 执行了 `src/v3-core/scripts/bootstrap_alpha_db.py`，并且连接参数与容器一致。详见 [`docs/INSTALL.md`](docs/INSTALL.md) 第 6 节。
+数据库 bootstrap 是显式步骤，不是自动首次运行步骤。确认你已经对 disposable PostgreSQL 执行了 `hippocampus bootstrap --target ...`，并且连接参数与容器一致。详见 [`docs/INSTALL.md`](docs/INSTALL.md) 第 7 节。
 
 ### 为什么没有向量召回或自动摘要？
 
@@ -312,7 +319,7 @@ Windows 下公开 Alpha 要求 `basePath` 使用绝对路径，不能依赖引�
 | [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md) | 项目的思想演变：从“让她记住我”、Soul，到“生成即是存在”、记忆治理和连续性问题。 |
 | [`docs/COMPARISON.zh-CN.md`](docs/COMPARISON.zh-CN.md) | 中文方案对比：Hermes 内置记忆、历史搜索、Mem0、Hindsight 与 Hippocampus 分别适合什么。 |
 | [`docs/ALPHA-TESTING.zh-CN.md`](docs/ALPHA-TESTING.zh-CN.md) | 中文 Public Alpha 实测指南：如何跑 3～7 天真实项目并提交有价值的失败案例。 |
-| [`docs/INSTALL.md`](docs/INSTALL.md) | Windows 安装、disposable pgvector、本地源码安装和 bootstrap。 |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Windows artifact build/install、disposable pgvector、Hermes host 和 bootstrap。 |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | `config.yaml`、环境变量、provider 默认行为和 fail-closed 规则。 |
 | [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | PostgreSQL dump / restore 以及恢复后检查。 |
 | [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md) | 哪些数据保存在本地，哪些数据会发给已配置的 provider。 |
