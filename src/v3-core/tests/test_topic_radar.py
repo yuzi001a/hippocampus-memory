@@ -237,9 +237,14 @@ def test_max_dups_bound_truncates_list_but_keeps_total():
 
 def test_max_rels_bound_truncates_list_but_keeps_total():
     import math
-    # 4 topics: t0/t1 orthogonal (excluded), t0/t2 cosine ~0.50 (excluded below
-    # rel_threshold), t0/t3 cosine ~0.70 (related). Add t1/t2 cosine ~0.70,
-    # t2/t3 cosine ~0.70 — 3 related pairs total.
+    # 4 topics pairwise:
+    #   t0 vs t1 -> cos 0.0   (excluded)
+    #   t0 vs t2 -> cos ~0.7071 (related)
+    #   t0 vs t3 -> cos 0.70  (related)
+    #   t1 vs t2 -> cos ~0.7071 (related)
+    #   t1 vs t3 -> cos ~0.7141 (related)
+    #   t2 vs t3 -> cos ~0.99995 (duplicate)
+    # -> 4 related pairs and 1 duplicate pair before truncation.
     rows = [
         _topic_row("t0", "a", [1.0, 0.0]),
         _topic_row("t1", "b", [0.0, 1.0]),         # orthogonal to t0/t2
@@ -248,7 +253,8 @@ def test_max_rels_bound_truncates_list_but_keeps_total():
     ]
     conn, cur = _pg(rows)
     rep = radar_scan(conn, max_rels=1)
-    assert rep["rel_total"] >= 2
+    assert rep["dup_total"] == 1
+    assert rep["rel_total"] == 4
     assert len(rep["related"]) == 1
 
 
@@ -281,7 +287,10 @@ def test_malformed_data_is_ignored_safely():
     # scanned reflects what _load_topic_embeddings returned (all rows whose
     # embedding text was non-empty AND parseable to at least one float);
     # t5 is included even though it was later dropped for length mismatch.
-    assert rep["scanned"] >= 3
+    # Of the 6 input rows: t1 (NULL) and t2 ("") are dropped at the falsy
+    # guard, t3 (unparsable) is dropped at the parse except. The 3 survivors
+    # are t0, t4 (both 2-dim) and t5 (3-dim, kept by loader, dropped later).
+    assert rep["scanned"] == 3
 
 
 def test_db_read_failure_fails_safely():
@@ -305,6 +314,8 @@ def test_no_writes_issued():
     # No commit / rollback / close.
     assert conn.commits == 0
     assert conn.rollbacks == 0
+    # E1 owns the connection lifecycle — radar_scan must never close it.
+    assert conn.closed is False
 
 
 def test_module_source_contains_no_private_path():

@@ -18,15 +18,12 @@ from __future__ import annotations
 
 import importlib.util
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
 
 REPO_SRC = Path(__file__).resolve().parents[1] / "src"
-if str(REPO_SRC) not in sys.path:
-    sys.path.insert(0, str(REPO_SRC))
 
 
 def test_find_spec_resolves_topic_radar():
