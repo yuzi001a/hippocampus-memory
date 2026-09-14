@@ -1,9 +1,8 @@
-# Release Checklist — Hippocampus v0.1-alpha
+# Release Checklist — v3 Memory Plugin
 
-> What must be true for the Hippocampus v0.1-alpha public publication
-> and which items remain for a later stable release. Each item is
+> What must be true before a stable public release. Each item is
 > grouped by area. The list mixes the
-> **public-alpha gates** the current release already satisfies on
+> **public-alpha gates** the current candidate already satisfies on
 > the declared surface (Section A–E) with the **POST-ALPHA / STABLE
 > readiness items** the alpha does **not** close by itself (Section
 > P–S). Data safety and privacy/security gates are **not** weakened
@@ -56,11 +55,8 @@
 
 ## C. Security / privacy readiness — public-alpha gates
 
-- [x] **Publication security gate — current alpha blocker:** no real
-      credentials, no personal absolute paths, and no production
-      endpoints are shipped in the public tree. This gate belongs to
-      the current alpha publication, not only to a future stable tag.
-      Verify with:
+- [x] **No real credentials, no personal absolute paths, no production
+      endpoints** in any committed file in this repo. Verify with:
       ```bash
       git grep -nE '(BEGIN RSA|sk-[A-Za-z0-9]{20,}|api[_-]?key|password|secret)' \
         -- ':!src/*/tests/**' ':!docs/archive/**' ':!*.dump'
@@ -73,7 +69,7 @@
       [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
       § 5 "Privacy / security" row; the clean-export builder
       (`tools/build_public_export.py`) is part of the additive tooling
-      in this release, **not** part of the public export.
+      in this candidate, **not** part of the public export.
 - [x] **License consistency** — both subpackages declare
       `AGPL-3.0-or-later` in their `pyproject.toml` and ship a `LICENSE`
       file. The monorepo does not introduce a new top-level license.
@@ -111,49 +107,54 @@
 ## P. POST-ALPHA / STABLE — code readiness
 
 - [ ] **Independent-user fresh-install matrix** declared and run on
-      multiple OS / Python combinations. The alpha evidence covers one
-      disposable environment; the stable release needs a
+      multiple OS / Python combinations. The alpha evidence is one
+      lab run on one environment; the stable release needs a
       broader matrix. ([`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
       § 5 "Installability")
 - [x] **Focused preservation file re-validation** — the six source-ingest
-      preservation files were run independently on this release to avoid
+      preservation files were run independently on this candidate to avoid
       known order contamination; all passed (9 + 4 + 13 + 19 + 15 + 12).
-      `test_import_hermes_state.py` also passed 3 tests. The release
+      `test_import_hermes_state.py` also passed 3 tests. The candidate
       records 191 focused passes in total. This is not a full-suite claim.
       ([`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
       § 4)
 - [ ] **`pytest tests/` policy** — are the focused preservation
-      files expected to be re-run on every PR, or only on release
+      files expected to be re-run on every PR, or only on candidate
       tags? Whatever the policy is, write it down somewhere users
       can find it.
 
-## Q. PUBLIC ALPHA PUBLICATION — CLOSED
+## Q. POST-ALPHA / STABLE — documentation readiness
 
-- [x] **Public identity** — the alpha is published as
-      `yuzi001a/hippocampus-memory` with the product name
-      **Hippocampus**. The public tree has its own clean history and does not inherit
-      development history.
-- [x] **Clean public history** — the public `main` starts with one
-      initial commit and the `v0.1-alpha` tag points to that commit.
-- [x] **Release notes** — `CHANGELOG.md` and the GitHub prerelease
-      describe the technical-preview boundary and do not claim stable
-      production readiness.
+- [ ] **Repository visibility decision** made and recorded. Options:
+  1. Publish a clean-history mirror as the public repo (alpha path).
+  2. Rewrite private history (only if a concrete benefit is documented).
+- [ ] **Tag object + peeled SHA + manifest** recorded for the public
+      release. The intended convention is:
+  - tag = `release/public-alpha-<YYYYMMDD>`
+  - peeled SHA verified via `git rev-parse <tag>^{commit}`
+  - release manifest under `docs/release-manifest-<tag>.md`
+- [ ] **Release notes** drafted. The `CHANGELOG.md` is the user-facing
+      entry; the release manifest is the internal record.
 
-## R. PUBLIC ALPHA PUBLICATION SECURITY — CLOSED
+## R. POST-ALPHA / STABLE — security / privacy readiness
 
-- [x] **Alpha credential/privacy disposition** — the publication-tree
-      security and privacy gate is closed for v0.1-alpha. No real
-      credential, private endpoint, local runtime state, or private
-      Git history is shipped. Future releases must repeat the same
-      gate for any newly introduced credentials or private data.
+- [ ] **Credential rotation / invalidation receipt** for any
+      credentials historically present in this repo, executed at the
+      source provider. The pre-tag checklist records this as
+      required before the public release; the alpha evidence does
+      not include an actual rotation receipt — only the documented
+      guidance in [`SECURITY.md`](../SECURITY.md) § 3 and
+      [`docs/PRIVACY-DATA-FLOW.md`](PRIVACY-DATA-FLOW.md) § 8. Until
+      the rotation is recorded, this row remains OPEN. This is **not**
+      weakened for the alpha — a stable tag still requires it.
 
 ## S. POST-ALPHA / STABLE — install / backup readiness
 
-- [ ] **Rollback package** documented. A rollback package for future stable releases remains
-      follow-up work.
+- [ ] **Rollback package** documented. A staged rollback package is
+      the historical reference; adapt it for the public-alpha
+      candidate.
 - [ ] **Role/grant story** consistent between source and target PG.
-      Ownership and grant policy for future stable deployments remains
-      an operator decision.
+      Lab used `--no-owner`; production must decide.
 - [ ] **Schema-artifact migration plan** (separate from the
       explicit bootstrap CLI) documented for ops.
 - [ ] **Independent third-party fresh-install proof** on a
@@ -162,12 +163,11 @@
 
 ## T. POST-ALPHA / STABLE — tool surface stability
 
-- [x] `v3-core info` is documented as a minimal status summary;
-      provider health remains a separate `v3_health` contract.
+- [ ] `v3-core info` exit code is documented (0 = ok, 1 = pg fail, etc.).
 - [ ] `v3_health` JSON shape is documented and stable enough to be a
       contract.
 - [ ] `examples/config.example.yaml` round-trips: copy → fill →
-      provider health is not inferred from `v3-core info`.
+      `v3-core info` reports `pg: OK`.
 - [ ] `examples/.env.example` does not contain any real-looking
       credential.
 - [ ] `examples/config.example.yaml` does not name any real provider

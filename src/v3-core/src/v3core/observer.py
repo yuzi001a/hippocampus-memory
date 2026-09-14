@@ -75,10 +75,11 @@ def _safe_notes_table(notes_table: str) -> str:
 # 常量 / 路径
 # ────────────────────────────────────────────────────────────
 
-# compression_engine 与 v3core 位于本发行树的对应源码目录。
+# compression_engine 包位于 src/v3-memory-plugin/src/compression_engine,
+# v3core 包位于 src/v3-memory-plugin/src/v3-core/src/v3core。
 # 这两个目录都是 Python import path, compression_engine 走 sys.path 或 importlib 都可。
 # 用 importlib 直接加载避免 sys.path 状态依赖 (daemon thread 不确定)。
-_V3_PLUGIN_ROOT = Path(__file__).resolve().parents[4]  # 从当前源码文件向上定位发行树根目录
+_V3_PLUGIN_ROOT = Path(__file__).resolve().parents[4]  # .../v3-memory-plugin/src/v3-core/src/v3core/observer.py → 上 4 级
 _COMPRESSION_ENGINE_PATH = _V3_PLUGIN_ROOT / "compression_engine" / "__init__.py"
 
 # 观察笔记游标 — 状态文件路径一律走 _state_path() (config 数据目录, 2026-08-12 幽灵游标事故后禁源码树路径)

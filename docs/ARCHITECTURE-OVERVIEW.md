@@ -1,12 +1,12 @@
-# Architecture Overview — Hippocampus v0.1-alpha
+# Architecture Overview — v3 Memory Plugin
 
 > A reading map for someone who wants to understand the supported
-> surface without reading the whole engine. This concise document is
-> the public alpha-facing summary; the source tree is the authority for
-> implementation details outside the supported contract.
+> surface without reading the whole engine. The deep design lives in
+> `docs/architecture-unified-design.md` and
+> `docs/TARGET-ARCHITECTURE.md`; this doc is the alpha-facing summary.
 >
-> Code references below are to the actual modules on this release's
-> HEAD. Internal development identifiers are not part of
+> Code references below are to the actual modules on this candidate's
+> HEAD. A private development branch name or commit SHA is not part of
 > the public contract — see
 > [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
 > § 1 for the evidence window the alpha claims depend on. File paths
@@ -17,7 +17,7 @@
 ## 1. Two packages, one engine
 
 ```
-hippocampus-memory/
+v3-memory-plugin/
 ├── src/v3-core/                       ← engine (no Hermes coupling)
 │   ├── src/v3core/
 │   │   ├── __init__.py                ← V3Core façade
@@ -47,10 +47,12 @@ hippocampus-memory/
 │   │   ├── bootstrap_alpha_db.py      ← explicit alpha DB bootstrap (CLI)
 │   │   └── backup_alpha.py            ← alpha backup helper (pg_dump / pg_restore)
 │   ├── tests/                         ← focused tests (unit + disposable-PG)
+│   └── lab/                           ← lab recipes
 │
 └── src/v3-hermes-plugin/              ← Hermes adapter
     └── src/v3hermes/
         ├── __init__.py                ← provider entry + 13 tool handlers + 6 hooks
+        └── skills/                    ← v3-install-check / v3-workflow
 ```
 
 The split is deliberate: `v3-core` has **no Hermes dependency** and can be
@@ -226,6 +228,7 @@ architecture standpoint, the key points are:
   [`docs/PRIVACY-DATA-FLOW.md`](PRIVACY-DATA-FLOW.md).
 - For the *what's still broken / deferred* question →
   [`docs/KNOWN-LIMITATIONS.md`](KNOWN-LIMITATIONS.md).
-- For implementation details outside the supported surface, inspect
-  the corresponding source modules only after reading the supported-
-  surface and limitations documents.
+- For the deep dive into observer / E1 / topic internals →
+  `docs/architecture-unified-design.md` and
+  `docs/runtime-architecture.md`. These are dense; this doc is the
+  alpha-facing summary.

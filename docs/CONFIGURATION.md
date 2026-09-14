@@ -1,4 +1,4 @@
-# Configuration — Hippocampus v0.1-alpha
+# Configuration — v3 Memory Plugin
 
 > Two config layers. Both must be present for the supported surface to work:
 >
@@ -248,9 +248,10 @@ After writing your config, the engine ships a CLI:
 v3-core info
 ```
 
-This prints a minimal engine status summary. It is not a promise of a
-stable provider-health output and it does not require a literal `pg: OK`
-line. Provider health is a separate `v3_health` contract.
+This prints the engine version, the resolved profile/data dir, and a per-
+provider connection report. A "FAIL" line for `pg` means your credentials
+or network are wrong; "SKIP" means the provider is intentionally
+unconfigured (fail-closed default).
 
 ---
 

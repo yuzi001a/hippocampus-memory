@@ -626,7 +626,7 @@ def _doctor_probe_database(explicit_dsn: str | None) -> dict[str, Any]:
 
 
 def _parse_dsn(dsn: str) -> dict[str, Any]:
-    """Parse a ``postgresql://[user[:password]@]host[:port]/[database]`` DSN.
+    """Parse a PostgreSQL DSN in ``scheme://[user[:password]@]host[:port]/[database]`` form.
 
     Returns a dict with any subset of: ``user``, ``password``, ``host``,
     ``port``, ``database``. The password field is populated when
@@ -912,7 +912,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Explicit DSN string for the bootstrap target, e.g. "
-            "postgres://user:pw@127.0.0.1:55432/v3embeddings_alpha. "
+            "scheme://<user>:<password>@<host>:<port>/<database>. "
             "Either this, --dsn, or V3CORE_BOOTSTRAP_DSN is required."
         ),
     )

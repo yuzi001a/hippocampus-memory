@@ -1,4 +1,4 @@
-# Privacy & Data Flow — Hippocampus v0.1-alpha
+# Privacy & Data Flow — v3 Memory Plugin
 
 > This document describes where user data lives and where it goes **for the
 > supported public-alpha surface**. It does not enumerate every code path
@@ -50,7 +50,7 @@ decide where requests go.
   (`src/v3-core/schema/explicit_memories.sql`) and ops owns migration.
 - It does **not** upload your PG data to a third-party service.
 - It does **not** send your config or secrets to anyone — they live on disk.
-- It does **not** print secrets in logs. The `_safe_err`
+- It does **not** print secrets in logs. The historical `_safe_err`
   sanitization covers DSNs, prompts, and keys.
 - It does **not** open listening sockets on the network for the alpha
   surface. `v3-core` is a library + CLI; the only network egress it does is
@@ -161,15 +161,26 @@ distinction are documented in `src/v3-core/src/v3core/llmstatus.py`.
 
 ---
 
-## 8. Handling secrets
+## 8. If you find historical credentials in this repo
 
-The public tree is intended to contain no real credentials. If you
-discover a credential in a checkout, log, issue, or configuration, do
-not publish it or paste it into a public issue. Rotate or invalidate it
-at the source provider, then remove it from local logs and temporary
-files. This repository does not promise a private security channel;
-withhold sensitive details until a verified private channel is
-available.
+This repository is the **public-alpha hardening** candidate. Historical
+internal commits may have referenced credentials that are no longer valid.
+If you find one:
+
+1. Do **not** publish the credential. Treat it as compromised by default.
+2. **Rotate it at the source provider** (PG, embedding API, LLM API,
+   rerank API). The plugin's `requires_env: [V3CORE_PG_PASSWORD]` does not
+   auto-rotate.
+3. File an issue (see [`CONTRIBUTING.md`](../CONTRIBUTING.md)) and
+   reference the commit SHA; do not paste the credential.
+4. Whether a rotation receipt has been recorded for this repo's
+   historical credentials is **OPEN** — see
+   [`docs/RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md) § R (Credential
+   rotation / invalidation receipt). The alpha evidence documents the
+   rotation **procedure**, not a specific completed rotation; a stable
+   release tag still requires the receipt at the source provider.
+
+---
 
 ## 9. Threat-model boundaries (alpha scope)
 
