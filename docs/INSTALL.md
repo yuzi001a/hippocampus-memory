@@ -49,14 +49,14 @@
 ## 2. Clone
 
 ```powershell
-git clone https://example.invalid/v3-memory-plugin.git
-cd v3-memory-plugin
+git clone https://github.com/yuzi001a/hippocampus-memory.git
+cd hippocampus-memory
 ```
 
-The public repository URL above is a placeholder for the not-yet-
-published public mirror. Replace it with the published URL once the
-public release is cut; do not assume any specific tag, branch, or
-commit SHA from this document — every supported-surface row in
+This public repository is the canonical development and release source
+for `v3-core` and `v3-hermes-plugin`. Do not assume any specific tag,
+branch, or commit SHA from this document — every supported-surface
+row in
 [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
 § 2 records the evidence under whatever `HEAD` the verifier checked
 out, not a fixed internal identifier.

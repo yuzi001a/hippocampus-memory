@@ -6,8 +6,8 @@
 > `docs/TARGET-ARCHITECTURE.md`; this doc is the alpha-facing summary.
 >
 > Code references below are to the actual modules on this candidate's
-> HEAD. A private development branch name or commit SHA is not part of
-> the public contract — see
+> HEAD. Branch and commit identifiers are evidence-window details, not
+> the supported API — see
 > [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
 > § 1 for the evidence window the alpha claims depend on. File paths
 > are relative to the repo root unless stated otherwise.
@@ -17,7 +17,7 @@
 ## 1. Two packages, one engine
 
 ```
-v3-memory-plugin/
+hippocampus-memory/
 ├── src/v3-core/                       ← engine (no Hermes coupling)
 │   ├── src/v3core/
 │   │   ├── __init__.py                ← V3Core façade
