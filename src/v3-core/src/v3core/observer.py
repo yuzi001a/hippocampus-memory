@@ -44,7 +44,6 @@ config.yaml 示例 (可选, 缺则用兜底默认):
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import os
@@ -70,19 +69,6 @@ def _safe_notes_table(notes_table: str) -> str:
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?", value):
         raise ValueError(f"非法 notes_table: {value!r}")
     return value
-
-# ────────────────────────────────────────────────────────────
-# 常量 / 路径
-# ────────────────────────────────────────────────────────────
-
-# compression_engine 包位于 src/v3-memory-plugin/src/compression_engine,
-# v3core 包位于 src/v3-memory-plugin/src/v3-core/src/v3core。
-# 这两个目录都是 Python import path, compression_engine 走 sys.path 或 importlib 都可。
-# 用 importlib 直接加载避免 sys.path 状态依赖 (daemon thread 不确定)。
-_V3_PLUGIN_ROOT = Path(__file__).resolve().parents[4]  # .../v3-memory-plugin/src/v3-core/src/v3core/observer.py → 上 4 级
-_COMPRESSION_ENGINE_PATH = _V3_PLUGIN_ROOT / "compression_engine" / "__init__.py"
-
-# 观察笔记游标 — 状态文件路径一律走 _state_path() (config 数据目录, 2026-08-12 幽灵游标事故后禁源码树路径)
 
 # ────────────────────────────────────────────────────────────
 # v3 触发判断 — 纯函数 (无副作用, 便于回放验证)

@@ -124,3 +124,29 @@ surface:
   [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
   and
   [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md).
+
+---
+
+## 7. Canonical development repository
+
+This repository is the **single canonical** location for normal
+Hippocampus development, releases, and PyPI publication. Specifically:
+
+- Normal runtime, packaging, tests, docs, Hermes adapter, evaluator,
+  and other day-to-day work happens here, and is contributed through
+  PRs against this repository.
+- CI runs here. The product CI workflow
+  (`.github/workflows/product-ci.yml`) and the packaging smoke
+  workflow (`.github/workflows/distribution-packaging-smoke.yml`)
+  execute against this repository on every pull request.
+- Releases and PyPI artifacts are prepared from this repository.
+- Issues and discussions about the supported surface
+  (see [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md))
+  belong here.
+
+If you want to propose a change that affects the supported surface —
+new schema, new tool, new provider, new packaging artifact, change to
+the README / public docs, change to the test matrix — open an issue
+or PR **here** and follow the rest of this file (issue template, PR
+template, license headers, no secrets, etc.).
+

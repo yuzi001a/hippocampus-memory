@@ -3,8 +3,8 @@
 默认转发到 v3_store（标准卡写入）。
 如果 args.to_handbook=True 且 args.handbook_key 非空，转发到 hm_write（同写卡 + handbook 条目）。
 
-P2a (2026-09-09): 不引入新 schema, 仅在缺失 handbook_key 时把错误 receipt
-补齐 P2a 字段 (durable=False/source_id=""...), 让上层 caller 拿到的失败
+explicit-memory boundary: 不引入新 schema, 仅在缺失 handbook_key 时把错误 receipt
+补齐 explicit-memory boundary 字段 (durable=False/source_id=""...), 让上层 caller 拿到的失败
 形状与成功形状一致, 方便 UI/审计按 success 字段分支.
 """
 from __future__ import annotations
@@ -30,7 +30,28 @@ logger = logging.getLogger("v3core.tools.api_add")
 
 V3_ADD_SCHEMA = {
     "name": "v3_add",
-    "description": "[2-写卡] 写入记忆卡 — 写一张碑(b)卡到指定类别（可选同时写 handbook）",
+    # A0 explicit-memory opt-in contract: same ownership rule
+    # as V3_STORE_SCHEMA. Every v3_add → durable write into
+    # public.explicit_memories (unless to_handbook=True, in which case
+    # it also mirrors a handbook entry). Allowed ONLY when the user
+    # explicitly asks to remember / store / save / retain a specific
+    # durable item, or an explicitly authorized host workflow (handbook
+    # sync, seed import, etc.) requests it. NOT allowed for: dev
+    # experience, reviewer findings, debugging notes, task status /
+    # summary, implementation decisions, inferred preferences / facts,
+    # generic lessons, or 'summarize tonight'.
+    "description": (
+        "[2-写卡] OPT-IN explicit-memory write — write a card into the "
+        "specified category (optionally also to handbook when "
+        "to_handbook=True). Delegates to v3_store / hm_write and therefore "
+        "shares the public.explicit_memories opt-in contract: allowed ONLY "
+        "when the user explicitly asks to remember / store / save / retain a "
+        "specific durable item, or an explicitly authorized host workflow "
+        "(handbook sync, seed import, etc.) requests it. NOT authorization: "
+        "dev experience, reviewer findings, debugging notes, task status / "
+        "summary, implementation decisions, inferred preferences / facts, "
+        "generic lessons, or 'summarize tonight'."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -50,7 +71,7 @@ V3_ADD_SCHEMA = {
                 "type": "string",
                 "description": "handbook 条目 key (to_handbook=True 时必填)",
             },
-            # P2a SOL-review C (2026-09-09): 与 V3_STORE_SCHEMA 同口径
+            # explicit-memory boundary SOL-review C: 与 V3_STORE_SCHEMA 同口径
             # 收窄 — ``source_id`` 保留 (caller 显式身份), ``source`` /
             # ``source_j_ids`` 不再作为公共 v3_add property 暴露. 内部兼
             # 容由 handle_v3_add 透传给 handle_v3_store / handle_hm_write,
@@ -65,7 +86,7 @@ V3_ADD_SCHEMA = {
 def handle_v3_add(args: dict, **kw) -> str:
     """Unified write: delegates to v3_store or hm_write based on to_handbook flag.
 
-    P2a (2026-09-09) 工具层契约: 把 P2a 字段 (durable/source_id/durable_store/
+    explicit-memory boundary 工具层契约: 把 explicit-memory boundary 字段 (durable/source_id/durable_store/
     status/warnings) 一并透传, 不擦 source 真值. handbook 失败走 warning,
     不改写 PG 真值.
     """
@@ -75,7 +96,7 @@ def handle_v3_add(args: dict, **kw) -> str:
 
         if to_handbook:
             if not handbook_key:
-                # P2a: 补齐失败 receipt 形状, 避免上层 caller 收到 success=False
+                # explicit-memory boundary: 补齐失败 receipt 形状, 避免上层 caller 收到 success=False
                 # 还要重新 try/except 拿 durable 字段.
                 return json.dumps(
                     {
@@ -89,7 +110,7 @@ def handle_v3_add(args: dict, **kw) -> str:
                     ensure_ascii=False,
                 )
             from .write_tool import handle_hm_write
-            # P2a (2026-09-09): 透传 caller 提供的来源溯源字段 (与 V3_STORE_SCHEMA 同语义,
+            # explicit-memory boundary: 透传 caller 提供的来源溯源字段 (与 V3_STORE_SCHEMA 同语义,
             # 不伪造 QA id). 复用 store._PROVENANCE_KEYS 白名单, 只挑 caller 显式
             # 提供的非空值, 没传就让 core 走确定性的请求身份兜底.
             from .store import _extract_provenance

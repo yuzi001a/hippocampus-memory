@@ -37,10 +37,11 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Paths (resolved via outer-candidate markers; the candidate layout is
-#   <repo_root>/AGENTS.md
-#   <repo_root>/src/v3-core/schema/alpha_bootstrap.sql
-# so we require BOTH markers to identify the repo root unambiguously.
+# Paths (resolved via public repo-root markers). The repo root is
+# identified by the canonical public artifact path
+# ``src/v3-core/schema/alpha_bootstrap.sql`` together with
+# ``src/v3-core/scripts/bootstrap_alpha_db.py`` — both of which are
+# shipped in the public tree.
 # ---------------------------------------------------------------------------
 
 
@@ -48,13 +49,14 @@ def _find_repo_root(start: Path) -> Path:
     cur = start.resolve()
     for parent in [cur, *cur.parents]:
         if (
-            (parent / "AGENTS.md").is_file()
-            and (parent / "src" / "v3-core" / "schema" / "alpha_bootstrap.sql").is_file()
+            (parent / "src" / "v3-core" / "schema" / "alpha_bootstrap.sql").is_file()
+            and (parent / "src" / "v3-core" / "scripts" / "bootstrap_alpha_db.py").is_file()
         ):
             return parent
     raise FileNotFoundError(
-        f"找不到 outer-candidate root (需要 AGENTS.md + src/v3-core/schema/"
-        f"alpha_bootstrap.sql) from {start}"
+        f"cannot locate hippocampus repo root (need "
+        f"src/v3-core/schema/alpha_bootstrap.sql + "
+        f"src/v3-core/scripts/bootstrap_alpha_db.py) from {start}"
     )
 
 
@@ -712,7 +714,7 @@ class TestBootstrapScript:
 
 
 # ---------------------------------------------------------------------------
-# bootstrap_alpha_db.py — path-resolution hardening (G4 2026-09-10)
+# bootstrap_alpha_db.py — path-resolution hardening
 # ---------------------------------------------------------------------------
 #
 # Bug being pinned: the previous _find_repo_root() resolved upward from

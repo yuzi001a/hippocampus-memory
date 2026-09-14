@@ -1,9 +1,22 @@
-"""v3-core CLI — init / migrate / status"""
+"""v3-core CLI — init / migrate / status / config"""
 from __future__ import annotations
 import argparse, json, os, shutil, sys
 from pathlib import Path
 
+# Thin config CLI control plane. Imported defensively at module load;
+# the service itself is only used when the user invokes ``config``.
 
+
+_CONFIG_CLI_IMPORT_ERROR = None
+try:
+    from .config_cli import add_config_parser, run_config
+except Exception as exc:  # pragma: no cover - exercised by import-failure tests
+    # Keep legacy commands usable when the optional config surface cannot
+    # import, but retain the exception so an explicit ``config`` request
+    # fails visibly and safely in ``main`` below.
+    add_config_parser = None  # type: ignore[assignment]
+    run_config = None  # type: ignore[assignment]
+    _CONFIG_CLI_IMPORT_ERROR = exc
 
 try:
     from . import _safe_err
@@ -236,6 +249,26 @@ def main():
     serve_p.add_argument("--port", type=int, default=39090, help="监听端口 (默认 39090)")
     serve_p.add_argument("--profile", default="default", help="V3Core profile (默认 default)")
 
+    # Thin config control plane (subcommands: show / validate /
+    # set-provider / set-key / set-toggle / test). Keep legacy commands
+    # usable if the config surface cannot import or register, but fail
+    # visibly when the user explicitly requests ``config``.
+    _requested_command = sys.argv[1] if len(sys.argv) > 1 else None
+    _config_registration_error = _CONFIG_CLI_IMPORT_ERROR
+    if _config_registration_error is None:
+        try:
+            add_config_parser(sub)
+        except Exception as exc:  # pragma: no cover - focused regression
+            _config_registration_error = exc
+    if _config_registration_error is not None and _requested_command == "config":
+        try:
+            _diag = _safe_err(_config_registration_error, 200)
+        except Exception:
+            _diag = f"{type(_config_registration_error).__name__}: config CLI unavailable"
+        sys.stderr.write("v3-core: config CLI unavailable: " + _diag + "\n")
+        sys.stderr.flush()
+        sys.exit(2)
+
     args = parser.parse_args()
     if args.command == "info":
         args.command = "status"
@@ -254,8 +287,13 @@ def main():
     elif args.command == "serve":
         from .serve import serve
         serve(host=args.host, port=args.port, profile=args.profile)
+    elif args.command == "config":
+        if run_config is None:
+            print("error: config CLI unavailable (config_cli import failed)", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(run_config(args))
     else:
         parser.print_help()
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

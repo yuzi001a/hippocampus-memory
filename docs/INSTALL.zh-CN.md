@@ -41,14 +41,14 @@
 ## 2. 克隆
 
 ```powershell
-git clone https://example.invalid/v3-memory-plugin.git
-cd v3-memory-plugin
+git clone https://github.com/yuzi001a/hippocampus-memory.git
+cd hippocampus-memory
 ```
 
-上面的公开仓库 URL 是尚未发布的公开镜像占位；公开版本发布后请
-替换为正式 URL。本文档**不**假定任何具体的 tag / branch / commit
-SHA；`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md` 第 2 节的每一行支持面
-证据都对应到验收当时实际检出的 HEAD，而不是某个固定的内部标识。
+本公开仓库是 `v3-core` 与 `v3-hermes-plugin` 的规范开发与发布源。
+本文档**不**假定任何具体的 tag / branch / commit SHA；
+`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md` 第 2 节的每一行支持面证据
+都对应到验收当时实际检出的 HEAD，而不是某个固定的内部标识。
 
 验证工作树是公开 Alpha 候选：
 

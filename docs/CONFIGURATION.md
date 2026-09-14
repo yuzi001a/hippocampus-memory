@@ -240,18 +240,152 @@ Then re-copy the example config and re-fill it. The PG is untouched.
 
 ---
 
-## 9. Validation script
+## 9. Safe configuration control plane
 
-After writing your config, the engine ships a CLI:
+For routine configuration changes, prefer the `v3-core config` commands
+instead of editing `config.yaml` by hand. The commands use the same
+profile resolver and YAML fields as the runtime. Add `--profile <name>`
+to each subcommand when you are not operating on `default`.
+
+### Discover and validate (offline)
+
+```powershell
+v3-core config show --profile default
+v3-core config validate --profile default
+```
+
+`show` prints the resolved profile and config path, database connection
+fields, provider endpoint/model status, feature toggles, and
+conservative readiness information. Passwords and API keys are shown
+only as `CONFIGURED` or `NOT CONFIGURED`; endpoint query strings and
+userinfo credentials are removed from display. `show` and `validate`
+do not make network requests.
+
+`validate` catches missing files, malformed YAML, unsupported section
+shapes, wrong scalar types, invalid PostgreSQL ports, and non-printing
+control characters such as U+0016. A diagnostic names the section/field
+and code point, never the secret value.
+
+### Change an endpoint or model
+
+```powershell
+v3-core config set-provider embedding --endpoint "https://embed.example/v1/embeddings" --model "your-embedding-model"
+v3-core config set-provider rerank --endpoint "https://rerank.example/v1/rerank" --model "your-rerank-model"
+v3-core config set-provider llm --endpoint "https://llm.example/v1" --model "your-chat-model"
+```
+
+For `llm`, `--endpoint` updates the existing runtime field `llm.base_url`;
+it does not create a second `llm.endpoint` setting. Either `--endpoint`
+or `--model` may be supplied. Known feature toggles can be changed
+explicitly, for example:
+
+```powershell
+v3-core config set-toggle e1.enabled off
+v3-core config set-toggle prefetch.enabled on
+```
+
+Each mutation validates a candidate file before replacing the original
+with an atomic same-directory replacement. The command does not create
+automatic `.bak`, `.old`, or timestamped plaintext credential backups.
+Known-field edits use a minimal text mutation so comments, ordering,
+unknown forward-compatible fields, and CRLF line endings are preserved
+where possible.
+
+### Rotate provider keys safely on Windows
+
+A key is never accepted as a command-line argument. Without `--stdin`,
+the CLI uses hidden interactive input. For clipboard input on Windows:
+
+```powershell
+Get-Clipboard -Raw |
+    v3-core config set-key embedding rerank --stdin
+
+v3-core config validate
+v3-core config test embedding
+v3-core config test rerank
+```
+
+The stdin path removes the expected trailing CR/LF, rejects empty
+values and embedded control characters, does not echo the value, and
+updates all explicitly selected targets in one atomic operation. It
+does not infer that embedding and rerank should share a key; list both
+targets deliberately. Only after the new provider tests pass should
+you revoke the old provider key.
+
+**stdin is decoded as strict UTF-8.** The CLI reads the raw stdin
+bytes and runs `bytes.decode("utf-8", errors="strict")` before
+normalising the trailing newline. A clipboard payload in a non-UTF-8
+codepage (e.g. an OEM/ANSI codepage produced by an older tool, a
+UTF-16 paste, or any source that emitted a stray UTF-8 BOM without a
+valid byte sequence) will be rejected with `BAD_STDIN_ENCODING` and a
+non-zero exit — the secret is never partially read, truncated, or
+coerced to a wrong value. The set-key command does not attempt to
+auto-detect the system codepage and does not support arbitrary legacy
+encodings.
+
+Legacy Windows PowerShell defaults to the active OEM codepage for the
+pipeline output. If `Get-Clipboard -Raw` returns an OEM-encoded
+payload, the strict UTF-8 decode will fail. Force the clipboard byte
+stream to UTF-8 **before** piping it into `v3-core` so the secret
+survives the round-trip intact:
+
+```powershell
+# Force PowerShell's stdout / pipeline encoding to UTF-8 for this
+# shell session, then re-run the clipboard pipeline. This does NOT
+# transcode the secret value; it only tells PowerShell to emit the
+# clipboard bytes as UTF-8 instead of the OEM codepage.
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+chcp 65001 | Out-Null
+
+Get-Clipboard -Raw |
+    v3-core config set-key embedding rerank --stdin
+```
+
+Do **not** add the secret as a command-line argument (`--key <value>`)
+to work around an encoding mismatch. Command-line arguments are
+visible to other processes on the host (process listings, ETW, audit
+logs); the stdin contract is the only supported channel for a
+clipboard-supplied secret, and it expects valid UTF-8 bytes.
+
+The control plane keeps API keys in the existing `config.yaml`
+mechanism. It does **not** implement Windows Credential Manager,
+macOS Keychain, Linux Secret Service, an encrypted secret database,
+or another OS-native vault.
+
+### Explicit provider and database tests
+
+These commands are the only configuration commands that may contact a
+provider or PostgreSQL:
+
+```powershell
+v3-core config test embedding
+v3-core config test rerank
+v3-core config test llm
+v3-core config test postgres
+v3-core config test all
+```
+
+Embedding, rerank, and LLM tests use the formal runtime clients with
+synthetic input and do not write to the database. The PostgreSQL
+test runs only `SELECT 1`; it does not migrate, bootstrap, create
+tables, or write rows. `test all` skips optional providers that are
+not configured; an explicitly requested unconfigured target returns
+a failure so automation cannot mistake it for a healthy connection.
+`CONFIGURED` in `show` means fields are present, not that a live test
+has passed.
+
+After writing your config, the engine also ships a basic status
+command:
 
 ```powershell
 v3-core info
 ```
 
-This prints the engine version, the resolved profile/data dir, and a per-
-provider connection report. A "FAIL" line for `pg` means your credentials
-or network are wrong; "SKIP" means the provider is intentionally
-unconfigured (fail-closed default).
+This prints the engine version, the resolved profile/data dir, and a
+per-provider connection report. A "FAIL" line for `pg` means your
+credentials or network are wrong; "SKIP" means the provider is
+intentionally unconfigured (fail-closed default).
 
 ---
 

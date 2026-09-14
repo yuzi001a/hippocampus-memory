@@ -22,12 +22,49 @@ logger = logging.getLogger("v3core.tools.extract")
 
 V3_EXTRACT_SCHEMA = {
     "name": "v3_extract",
-    "description": "[1-自动] extract cards from conversation text. Pass experts=['decisions','lessons',...] for multi-expert mode (one card per expert, distinct category)",
+    # A0 explicit-memory opt-in contract: v3_extract is a
+    # PREVIEW/DERIVED tool by default. ``write=True`` commits each
+    # extracted card into public.explicit_memories — that is the SAME
+    # durable canonical write as v3_store / v3_add, and therefore the
+    # SAME opt-in authorization rule applies: caller must have explicit
+    # authorization (user asks to remember/store/save/retain a specific
+    # durable item, OR an explicitly authorized host workflow requests
+    # it). NOT authorization: dev experience, reviewer findings,
+    # debugging notes, task status/summary, implementation decisions,
+    # inferred preferences/facts, generic lessons, or 'summarize tonight'.
+    # Default semantics: write=False (preview-only, non-durable).
+    "description": (
+        "[1-自动] OPT-IN-AWARE extractor — preview cards from conversation text "
+        "(default write=False = preview-only, non-durable). Pass "
+        "experts=['decisions','lessons',...] for multi-expert mode (one "
+        "card per expert, distinct category). Setting write=True commits "
+        "extracted cards into public.explicit_memories (durable); that "
+        "commit is a canonical explicit-memory write and follows the "
+        "v3_store / v3_add opt-in contract — caller MUST have explicit "
+        "authorization (user asks to remember / store / save / retain a "
+        "specific durable item, or an explicitly authorized host workflow "
+        "requests it). NOT authorization: dev experience, reviewer "
+        "findings, debugging notes, task status / summary, implementation "
+        "decisions, inferred preferences / facts, generic lessons, or "
+        "'summarize tonight'."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "raw_text": {"type": "string", "description": "conversation text"},
-            "write": {"type": "boolean", "description": "True=persist, False=dry-run only"},
+            # A0: explicit default = False. Passive/derived
+            # extraction never silently promotes into explicit memory.
+            "write": {
+                "type": "boolean",
+                "description": (
+                    "OPT-IN: True=commit extracted cards into "
+                    "public.explicit_memories (durable canonical write — "
+                    "follows the v3_store opt-in contract). False=preview "
+                    "only, non-durable (default). A False→True flip is an "
+                    "explicit authorization, not a default."
+                ),
+                "default": False,
+            },
             "experts": {
                 "type": "array",
                 "items": {"type": "string", "enum": ["decisions", "lessons", "projects", "system"]},
