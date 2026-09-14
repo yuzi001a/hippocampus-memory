@@ -557,42 +557,66 @@ class TestKwargsPassthrough:
         assert res.query_context is not None
         assert res.query_context.max_chars == 9999
 
-    def test_r4a_max_chars_typeerror_safety_net_recovers(self) -> None:
-        """G6B Slice F (R4a) — safety net: a callable that has
-        ``**kwargs`` and deliberately raises ``TypeError('unexpected
-        keyword argument max_chars')`` on the first call and succeeds
-        on the second call must end with exactly TWO invocations, a
-        valid result, and no exception.  The safety net is purely
-        message-driven so it fires regardless of whether the engine
-        actually forwarded ``max_chars`` (in the strict rule the
-        engine does NOT forward it for a ``**kwargs``-only wrapper,
-        but the safety net still catches the synthetic TypeError)."""
+    def test_r4a_typeerror_with_trace_message_does_not_retry(self) -> None:
+        """G6B Slice G (Part 3 / A1) — a callable whose body raises
+        ``TypeError('unexpected keyword argument trace')`` after the
+        engine has already invoked it must NOT be retried.  The
+        pre-execution validator (NOT the exception message) is the
+        only place the engine decides which optional keywords to
+        forward.  Once the callable is invoked, ANY exception (this
+        :class:`TypeError` included) propagates unchanged.  Invariant:
+        the side-effect counter is EXACTLY 1, no retry happened, and
+        the :class:`TypeError` propagates to the caller.
+        """
         state = {"calls": 0}
 
-        def _first_raises_max_chars(
+        def _raises_trace_keyword(*args: Any, **kwargs: Any) -> tuple[list, bool]:
+            state["calls"] += 1
+            raise TypeError("unexpected keyword argument 'trace'")
+
+        engine = RecallV2Engine(recall_fn=_raises_trace_keyword)
+        with pytest.raises(TypeError) as excinfo:
+            engine.recall("hello")
+        # Engine did NOT retry based on the exception message.
+        assert state["calls"] == 1, (
+            f"engine must not retry when a body-raised TypeError mentions "
+            f"'trace'; got {state['calls']} invocations"
+        )
+        # The propagated TypeError is the one raised by the callable,
+        # not a wrapper exception — the message is intact.
+        assert "trace" in str(excinfo.value)
+
+    def test_r4b_typeerror_with_max_chars_message_does_not_retry(self) -> None:
+        """G6B Slice G (Part 3 / A2) — same property as A1 but with
+        ``TypeError('unexpected keyword argument max_chars')``: the
+        side-effect counter is EXACTLY 1, no retry happened, and the
+        :class:`TypeError` propagates.  This is the explicit
+        counter-test to the deleted ``test_r4a_max_chars_typeerror_…
+        _recovers`` test: the engine no longer retries on a
+        body-raised TypeError, regardless of which keyword the
+        message names.
+        """
+        state = {"calls": 0}
+
+        def _raises_max_chars_keyword(
             *args: Any, **kwargs: Any
         ) -> tuple[list, bool]:
             state["calls"] += 1
-            if state["calls"] == 1:
-                raise TypeError(
-                    "unexpected keyword argument 'max_chars'"
-                )
-            return [], False
+            raise TypeError("unexpected keyword argument 'max_chars'")
 
-        engine = RecallV2Engine(recall_fn=_first_raises_max_chars)
-        res = engine.recall("hello", max_chars=1234)
-        # Exactly two invocations: the original call + the safety-net
-        # retry.
-        assert state["calls"] == 2, (
-            f"safety net should retry exactly once; got "
-            f"{state['calls']} invocations"
+        engine = RecallV2Engine(recall_fn=_raises_max_chars_keyword)
+        with pytest.raises(TypeError) as excinfo:
+            engine.recall("hello", max_chars=1234)
+        # Engine did NOT retry based on the exception message.
+        assert state["calls"] == 1, (
+            f"engine must not retry when a body-raised TypeError mentions "
+            f"'max_chars'; got {state['calls']} invocations"
         )
-        # Valid result with no exception.
-        assert isinstance(res, RecallV2Result)
-        assert res.fallback_used is False
-        assert res.hits == []
+        # The propagated TypeError is the one raised by the callable,
+        # not a wrapper exception — the message is intact.
+        assert "max_chars" in str(excinfo.value)
 
-    def test_r4b_unrelated_typeerror_propagates_without_retry(self) -> None:
+    def test_r4c_unrelated_typeerror_propagates_without_retry(self) -> None:
         """G6B Slice F (R4b) — a TypeError mentioning something else
         (for example 'boom') must propagate and the callable must be
         invoked exactly once.  The safety net is intentionally narrow
@@ -884,6 +908,302 @@ class TestSignatureAdaptive:
         assert len(calls) in (1, 2)
         # Result still valid:
         assert isinstance(res, RecallV2Result)
+
+
+# ===========================================================================
+# 6b. G6B Slice G — pre-execution validation, no post-IO retry
+# ===========================================================================
+
+
+class TestG6BSliceGNoPostIORetry:
+    """G6B Slice G (Part 1 / HIGH A + Part 3 / A1–A5) — the engine must
+    validate the forwarded payload BEFORE invoking the legacy callable
+    and never re-invoke based on an exception message.
+    """
+
+    def test_a3_unsupported_keyword_dropped_by_preflight(self) -> None:
+        """A3 — the pre-execution validator drops an unsupported
+        OPTIONAL keyword (here ``max_chars``) from the forwarded
+        payload so the call is made exactly once with a payload the
+        callable accepts.  The callable's body invocation count is
+        exactly 1, and the callable never sees the dropped keyword.
+        Never 2.
+        """
+        captured: list[dict[str, Any]] = []
+
+        def _accepts_no_max_chars(
+            query: str,
+            *,
+            limit: int = 8,
+            config: Any = None,
+            card_index: Any = None,
+            pg: Any = None,
+            q_emb: Any = None,
+            pg_was_connected: bool = False,
+            core: Any = None,
+            sqlite_store: Any = None,
+            deadline: Any = None,
+            rerank_top_n: Any = None,
+            rerank_cfg: Any = None,
+            trace: Any = None,
+        ) -> tuple[list, bool]:
+            captured.append(dict(trace=trace, limit=limit))
+            return [], False
+
+        engine = RecallV2Engine(recall_fn=_accepts_no_max_chars)
+        res = engine.recall("hello", max_chars=2222)
+        # The callable was invoked exactly once.
+        assert len(captured) == 1, (
+            f"pre-execution validator should drop max_chars up front so "
+            f"the callable runs exactly once; got {len(captured)} "
+            f"invocations"
+        )
+        # And the callable never received max_chars.
+        assert "max_chars" not in captured[0]
+        # Trace was attached (callable declares trace).
+        assert captured[0]["trace"] is not None
+        # Result reports trace_attached=True and fallback_used=False.
+        assert res.fallback_used is False
+        assert res.trace_attached is True
+        # Engine-side QueryContext still carries the caller-supplied
+        # max_chars (it flows into the typed context regardless).
+        assert res.query_context is not None
+        assert res.query_context.max_chars == 2222
+
+    def test_a4_real_recall_pool_receives_trace_exactly_once(self) -> None:
+        """A4 — the engine actually reaches the real
+        ``v3core.recall_pool.recall_pool`` through the standard
+        RecallV2Engine call path, the real function is invoked
+        EXACTLY once with ``trace=`` forwarded, and the result reports
+        ``trace_attached=True`` / ``fallback_used=False``.  Uses
+        ``pg=None``, ``card_index={}``, ``q_emb=None`` and the
+        production-shaped config dict required by the slice-G spec.
+        """
+        from v3core import recall_pool
+
+        state = {"calls": 0, "trace_seen": []}
+
+        def _spy_recall_pool(*args: Any, **kwargs: Any):
+            state["calls"] += 1
+            state["trace_seen"].append(kwargs.get("trace"))
+            # Forward to the real recall_pool, but neuter the path that
+            # requires real PG / providers.  We rely on the fact that
+            # recall_pool with pg=None and the no-reader config will
+            # return ([], False) without raising.
+            return recall_pool.recall_pool(*args, **kwargs)
+
+        cfg = {
+            "prefetch": {
+                "dual_path": True,
+                "rrf_k": 60,
+                "include_message_vector": False,
+            },
+            "storage": {"rerank": {}},
+            "recall": {
+                "vector_top_mult": 4,
+                "qa_per_term_min": 10,
+                "qa_freq_limit": 40,
+            },
+            "half_life": 30,
+        }
+
+        engine = RecallV2Engine(recall_fn=_spy_recall_pool)
+        res = engine.recall(
+            "hello",
+            card_index={},
+            pg=None,
+            q_emb=None,
+            config=cfg,
+            rerank_top_n=None,
+            rerank_cfg=None,
+        )
+        # Exactly one call to the real recall_pool.
+        assert state["calls"] == 1, (
+            f"engine must invoke the real recall_pool exactly once; "
+            f"got {state['calls']} invocations"
+        )
+        # The forwarded ``trace`` is the engine's LegacySink.
+        assert state["trace_seen"][0] is not None
+        assert isinstance(state["trace_seen"][0], LegacySink)
+        # Result reports trace_attached=True, fallback_used=False.
+        assert res.fallback_used is False
+        assert res.trace_attached is True
+        # And the real trace is on the result (not None, not the fallback).
+        assert res.trace is not None
+        assert isinstance(res.trace, RecallTrace)
+
+    def test_a5_kwargs_only_wrapper_delegating_to_real_recall_pool(
+        self,
+    ) -> None:
+        """A5 — a ``def wrapper(*args, **kwargs)`` delegating to the
+        REAL ``v3core.recall_pool.recall_pool`` still works with
+        deterministic ONE-call behaviour, and the real function is
+        NOT passed ``max_chars`` (the engine's strict adaptive rule
+        strips it because the wrapper's ``**kwargs`` is not a rescue
+        for ``max_chars``).
+        """
+        from v3core import recall_pool
+
+        state = {"calls": 0, "kwargs_seen": []}
+
+        def _wrapper(*args: Any, **kwargs: Any) -> tuple[list, bool]:
+            state["calls"] += 1
+            state["kwargs_seen"].append(dict(kwargs))
+            return recall_pool.recall_pool(*args, **kwargs)
+
+        cfg = {
+            "prefetch": {
+                "dual_path": True,
+                "rrf_k": 60,
+                "include_message_vector": False,
+            },
+            "storage": {"rerank": {}},
+            "recall": {
+                "vector_top_mult": 4,
+                "qa_per_term_min": 10,
+                "qa_freq_limit": 40,
+            },
+            "half_life": 30,
+        }
+        engine = RecallV2Engine(recall_fn=_wrapper)
+        res = engine.recall(
+            "hello",
+            card_index={},
+            pg=None,
+            q_emb=None,
+            config=cfg,
+            rerank_top_n=None,
+            rerank_cfg=None,
+        )
+        # Deterministic ONE-call behaviour.
+        assert state["calls"] == 1, (
+            f"wrapper must be invoked exactly once; got {state['calls']} "
+            f"invocations"
+        )
+        # max_chars MUST NOT reach the real function (strict adaptive rule).
+        assert "max_chars" not in state["kwargs_seen"][0]
+        # The real recall_pool accepts trace; the wrapper passes it
+        # through.  Trace was attached.
+        assert res.fallback_used is False
+        assert res.trace_attached is True
+
+
+# ===========================================================================
+# 6c. G6B Slice G — LegacySink.warn / .error prefer trace.warn / trace.error
+# ===========================================================================
+
+
+class TestG6BSliceGSinkPreferTraceMethods:
+    """G6B Slice G (Part 2 / LOW D) — when the trace object exposes
+    ``warn`` / ``error`` methods, the sink must use them so the
+    append happens under the trace's own lock.  When the methods are
+    absent, the sink falls back to a direct append to the
+    ``trace.warnings`` / ``trace.errors`` list.  Both paths must be
+    exception-safe and capped at 300 chars per entry.
+    """
+
+    def test_warn_uses_trace_warn_method_when_present(self) -> None:
+        # The trace's ``warn`` method must be used (so the append
+        # happens under the trace's lock) when present.  We assert by
+        # spying on a fresh trace.
+        ctx = build_query_context("hi")
+        plan = build_default_query_plan(ctx)
+        trace = RecallTrace(query_context=ctx, query_plan=plan)
+        sink = LegacySink(trace)
+        sink.warn("hello world")
+        # The trace's ``warn`` method was used → trace.warnings
+        # contains the message.
+        assert trace.warnings == ["hello world"]
+
+    def test_error_uses_trace_error_method_when_present(self) -> None:
+        # Same as above for ``error``.
+        ctx = build_query_context("hi")
+        plan = build_default_query_plan(ctx)
+        trace = RecallTrace(query_context=ctx, query_plan=plan)
+        sink = LegacySink(trace)
+        sink.error("kaboom")
+        assert trace.errors == ["kaboom"]
+
+    def test_warn_falls_back_to_direct_append_when_method_absent(self) -> None:
+        # A duck-typed trace without a ``warn`` method must still
+        # accept the warning via direct append to ``trace.warnings``.
+        captured: list[str] = []
+
+        class _DuckTrace:
+            warnings = []
+            errors = []
+
+        duck = _DuckTrace()
+        sink = LegacySink(duck)
+        sink.warn("duck-warn")
+        # Direct append path: duck.warnings got the message.
+        assert duck.warnings == ["duck-warn"]
+        # And the captured list is independent (sanity).
+        assert captured == []
+
+    def test_error_falls_back_to_direct_append_when_method_absent(self) -> None:
+        class _DuckTrace:
+            warnings = []
+            errors = []
+
+        duck = _DuckTrace()
+        sink = LegacySink(duck)
+        sink.error("duck-error")
+        assert duck.errors == ["duck-error"]
+
+    def test_warn_caps_at_300_chars(self) -> None:
+        ctx = build_query_context("hi")
+        plan = build_default_query_plan(ctx)
+        trace = RecallTrace(query_context=ctx, query_plan=plan)
+        sink = LegacySink(trace)
+        long = "x" * 1000
+        sink.warn(long)
+        assert len(trace.warnings) == 1
+        assert len(trace.warnings[0]) == 300
+        assert trace.warnings[0] == "x" * 300
+
+    def test_error_caps_at_300_chars(self) -> None:
+        ctx = build_query_context("hi")
+        plan = build_default_query_plan(ctx)
+        trace = RecallTrace(query_context=ctx, query_plan=plan)
+        sink = LegacySink(trace)
+        long = "y" * 1000
+        sink.error(long)
+        assert len(trace.errors) == 1
+        assert len(trace.errors[0]) == 300
+        assert trace.errors[0] == "y" * 300
+
+    def test_warn_swallows_trace_brokenness(self) -> None:
+        # If the trace's ``warn`` method raises, the sink must NOT
+        # raise into the caller.
+        class _BrokenTrace:
+            warnings = []
+
+            def warn(self, msg: str) -> None:
+                raise RuntimeError("trace broken")
+
+        sink = LegacySink(_BrokenTrace())
+        # Must not raise.
+        sink.warn("anything")
+        sink.error("anything-else")
+
+    def test_warn_empty_or_falsy_text_does_nothing(self) -> None:
+        ctx = build_query_context("hi")
+        plan = build_default_query_plan(ctx)
+        trace = RecallTrace(query_context=ctx, query_plan=plan)
+        sink = LegacySink(trace)
+        sink.warn("")
+        sink.warn(None)  # type: ignore[arg-type]
+        assert trace.warnings == []
+
+    def test_error_empty_or_falsy_text_does_nothing(self) -> None:
+        ctx = build_query_context("hi")
+        plan = build_default_query_plan(ctx)
+        trace = RecallTrace(query_context=ctx, query_plan=plan)
+        sink = LegacySink(trace)
+        sink.error("")
+        sink.error(None)  # type: ignore[arg-type]
+        assert trace.errors == []
 
 
 # ===========================================================================

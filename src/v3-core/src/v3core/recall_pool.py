@@ -1923,6 +1923,13 @@ def recall_pool(
     _am_vec_reader_seen = False  # reader resolver ran for vec seam
     _am_kw_reader_present = False  # kw reader resolved to non-None
     _am_vec_reader_present = False  # vec reader resolved to non-None
+    # G6B Slice H: QA-vector-only ids for the qa-lane provenance probe.
+    # Initialised BEFORE the QA vector block runs so the lane_candidates
+    # / lane_finish probes below can read it even if the vector path is
+    # skipped (include_card_vector=False), errors out, or pg is None.
+    # The QA-vector hit still flows through vec_ids.add(_qsid) unchanged
+    # so the frozen qa_vec_rank ranking path picks it up.
+    _qa_vec_ids_for_probe: list[str] = []
     if include_keyword:
         if deadline is not None:
             deadline.check(context="keyword path")
@@ -2817,6 +2824,13 @@ def recall_pool(
                                             continue
                                         _qsid = f"qa_{_qid}"
                                         vec_ids.add(_qsid)
+                                        # G6B Slice H: also record this id in
+                                        # the qa-lane probe list so the trace
+                                        # captures QA-vector-only hits.  The
+                                        # existing vec_ids.add(...) call above
+                                        # is unchanged - this id still flows
+                                        # through qa_vec_rank as before.
+                                        _qa_vec_ids_for_probe.append(_qsid)
                                         _qfull = f"[{str(_qts or '')}] Q: {_qq}\nA: {_qa}"
                                         if _qsid in hits:
                                             if _sim > hits[_qsid].cosine:
@@ -3218,6 +3232,13 @@ def recall_pool(
                 _k = str(getattr(_h, "kind", "") or "")
             except Exception:
                 _k = ""
+                # G6B Slice H: deliberately skip qa-kind ids here - QA-vector
+                # hits are ranked through qa_vec_rank (not vec_rank; see the
+                # vec_rank / qa_vec_rank computation further below), so
+                # attributing them to the vector lane would double-credit
+                # the trace without changing the retrieval math.  The qa
+                # lane captures these ids via the additional probe after
+                # the vector lane summary (see _qa_ids_for_probe below).
             if _k == "qa":
                 continue
             _vec_union_ids.append(_sid)
@@ -3240,6 +3261,47 @@ def recall_pool(
             skipped=True,
             reason='all_vector_paths_disabled',
         )
+
+    # ── G6B Slice H: qa lane provenance for QA-vector retrieval ──
+    # The earlier keyword/QA summary block emitted lane_candidates('qa', _qa_kw_ids)
+    # and lane_finish('qa', candidate_count=len(_qa_kw_ids)).  Those reflect the
+    # keyword-path QA hits only - QA-vector hits land in vec_ids (and are
+    # ranked through qa_vec_rank, NOT vec_rank; see the qa_vec_rank block
+    # further below), so the trace had no qa-lane attribution for them.
+    #
+    # We fix that here, after the vector-family region has run.  Combine
+    # kw-found and vec-found QA ids into one de-duplicated collection,
+    # use it for BOTH the new lane_candidates probe (source_type='qa'
+    # so the sink records (qa, qa, id) provenance for vec-found ids) AND
+    # the final lane_finish candidate_count (overriding the earlier
+    # kw-only count so the lane summary reflects QA-vector hits too).
+    #
+    # The earlier kw-only lane_candidates probe is intentionally kept -
+    # the sink de-duplicates per (lane, source_type, source_id), so an id
+    # found by both paths keeps its (qa, '', id) from the kw probe AND
+    # gains exactly one (qa, qa, id) from this new probe.  Keyword-found
+    # QA ids do NOT gain a vector or keyword attribution from this change
+    # - only an additional source_type='qa' tag within the qa lane.
+    try:
+        _qa_ids_for_probe: list[str] = list(
+            dict.fromkeys(
+                list(_qa_kw_ids or []) + list(_qa_vec_ids_for_probe or [])
+            )
+        )
+    except Exception:
+        # Defensive: never let a probe-prep failure escape into retrieval.
+        _qa_ids_for_probe = []
+    _probe(trace, 'lane_candidates', 'qa', _qa_ids_for_probe, source_type='qa')
+    # Overwrite the earlier kw-only qa lane_finish candidate_count so the
+    # lane summary's final value reflects QA-vector hits as well.  The
+    # sink's finish_lane stores the last value seen per lane, so the
+    # final qa-lane candidate_count = len(combined_dedup).
+    _probe(
+        trace,
+        'lane_finish',
+        'qa',
+        candidate_count=len(_qa_ids_for_probe),
+    )
 
     # PG fail detection
     if deadline is not None:

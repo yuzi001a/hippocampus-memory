@@ -28,10 +28,13 @@ Pre-execution fallback:
 Signature-adaptive behaviour:
     If the legacy callable does not accept a ``trace`` keyword argument
     (detected via :func:`inspect.signature`), the kwarg is skipped up
-    front and ``trace_attached`` is set to ``False``.  If an unexpected
-    ``TypeError`` mentioning ``trace`` occurs anyway, the engine
-    retries the call at most once **without** the trace kwarg.  The
-    retrieval function is never invoked twice on a successful path.
+    front and ``trace_attached`` is set to ``False``.  ``max_chars`` is
+    the one keyword that follows a STRICTER rule (only forwarded when
+    the signature declares it explicitly — a ``**kwargs`` rescue does
+    not count as acceptance).  G6B Slice G: validation happens BEFORE
+    invocation; once the callable is invoked, ANY exception propagates
+    unchanged — the engine never inspects an exception message to
+    decide whether to call again.
 
 No sleeps, no threads, no I/O beyond what the wrapped legacy call
 performs.
@@ -96,12 +99,15 @@ from .contracts import (
     QueryContext,
     QueryPlan,
     RecallCandidate,
+    build_default_query_plan,
+    build_effective_query_plan,
 )
 from .trace import RecallTrace
 
-# Import the build helper directly so the engine can monkey-patch it in
-# tests without going through ``adapters.build_query_context`` indirection.
-from .contracts import build_default_query_plan  # noqa: E402
+# Re-export the build helpers at module scope so tests can monkey-patch
+# ``engine.build_default_query_plan`` / ``engine.build_effective_query_plan``
+# without going through ``adapters.build_query_context`` indirection.
+# (noqa markers below keep linters quiet about the redundant import.)
 
 
 # ---------------------------------------------------------------------------
@@ -625,29 +631,45 @@ class LegacySink:
     def warn(self, text: str) -> None:
         if self._trace is None or not text:
             return
-        # Append directly to ``trace.warnings`` (RecallTrace already
-        # exposes the list) rather than going through ``trace.warn``,
-        # which may not exist on a duck-typed trace object and silently
-        # drop calls.  Guarded so a broken trace cannot raise into the
-        # caller; capped at 300 chars per entry to stay cheap.
+        # Prefer ``trace.warn`` (a method on :class:`RecallTrace` and any
+        # duck-typed trace that exposes the same shape) when it exists —
+        # that path appends under the trace's own lock so concurrent
+        # writers cannot race with the trace's serialization.  Fall back
+        # to a direct append to ``trace.warnings`` only when the method
+        # is absent (arbitrary duck-typed trace object).  Either way the
+        # call is exception-safe (a broken trace cannot raise into the
+        # caller) and capped at 300 chars per entry to stay cheap.
         try:
+            capped = str(text)[:300]
+            warn_method = getattr(self._trace, "warn", None)
+            if callable(warn_method):
+                warn_method(capped)
+                return
             lst = getattr(self._trace, "warnings", None)
             if lst is None:
                 return
-            lst.append(str(text)[:300])
+            lst.append(capped)
         except Exception:
             return
 
     def error(self, text: str) -> None:
         if self._trace is None or not text:
             return
-        # See ``warn`` for rationale; mirror the same direct-append +
-        # try/except + 300-char cap pattern.
+        # Mirror ``warn``: prefer ``trace.error`` (a method on
+        # :class:`RecallTrace` and any duck-typed trace that exposes the
+        # same shape) so the append runs under the trace's own lock,
+        # and only fall back to a direct append to ``trace.errors`` when
+        # the method is absent.  Exception-safe + 300-char cap.
         try:
+            capped = str(text)[:300]
+            err_method = getattr(self._trace, "error", None)
+            if callable(err_method):
+                err_method(capped)
+                return
             lst = getattr(self._trace, "errors", None)
             if lst is None:
                 return
-            lst.append(str(text)[:300])
+            lst.append(capped)
         except Exception:
             return
 
@@ -768,6 +790,103 @@ class RecallV2Engine:
     def _callable_accepts_trace(self) -> Optional[bool]:
         return self._callable_accepts("trace")
 
+    # ----- pre-execution kwarg validation -------------------------------
+
+    #: Keywords the engine treats as OPTIONAL droppables when the
+    #: legacy callable's signature does not accept them.  These are the
+    #: ONLY keywords the pre-execution validator is allowed to drop —
+    #: every other forwarded keyword is part of the legacy contract
+    #: that the engine must not silently strip.
+    _DROPPABLE_OPTIONAL_KWARGS: frozenset[str] = frozenset({"trace", "max_chars"})
+
+    def _validate_kwargs_for_callable(
+        self,
+        call_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Pre-execution validation: drop unsupported OPTIONAL keywords.
+
+        G6B Slice G (Part 1 / HIGH A) — the engine must never inspect
+        an exception message to decide whether to call the legacy
+        callable a second time.  Instead, BEFORE invoking, the engine
+        uses :func:`inspect.signature` to determine which optional
+        keywords (today: ``trace`` and ``max_chars``) the callable
+        accepts, and drops the rest from the forwarded payload so the
+        call is made exactly once with a payload the callable accepts.
+
+        Return: ``(filtered_kwargs, signature_was_inspectable)``.
+
+        Behaviour rules:
+
+        * For each optional kwarg in :data:`_DROPPABLE_OPTIONAL_KWARGS`
+          that is present in ``call_kwargs``:
+
+          - If the signature is inspectable and the callable's
+            signature accepts the keyword (per :meth:`_callable_accepts`),
+            keep the keyword.
+          - If the signature is inspectable and the callable does NOT
+            accept the keyword, drop the keyword from the payload.
+          - If the signature is NOT inspectable (``None`` from
+            :meth:`_callable_accepts`), the conservative single-call
+            path: drop BOTH ``trace`` and ``max_chars`` (when present)
+            so a C builtin or unusual wrapper that cannot be introspected
+            never receives a keyword it might reject.  Correctness
+            beats tracing.
+
+        * Never drop a keyword the legacy contract requires: every
+          keyword outside :data:`_DROPPABLE_OPTIONAL_KWARGS` is left
+          in the payload unchanged.  The :meth:`_build_legacy_kwargs`
+          adaptive rules already strip the rest of the surface against
+          the callable's signature; this validator only re-checks the
+          two known-optional droppables and is intentionally narrow.
+
+        * No exception ever propagates out of this method: it is a pure
+          pre-flight inspection.
+        """
+        signature_was_inspectable = True
+        filtered: dict[str, Any] = dict(call_kwargs)
+        for kw in self._DROPPABLE_OPTIONAL_KWARGS:
+            if kw not in filtered:
+                continue
+            try:
+                # ``max_chars`` follows the STRICT rule (a ``**kwargs``
+                # rescue does not count as acceptance); ``trace`` and
+                # every other optional droppable follow the LENIENT
+                # rule.  This mirrors the contract already enforced by
+                # :meth:`_build_legacy_kwargs` so the validator cannot
+                # disagree with the kwarg builder.
+                strict = kw == "max_chars"
+                accepted = self._callable_accepts(kw, strict=strict)
+            except Exception:
+                # Defensive: if introspection itself blows up, treat as
+                # uninspectable and drop the keyword conservatively.
+                accepted = None
+            if accepted is None:
+                # Uninspectable signature: conservative path.
+                signature_was_inspectable = False
+                filtered.pop(kw, None)
+                continue
+            if accepted is False:
+                filtered.pop(kw, None)
+        return filtered, signature_was_inspectable
+
+    def _invoke_once(
+        self,
+        query: Any,
+        call_kwargs: dict[str, Any],
+    ) -> tuple[list[Any], bool]:
+        """Invoke the legacy callable EXACTLY ONCE with the validated payload.
+
+        G6B Slice G (Part 1 / HIGH A) — once the wrapped callable is
+        invoked, ANY exception (including :class:`TypeError`) propagates
+        unchanged.  The engine must never inspect an exception message to
+        decide whether to call again.  This is the only post-IO safety
+        surface; the actual drop / strip of unsupported optional kwargs
+        happened in :meth:`_validate_kwargs_for_callable` BEFORE the
+        invocation.
+        """
+        result = self._recall_fn(query, **call_kwargs)
+        return result[0], result[1]
+
     # ----- core orchestration ------------------------------------------
 
     def _build_pre_execution(
@@ -781,6 +900,7 @@ class RecallV2Engine:
         profile: Optional[str],
         agent_id: Optional[str],
         deadline: Any,
+        effective_include_flags: Optional[Mapping[str, Any]] = None,
     ) -> _BuiltContext:
         ctx = adapters.build_query_context(
             query,
@@ -792,7 +912,22 @@ class RecallV2Engine:
             profile=profile,
             agent_id=agent_id,
         )
-        plan = build_default_query_plan(ctx)
+        # PART 3 (G6B Slice I): when the caller (the facade) supplied
+        # the include_* flags, build the plan from THOSE flags via
+        # ``build_effective_query_plan`` so the typed plan can never
+        # claim a lane is enabled while the real legacy call skipped
+        # it.  Otherwise fall back to the legacy default plan.
+        plan: QueryPlan
+        if effective_include_flags:
+            try:
+                plan = build_effective_query_plan(ctx, **dict(effective_include_flags))
+            except Exception:
+                # Defensive: if the effective builder raises, fall back
+                # to the default builder rather than failing the whole
+                # request — the legacy path is unaffected by plan shape.
+                plan = build_default_query_plan(ctx)
+        else:
+            plan = build_default_query_plan(ctx)
         trace = RecallTrace(query_context=ctx, query_plan=plan)
         sink = LegacySink(trace)
         return _BuiltContext(query_context=ctx, query_plan=plan, trace=trace, sink=sink)
@@ -817,6 +952,30 @@ class RecallV2Engine:
         agent_id: Optional[str] = None,
         rerank_top_n: Optional[int] = None,
         rerank_cfg: Any = None,
+        # PART 3 (G6B Slice I): when the facade (prefetch) supplies
+        # these explicitly, the engine builds the typed QueryPlan
+        # from THOSE flags via ``build_effective_query_plan`` instead
+        # of the all-enabled default.  All seven flags default to
+        # ``None`` so existing callers that never set them continue
+        # to use the default builder.  When the facade supplies at
+        # least one non-None value, the plan mirrors the real legacy
+        # execution shape — disabled lanes carry a truthful reason.
+        include_keyword: Optional[bool] = None,
+        include_card_vector: Optional[bool] = None,
+        include_message_vector: Optional[bool] = None,
+        include_effective: Optional[bool] = None,
+        include_topic: Optional[bool] = None,
+        include_yin: Optional[bool] = None,
+        include_notes: Optional[bool] = None,
+        # PART 4 (G6B Slice I): when the caller supplies a list here,
+        # the engine appends the typed ``RecallTrace`` it built to
+        # that list.  This is the internal channel the facade uses
+        # to obtain the trace WITHOUT making the trace kwarg
+        # contractually required, and WITHOUT forcing the caller to
+        # pass ``trace=``.  If the caller supplied an existing
+        # ``trace=`` (a sink), use THAT as the trace sink and leave
+        # ``trace_out`` untouched.
+        trace_out: Optional[list[Any]] = None,
         **passthrough: Any,
     ) -> RecallV2Result:
         """Run one orchestrated recall request.
@@ -826,6 +985,47 @@ class RecallV2Engine:
         callers can switch with minimal changes; all unknown kwargs are
         passed through verbatim on the success path.
         """
+        # PART 3: determine whether the caller (facade) supplied the
+        # include_* flags.  We treat "supplied" as: any one of them is
+        # non-None.  When true, we build the plan from THOSE flags.
+        effective_include_flags: Optional[dict[str, Any]] = None
+        include_flags_seen = {
+            "include_keyword": include_keyword,
+            "include_card_vector": include_card_vector,
+            "include_message_vector": include_message_vector,
+            "include_effective": include_effective,
+            "include_topic": include_topic,
+            "include_yin": include_yin,
+            "include_notes": include_notes,
+        }
+        if any(v is not None for v in include_flags_seen.values()):
+            # Coerce any unset include_* to the legacy default so the
+            # builder receives a fully-specified kwarg set.  The
+            # legacy defaults mirror those declared on
+            # ``v3core.recall_pool.recall_pool``.
+            effective_include_flags = {
+                "include_keyword": (
+                    bool(include_keyword) if include_keyword is not None else True
+                ),
+                "include_card_vector": (
+                    bool(include_card_vector) if include_card_vector is not None else False
+                ),
+                "include_message_vector": (
+                    bool(include_message_vector) if include_message_vector is not None else False
+                ),
+                "include_effective": (
+                    bool(include_effective) if include_effective is not None else False
+                ),
+                "include_topic": (
+                    bool(include_topic) if include_topic is not None else True
+                ),
+                "include_yin": (
+                    bool(include_yin) if include_yin is not None else True
+                ),
+                "include_notes": (
+                    bool(include_notes) if include_notes is not None else True
+                ),
+            }
         # ---- Step 1: build context + plan + trace + sink (no retrieval yet)
         pre_exc: Optional[BaseException] = None
         built: Optional[_BuiltContext] = None
@@ -840,9 +1040,34 @@ class RecallV2Engine:
                     profile=profile,
                     agent_id=agent_id,
                     deadline=deadline,
+                    effective_include_flags=effective_include_flags,
                 )
             except BaseException as e:  # noqa: BLE001 — pre-execution safety net
                 pre_exc = e
+
+        # PART 4 (G6B Slice I): if pre-execution built a trace and the
+        # caller supplied ``trace_out`` AND did NOT supply an existing
+        # ``trace=`` sink, publish the trace so the facade can attach
+        # injection probes to the SAME instance.  When the caller
+        # supplied ``trace=`` we leave ``trace_out`` untouched (the
+        # caller already has its own sink).  Only happens on the
+        # success path; the fallback and trace-disabled paths below
+        # do NOT populate ``trace_out``.
+        if (
+            self._trace_enabled
+            and pre_exc is None
+            and built is not None
+            and trace_out is not None
+            and "trace" not in (passthrough or {})
+            and built.trace is not None
+        ):
+            try:
+                trace_out.append(built.trace)
+            except Exception:
+                # Defensive: a broken holder list cannot raise into the
+                # caller; the engine still returns the trace on the
+                # result object.
+                pass
 
         if self._trace_enabled and pre_exc is not None:
             # Pre-execution fallback: call the legacy function ONCE with no
@@ -862,7 +1087,9 @@ class RecallV2Engine:
                 max_chars=max_chars,
                 deadline=deadline,
                 include_trace=False,
-                passthrough=passthrough,
+                passthrough=self._include_flags_passthrough(
+                    effective_include_flags, passthrough
+                ),
             )
             hits, pg_fail = self._call_legacy_no_trace(**legacy_kwargs)
             return RecallV2Result(
@@ -897,7 +1124,9 @@ class RecallV2Engine:
                 max_chars=max_chars,
                 deadline=deadline,
                 include_trace=False,
-                passthrough=passthrough,
+                passthrough=self._include_flags_passthrough(
+                    effective_include_flags, passthrough
+                ),
             )
             hits, pg_fail = self._recall_fn(query, **base_kwargs)
             return RecallV2Result(
@@ -929,36 +1158,63 @@ class RecallV2Engine:
             max_chars=max_chars,
             deadline=deadline,
             include_trace=False,
-            passthrough=passthrough,
+            passthrough=self._include_flags_passthrough(
+                effective_include_flags, passthrough
+            ),
         )
 
         # Decide up front whether to attach the trace kwarg.
         accepts_trace = self._callable_accepts_trace() if self._trace_enabled else False
+        # PART 4 (G6B Slice I): when the caller supplied their own
+        # ``trace=`` sink via passthrough, the engine MUST respect it
+        # and forward THAT sink to recall_pool (NOT the engine's
+        # ``built.sink``).  This preserves the existing trace= contract
+        # for callers that already manage a typed trace — the facade
+        # uses ``trace_out`` instead so we only hit this branch when
+        # an external caller (e.g. an integration test) explicitly
+        # passes ``trace=``.  The engine's own trace remains in
+        # ``built.trace`` and is exposed on the result so the engine's
+        # typed contract is still satisfied.
+        caller_supplied_trace = bool(
+            self._trace_enabled and "trace" in (passthrough or {})
+        )
         # Default: trace was attached iff the signature accepted it AND
-        # the safety net did not have to drop it on retry.
+        # the pre-execution validator did not have to drop it.
         trace_attached = bool(self._trace_enabled and accepts_trace is not False)
         if self._trace_enabled and accepts_trace is not False:
             call_kwargs = dict(base_kwargs)
-            call_kwargs["trace"] = built.sink
-            hits, pg_fail, retried = self._call_with_kwarg_safety_net(
-                query, call_kwargs, safety_kwarg="trace", other_kwargs=base_kwargs
-            )
-            # If the safety net fired, the retry used ``base_kwargs``
-            # which has no trace — record that accurately.
-            if retried:
-                trace_attached = False
+            if caller_supplied_trace:
+                # Forward the caller's sink verbatim.  ``passthrough``
+                # is already merged into ``base_kwargs`` by
+                # ``_build_legacy_kwargs`` (via ``kwargs.update(passthrough)``),
+                # so the caller's ``trace=`` is already in
+                # ``call_kwargs`` — do NOT override it.
+                pass
+            else:
+                call_kwargs["trace"] = built.sink
         else:
-            # Callable doesn't accept 'trace' (or trace disabled).  Apply
-            # the max_chars safety net around this call too — a wrapper
-            # that hides the parameter behind unusual introspection can
-            # still raise a TypeError mentioning ``max_chars`` even
-            # though the engine did not forward it.  The safety net is
-            # purely message-driven so it handles both the legitimate
-            # "wrapper declares max_chars but won't accept it" case and
-            # the rare "wrapper's introspection is misleading" case.
-            hits, pg_fail, _ = self._call_with_kwarg_safety_net(
-                query, dict(base_kwargs), safety_kwarg="max_chars"
-            )
+            # Callable doesn't accept 'trace' (or trace disabled).  The
+            # engine still uses the pre-execution validator below to drop
+            # ``max_chars`` from the forwarded payload when the callable
+            # does not declare it.
+            call_kwargs = dict(base_kwargs)
+        # G6B Slice G (Part 1 / HIGH A) — pre-execution validation.
+        # Drop any OPTIONAL keyword (``trace`` and/or ``max_chars``) the
+        # callable's signature does not accept, BEFORE invoking.  When
+        # the signature is uninspectable we conservatively drop BOTH
+        # optional keywords (correctness beats tracing) and report
+        # ``trace_attached=False`` accordingly.  After this call the
+        # payload is guaranteed to be accepted by the callable, so the
+        # invocation happens exactly once and any exception propagates
+        # unchanged — the engine never retries based on a message.
+        validated_kwargs, sig_inspectable = self._validate_kwargs_for_callable(call_kwargs)
+        if not sig_inspectable:
+            # Uninspectable callable: conservative path omits trace.
+            trace_attached = False
+        if "trace" not in validated_kwargs:
+            # Validator (or signature) dropped the trace kwarg.
+            trace_attached = False
+        hits, pg_fail = self._invoke_once(query, validated_kwargs)
 
         return self._finalize(
             built,
@@ -971,6 +1227,32 @@ class RecallV2Engine:
         )
 
     # ----- helpers ----------------------------------------------------
+
+    @staticmethod
+    def _include_flags_passthrough(
+        effective_include_flags: Optional[Mapping[str, Any]],
+        passthrough: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge the facade's effective include_* flags into passthrough.
+
+        PART 1 / PART 3 (G6B Slice I): the facade (``prefetch``) passes
+        ``include_keyword`` / ``include_card_vector`` /
+        ``include_message_vector`` etc. as NAMED parameters to
+        :meth:`recall`, so they do not flow through ``**passthrough``
+        automatically.  The legacy ``recall_pool`` accepts those
+        exact keyword names, so we copy them into the passthrough dict
+        that ``_build_legacy_kwargs`` forwards verbatim.  When the
+        caller did not supply the flags (``effective_include_flags is
+        None``) we leave passthrough untouched.
+        """
+        if not effective_include_flags:
+            return passthrough
+        merged = dict(passthrough or {})
+        for k, v in effective_include_flags.items():
+            # Don't overwrite an explicit passthrough entry; the
+            # passthrough dict carries the caller's verbatim values.
+            merged.setdefault(k, v)
+        return merged
 
     def _build_legacy_kwargs(
         self,
@@ -1081,82 +1363,6 @@ class RecallV2Engine:
     def _call_legacy_no_trace(self, **kwargs: Any) -> tuple[list[Any], bool]:
         """Single fallback invocation — never threaded, no retry."""
         return self._recall_fn(**kwargs)
-
-    def _call_with_kwarg_safety_net(
-        self,
-        query: Any,
-        call_kwargs: dict[str, Any],
-        *,
-        safety_kwarg: str,
-        other_kwargs: Optional[dict[str, Any]] = None,
-    ) -> tuple[list[Any], bool, bool]:
-        """Invoke the legacy callable with a bounded single-keyword safety net.
-
-        Mirrors the long-standing ``trace`` TypeError retry, generalised
-        so the same primitive serves the ``max_chars`` safety net
-        added in G6B Slice F.  Behaviour:
-
-        * Call ``self._recall_fn(query, **call_kwargs)`` once.
-        * If the call raises ``TypeError`` whose message contains
-          ``safety_kwarg`` OR the literal string ``"max_chars"``
-          (the G6B Slice F safety net for the keyword that does not
-          belong to the legacy surface), retry that single call
-          EXACTLY once with the appropriate retry payload:
-            - if ``safety_kwarg`` (``"trace"``) is mentioned, retry
-              with ``other_kwargs`` when supplied, or with
-              ``call_kwargs`` minus ``safety_kwarg``;
-            - otherwise (``"max_chars"`` was the only mention), retry
-              with ``call_kwargs`` minus ``"max_chars"``.
-        * Any other exception (``TypeError`` about something else, or
-          any non-``TypeError``) propagates unchanged.  The safety net
-          is intentionally narrow: it never swallows an exception
-          unrelated to ``safety_kwarg`` or ``"max_chars"``.
-        * On the success path the callable is invoked exactly once.
-          The retry path is the ONLY path where the callable runs
-          twice.
-
-        Returns ``(hits, pg_fail, retried)`` where ``retried`` is
-        ``True`` iff the safety net fired and the callable ran twice.
-        """
-        # G6B Slice F — the engine's ``max_chars`` safety net is
-        # ALWAYS armed (purely message-driven) so a wrapper that hides
-        # the parameter behind unusual introspection still works, even
-        # when the same call site is also armed for ``trace``.  We
-        # only retry on a TypeError that mentions ``max_chars`` — any
-        # other TypeError propagates unchanged.
-        try:
-            result = self._recall_fn(query, **call_kwargs)
-            return result[0], result[1], False
-        except TypeError as e:
-            msg = str(e)
-            # ``trace`` safety net: most-impactful retry.  When the
-            # TypeError mentions ``safety_kwarg`` (typically ``trace``)
-            # we drop it AND ``max_chars`` from the retry payload so a
-            # pathological wrapper that hides BOTH parameters behind
-            # unusual introspection still works.
-            if safety_kwarg and safety_kwarg in msg:
-                if other_kwargs is not None:
-                    retry_kwargs = {
-                        k: v for k, v in other_kwargs.items()
-                        if k != "max_chars"
-                    }
-                else:
-                    retry_kwargs = {
-                        k: v for k, v in call_kwargs.items()
-                        if k not in (safety_kwarg, "max_chars")
-                    }
-                result = self._recall_fn(query, **retry_kwargs)
-                return result[0], result[1], True
-            # ``max_chars`` safety net (G6B Slice F): retry without
-            # ``max_chars`` only.
-            if "max_chars" in msg:
-                retry_kwargs = {
-                    k: v for k, v in call_kwargs.items()
-                    if k != "max_chars"
-                }
-                result = self._recall_fn(query, **retry_kwargs)
-                return result[0], result[1], True
-            raise
 
     def _finalize(
         self,

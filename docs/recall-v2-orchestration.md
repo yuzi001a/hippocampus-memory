@@ -57,33 +57,37 @@ already exist, only now they emit structured events through the probe.
 
 ## 3. Entry points and compatibility
 
-Legacy production path:
+production facade — the user-facing entry points execute through the V2
+orchestration. V2 is no longer an "alternate API":
 
 ```
 MemoryInjector.build_context
   -> MemoryInjector._get_recall
     -> core.prefetch_to_context_block
-      -> prefetch.prefetch
-        -> recall_pool.recall_pool
+      -> prefetch.prefetch                    <- builds QueryContext / QueryPlan / RecallTrace via the engine
+        -> RecallV2Engine.recall              <- orchestration; exactly one downstream call
+          -> recall_pool.recall_pool          <- the only retrieval executor
 ```
 
-New V2 path:
-
-```
-v3core.recall_v2.engine.RecallV2Engine.recall(...)
-  -> build QueryContext + QueryPlan + RecallTrace + LegacySink
-  -> recall_pool.recall_pool(query, ..., trace=sink)
-```
+`prefetch(fmt="list")` is the cutover seam: it forwards the same
+effective arguments it always did (so pre-G6B and post-G6B semantics
+match) and still returns `[hit.to_dict() for hit in hits]`.
+`prefetch(fmt="chain")` is intentionally untouched and still calls
+`chain_recall` directly. The engine never calls `prefetch`, so there is
+no recursion.
 
 Invariants:
 
-* **Exactly-once.** On the success path the legacy function is invoked
-  exactly once. The only exception is a `TypeError` whose message
-  mentions `trace` or `max_chars`, in which case the engine retries at
-  most once without that one keyword. Pre-execution fallback (one
-  no-`trace` call) is the only other invocation. Both calls that could
-  retry fail at call binding, before the legacy body runs, so the retry
-  cannot produce a second retrieval.
+* **Exactly-once; no post-I/O retry.** The legacy function is invoked
+  exactly once per request. BEFORE invoking, the engine validates the
+  payload with `inspect.signature(...).bind_partial(...)` and drops only
+  OPTIONAL unsupported keywords (`trace`, `max_chars`). If the signature
+  cannot be inspected, both optional keywords are dropped and
+  `trace_attached=False` is reported — correctness beats tracing. Once
+  the callable body has started, every exception (including
+  `TypeError`) propagates unchanged: the engine never inspects an
+  exception message to decide whether to call again.
+  `POST_IO_FULL_RETRY = 0`.
 * **Forwarded-keyword contract.** Every legacy keyword keeps the
   lenient rule: it is forwarded when the callable declares it or has
   `**kwargs`. `max_chars` is the one exception — it belongs to
@@ -94,12 +98,26 @@ Invariants:
 * **Additive probe contract.** `recall_pool` exposes a module-level
   `_probe(trace, method, *args, **kwargs)` helper. When `trace is
   None` the helper returns immediately and the legacy code path is
-  byte-identical to before. When `trace` is non-`None` it calls
-  `getattr(trace, method)(*args, **kwargs)` and swallows any
-  exception. `recall_v2` is never imported from `recall_pool`.
-* **Public API compatibility.** `RecallV2Engine.recall` is new.
-  `recall_pool.recall_pool` and `prefetch.prefetch_to_context_block`
-  each gained exactly one keyword argument (`trace=None`). Existing
+  byte-identical to before. The prefetch-side helper resolves BOTH
+  protocol styles: the sink-style call (`drop` / `inject`) stays primary,
+  and for a bare `RecallTrace` (which has no `drop` method) it falls back
+  to the trace-style call (`record_drop` with a `DropReasonCode`, or
+  `record_candidate_event`). Without that fallback the injection-stage
+  evidence was silently discarded. `recall_v2` is never imported from
+  `recall_pool`.
+* **One trace per request.** `prefetch` accepts a keyword-only
+  `trace_out` list and publishes the trace it built there;
+  `prefetch_to_context_block` passes its own holder and emits the
+  injection-stage evidence (`inject`, `drop CHAR_BUDGET`) against that
+  SAME instance, so a request has exactly one trace carrying both
+  retrieval and injection evidence. Traces are never persisted.
+* **Budget accounting.** Every SELECTED candidate omitted solely because
+  of `max_chars` is recorded as `CHAR_BUDGET` on that same trace, so
+  `selected == injected + char_budget_dropped` holds whenever the greedy
+  budget loop runs. The rendered context string is unchanged by tracing.
+* **Public API compatibility.** `recall_pool.recall_pool` gained one
+  keyword argument (`trace=None`). `prefetch.prefetch` gained optional
+  keyword-only `max_chars=None` and `trace_out=None`. Existing
   callers continue to work unchanged.
 
 ## 4. Lane model and the legacy-path mapping
@@ -126,17 +144,36 @@ The default `lane_for_kind` fallback is `vector`.
 
 **Engine default vs production-caller shape.** `RecallV2Engine.recall`
 forwards only the kwargs it is given; unknown `include_*` flags
-travel through `**passthrough`. If the caller passes none,
-`recall_pool`'s own defaults apply (`include_keyword=True`,
+travel through `**passthrough`. Raw engine callers that pass no flags get
+`recall_pool`'s own defaults (`include_keyword=True`,
 `include_card_vector=False`, `include_message_vector=False`,
 `include_effective=False`, `include_topic=True`,
-`include_yin=True`, `include_notes=True`). Production `prefetch()`
-instead passes `include_keyword` and `include_card_vector` as dual
-(both `True` by default) and `include_message_vector` from config.
-Therefore a production-equivalent V2 call MUST pass the same
-`include_*` flags; otherwise the lane mix differs and the result mix
-differs. Measured on the same query/data: 3 hits with engine defaults
-vs 4 hits with all lanes enabled.
+`include_yin=True`, `include_notes=True`).
+
+The production facade never relies on those defaults: `prefetch` passes
+`include_keyword` / `include_card_vector` as dual (both `True` by
+default) and `include_message_vector` from config, and the effective
+`QueryPlan` is derived from exactly those flags via
+`contracts.build_effective_query_plan`, so a facade request cannot
+diverge from pre-G6B semantics. (A direct `RecallV2Engine` call without
+flags can still differ — earlier measurement: 3 hits with engine
+defaults vs 4 with the production shape. That caveat applies to raw
+engine callers only.)
+
+**Effective plan lane rules.** `build_effective_query_plan` maps the real
+legacy execution shape onto the five canonical lanes without renaming or
+inventing lanes:
+
+| Lane       | Enabled when                                                        |
+|------------|---------------------------------------------------------------------|
+| `keyword`  | `include_keyword`                                                    |
+| `qa`       | `include_keyword` (QA keyword/snapshot and QA-vector both live inside the keyword block) |
+| `topic`    | `include_topic`                                                      |
+| `vector`   | any of `include_card_vector`, `include_message_vector`, `include_effective`, `include_yin`, `include_notes` |
+| `explicit` | `include_keyword` or `include_card_vector` (the two active-memory seams live in those blocks) |
+
+A disabled lane carries a truthful `reason` (for example
+`include_keyword=False`), so the plan cannot contradict the trace.
 
 ## 5. Contracts in play
 

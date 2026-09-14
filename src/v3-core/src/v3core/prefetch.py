@@ -4,8 +4,8 @@ import json
 import logging
 from typing import Any
 from .types import DEFAULT_CATEGORIES
-from .recall_pool import recall_pool
 from ._deadline import PrefetchDeadlineExceeded, bind_store_deadline, coerce_deadline
+from .recall_v2.contracts import DropReasonCode, CandidateEventType
 
 
 try:
@@ -184,7 +184,8 @@ def _try_get_sqlite_store(config):
 def prefetch(query: str, limit: int = 5, config=None,
              card_index: dict | None = None, pg=None, q_emb: list[float] | None = None,
              pg_was_connected: bool = False, fmt: str = "list",
-             core=None, *, deadline=None, trace=None):
+             core=None, *, deadline=None, trace=None,
+             max_chars: int | None = None, trace_out: list | None = None):
     """Recall related memories.
 
     fmt controls output shape:
@@ -192,6 +193,27 @@ def prefetch(query: str, limit: int = 5, config=None,
       - "chain": three-layer chain_recall result dict (segment -> bei -> trace).
 
     Returns either a list[dict] (fmt='list') or a dict (fmt='chain').
+
+    PART 1 / PART 2 (G6B Slice I):
+        For ``fmt == 'list'`` ONLY, the actual retrieval is now
+        orchestrated by :class:`RecallV2Engine` (the V2 engine wraps
+        the legacy ``recall_pool`` exactly once, builds a QueryPlan
+        from the include_* flags the facade supplies, and strips
+        ``max_chars`` from the forwarded payload when the legacy
+        callable does not declare it).  ``fmt == 'chain'`` still goes
+        through ``chain_recall`` byte-for-byte.
+
+    PART 2 / PART 4:
+        ``max_chars`` (optional keyword-only) is the caller's real
+        injection budget — forwarded to the engine so
+        ``QueryContext.max_chars`` and ``QueryPlan.max_chars`` reflect
+        the caller's intent, but the engine strips it before invoking
+        ``recall_pool`` (which does not declare ``max_chars``).
+        ``trace_out`` (optional keyword-only list) is the internal
+        channel the engine uses to publish the typed trace so
+        ``prefetch_to_context_block`` can attach injection probes
+        (``inject`` / ``drop CHAR_BUDGET``) to the SAME trace
+        instance — one request, one trace.
     """
     deadline = coerce_deadline(deadline)
     if deadline is not None:
@@ -230,29 +252,54 @@ def prefetch(query: str, limit: int = 5, config=None,
         rerank_cfg = {}
         cfg_for_pool = None
 
-    recall_kwargs = dict(
-        query=query,
-        card_index=card_index or {},
-        pg=pg,
-        q_emb=q_emb,
-        include_keyword=dual,
-        include_card_vector=dual,
-        include_message_vector=include_msg_vec,
-        rerank_top_n=30 if rerank_cfg.get("endpoint") else None,
-        rerank_cfg=rerank_cfg,
-        limit=limit,
-        config=cfg_for_pool,
-        sqlite_store=_try_get_sqlite_store(config),
-        core=core,
-    )
-    if deadline is not None:
-        recall_kwargs["deadline"] = deadline
-    # B1 (G6B Slice B): forward the trace kwarg to recall_pool exactly
-    # the way deadline is forwarded — only when it is not None.
+    # PART 1 (G6B Slice I) — route the fmt='list' path through the
+    # V2 engine.  The include_* flags below are what the LEGACY
+    # production path has always passed to ``recall_pool``; the
+    # engine sees them verbatim (no algorithm / constant change), and
+    # uses them to build an effective QueryPlan so the typed plan
+    # cannot disagree with the trace.
+    include_keyword = bool(dual)
+    include_card_vector = bool(dual)
+    include_message_vector = bool(include_msg_vec)
+    rerank_top_n = 30 if rerank_cfg.get("endpoint") else None
+    sqlite_store = _try_get_sqlite_store(config)
+
+    # Lazy import — keep recall_v2 out of the module-load graph so the
+    # facade module stays cheap and there is no import-order surprise.
+    from .recall_v2.engine import RecallV2Engine
+
+    engine_kwargs: dict = {
+        "card_index": card_index or {},
+        "pg": pg,
+        "q_emb": q_emb,
+        "pg_was_connected": pg_was_connected,
+        "core": core,
+        "sqlite_store": sqlite_store,
+        "limit": limit,
+        "config": cfg_for_pool,
+        "rerank_top_n": rerank_top_n,
+        "rerank_cfg": rerank_cfg,
+        "deadline": deadline,
+        "include_keyword": include_keyword,
+        "include_card_vector": include_card_vector,
+        "include_message_vector": include_message_vector,
+    }
+    if max_chars is not None:
+        engine_kwargs["max_chars"] = max_chars
+    # PART 4 (G6B Slice I) — forward the trace sink + the trace_out
+    # holder.  The engine uses the sink (``trace``) when supplied so
+    # the existing trace contract still works; when the caller
+    # instead supplies ``trace_out``, the engine appends its built
+    # trace to that list so the facade can emit injection probes
+    # against the SAME instance.
     if trace is not None:
-        recall_kwargs["trace"] = trace
-    hits, _ = recall_pool(**recall_kwargs)
-    return [h.to_dict() for h in hits]
+        engine_kwargs["trace"] = trace
+    if trace_out is not None:
+        engine_kwargs["trace_out"] = trace_out
+
+    engine = RecallV2Engine()
+    result = engine.recall(query, **engine_kwargs)
+    return [h.to_dict() for h in result.hits]
 
 
 def _read_session_summary_block(source_id: str, config=None) -> str:
@@ -331,15 +378,66 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
     # module does not import a private helper from recall_pool.  When
     # ``trace`` is None the helper is a pure no-op — byte-identical to
     # the pre-trace behaviour.
+    #
+    # SLICE J (G6B): the helper now resolves BOTH the sink-style
+    # protocol (LegacySink.drop / LegacySink.inject) AND the trace-style
+    # protocol (RecallTrace.record_drop / RecallTrace.inject) so the
+    # injection-stage evidence ALWAYS lands on the typed
+    # ``RecallTrace`` regardless of which facade the engine built.  The
+    # sink-style call stays primary (zero behavior change for callers
+    # that already attach a LegacySink); the trace-style call is a
+    # silent fallback when the sink-style method is absent.  The
+    # string drop code ``'CHAR_BUDGET'`` is converted to the contracts
+    # enum (``DropReasonCode``); if conversion fails we return silently.
+    # ``trace=None`` short-circuits BEFORE any method lookup — the
+    # no-op path costs only one identity check.
     def _probe(trace, method, *args, **kwargs):
         if trace is None:
             return
+        # ---- Sink-style primary: ``drop(sid, code, stage=stage)`` ----
         try:
             fn = getattr(trace, method, None)
-            if fn is not None:
+            if fn is not None and callable(fn):
                 fn(*args, **kwargs)
+                return
         except Exception:
             return
+        # ---- Trace-style fallback for drop / inject ----
+        if method == "drop":
+            try:
+                record_drop = getattr(trace, "record_drop", None)
+                if record_drop is None or not callable(record_drop):
+                    return
+                sid = args[0] if args else kwargs.get("candidate_id", "")
+                code_str = args[1] if len(args) >= 2 else kwargs.get("code", "")
+                stage = kwargs.get("stage", "")
+                try:
+                    code_enum = DropReasonCode(code_str)
+                except (ValueError, KeyError):
+                    return
+                record_drop(sid, code_enum, stage=stage)
+            except Exception:
+                return
+        elif method == "inject":
+            try:
+                inject_fn = getattr(trace, "inject", None)
+                if inject_fn is not None and callable(inject_fn):
+                    sid = args[0] if args else kwargs.get("candidate_id", "")
+                    char_count = kwargs.get("char_count", 0)
+                    if len(args) >= 2:
+                        char_count = args[1]
+                    inject_fn(sid, char_count=char_count)
+                    return
+            except Exception:
+                pass
+            try:
+                record_event = getattr(trace, "record_candidate_event", None)
+                if record_event is None or not callable(record_event):
+                    return
+                sid = args[0] if args else kwargs.get("candidate_id", "")
+                record_event(sid, CandidateEventType.INJECTED)
+            except Exception:
+                return
 
     # B 路: 扁平 RRF 融合 (topics 向量 + 关键词) — 主路径
     prefetch_kwargs = {
@@ -350,8 +448,28 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
         prefetch_kwargs["deadline"] = deadline
     if trace is not None:
         prefetch_kwargs["trace"] = trace
+    # PART 2 (G6B Slice I) — forward the caller's real injection
+    # budget so ``QueryContext.max_chars`` and ``QueryPlan.max_chars``
+    # reflect the caller's intent.  The engine strips it before
+    # invoking ``recall_pool``.
+    if max_chars is not None:
+        prefetch_kwargs["max_chars"] = max_chars
+    # PART 4 (G6B Slice I) — the facade needs the SAME trace the
+    # engine built so injection probes land on the one trace for
+    # this request.  Create a holder list, pass it down as
+    # ``trace_out``, and after the call inspect the holder to find
+    # the trace instance.  Falls back to the legacy ``trace=``
+    # behaviour when no trace is available.
+    trace_holder: list = []
+    prefetch_kwargs["trace_out"] = trace_holder
     results = prefetch(query, limit, config, card_index, pg, q_emb,
                        **prefetch_kwargs)
+    # Resolve the trace instance that the engine published (if any).
+    # ``trace_holder`` is populated by the engine on the success
+    # path; if the engine used the pre-supplied ``trace=`` instead,
+    # ``trace_holder`` stays empty and we fall back to ``trace``.
+    engine_trace = trace_holder[0] if trace_holder else None
+    effective_trace = engine_trace if engine_trace is not None else trace
     if not results:
         lines: list[str] = []
         _append_tail_qas(lines, pg=pg, is_new_session=is_new_session, deadline=deadline)
@@ -413,7 +531,7 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
             # source_id MUST be the result dict's own source_id value.
             try:
                 _joined_unit = "\n".join(_unit_lines)
-                _probe(trace, 'inject', r.get("source_id", ""),
+                _probe(effective_trace, 'inject', r.get("source_id", ""),
                        char_count=len(_joined_unit))
             except Exception:
                 pass
@@ -454,7 +572,7 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
             # B2 (G6B Slice B): record the budget-driven skip on the
             # trace.  source_id MUST be the result dict's own value.
             try:
-                _probe(trace, 'drop', r.get("source_id", ""),
+                _probe(effective_trace, 'drop', r.get("source_id", ""),
                        'CHAR_BUDGET', stage='injection')
             except Exception:
                 pass
@@ -464,7 +582,7 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
         # newline-joined unit-text length (the lines actually appended).
         try:
             _joined_unit = "\n".join(unit_lines)
-            _probe(trace, 'inject', r.get("source_id", ""),
+            _probe(effective_trace, 'inject', r.get("source_id", ""),
                    char_count=len(_joined_unit))
         except Exception:
             pass

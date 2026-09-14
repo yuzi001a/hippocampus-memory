@@ -373,6 +373,108 @@ def build_default_query_plan(context: QueryContext) -> QueryPlan:
     )
 
 
+def build_effective_query_plan(
+    context: QueryContext,
+    *,
+    include_keyword: bool,
+    include_card_vector: bool,
+    include_message_vector: bool,
+    include_effective: bool,
+    include_topic: bool,
+    include_yin: bool,
+    include_notes: bool,
+) -> QueryPlan:
+    """Build a QueryPlan that mirrors the REAL legacy execution shape.
+
+    The plan must reflect what the legacy ``recall_pool`` will actually
+    do on the success path, NOT a hypothetical all-enabled ideal.  The
+    legacy keyword block owns BOTH the QA keyword/snapshot path AND the
+    QA vector path — so the ``qa`` lane is enabled iff ``include_keyword``
+    is set.  The legacy vector family (topic, yin, notes, message
+    vector, effective, card vector) all live behind the ``vector`` lane
+    for the purpose of plan enablement; ``explicit`` is the active-memory
+    seam, which lives inside the keyword block AND the vector block, so
+    it is enabled iff EITHER ``include_keyword`` OR ``include_card_vector``
+    is set (those are the two seams that call ``_active_memory_reader_for``).
+
+    A disabled lane carries a truthful ``reason`` (e.g.
+    ``"include_keyword=False"``) so the trace can never claim a lane is
+    enabled while the real legacy call skipped it.  Lanes are NOT
+    renamed and no new lanes are introduced; ``yin`` and ``notes`` stay
+    inside the vector family.
+
+    This builder is ADDITIVE — :func:`build_default_query_plan` is
+    unchanged and remains the default for callers that do NOT supply the
+    facade include_* flags.
+    """
+    budget = max(1, int(context.budget_ms))
+    final_limit = int(context.limit) if context.limit > 0 else DEFAULT_QUERY_LIMIT
+    max_chars = int(context.max_chars) if context.max_chars > 0 else DEFAULT_INJECTION_MAX_CHARS
+    slice_ = max(50, budget // 6)
+    qa_slice = slice_ + budget // 12
+
+    kw_enabled = bool(include_keyword)
+    vec_enabled = bool(
+        include_card_vector or include_message_vector or include_effective
+        or include_topic or include_yin or include_notes
+    )
+    topic_enabled = bool(include_topic)
+    qa_enabled = bool(include_keyword)
+    explicit_enabled = bool(include_keyword or include_card_vector)
+
+    return QueryPlan(
+        query_id=context.query_id,
+        lanes=(
+            LanePlan(
+                LANE_KEYWORD, kw_enabled, slice_, context.deadline_monotonic,
+                max(20, final_limit * 4),
+                reason="" if kw_enabled else "include_keyword=False",
+            ),
+            LanePlan(
+                LANE_VECTOR, vec_enabled, slice_, context.deadline_monotonic,
+                max(20, final_limit * 4),
+                reason=(
+                    "" if vec_enabled
+                    else "include_card_vector=False,include_message_vector=False,"
+                         "include_effective=False,include_topic=False,"
+                         "include_yin=False,include_notes=False"
+                ),
+            ),
+            LanePlan(
+                LANE_TOPIC, topic_enabled, slice_, context.deadline_monotonic,
+                max(15, final_limit * 3),
+                reason="" if topic_enabled else "include_topic=False",
+            ),
+            LanePlan(
+                LANE_QA, qa_enabled, qa_slice, context.deadline_monotonic,
+                max(30, final_limit * 8),
+                reason="" if qa_enabled else "include_keyword=False",
+            ),
+            LanePlan(
+                LANE_EXPLICIT, explicit_enabled,
+                max(50, slice_ // 2), context.deadline_monotonic,
+                final_limit,
+                reason=(
+                    "" if explicit_enabled
+                    else "include_keyword=False,include_card_vector=False"
+                ),
+            ),
+        ),
+        deadline_monotonic=context.deadline_monotonic,
+        budget_ms=budget,
+        # Rerank is the SAME legacy surface as today; the facade does
+        # NOT change rerank gating (it still flows through ``rerank_cfg``
+        # / ``rerank_top_n`` in the kwargs).  Mirror the default plan's
+        # ``rerank_enabled=True`` so the typed plan cannot disagree with
+        # a legacy call whose ``rerank_cfg`` carries an endpoint.
+        rerank_enabled=True,
+        rerank_limit=DEFAULT_RERANK_LIMIT,
+        final_limit=final_limit,
+        max_chars=max_chars,
+        algorithm=canonical_algorithm_snapshot(),
+    )
+
+
 # Drop reason
 
 @dataclass(frozen=True)
