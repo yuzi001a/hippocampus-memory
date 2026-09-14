@@ -1,4 +1,4 @@
-# Hippocampus v0.1-alpha — Public Alpha Supported Surface
+# Public Alpha Supported Surface
 
 > **The single contract for what the public-alpha release of v3 Memory
 > Plugin promises to do, in what environment, and with what evidence.**
@@ -8,14 +8,14 @@
 > in doubt, treat anything outside § 2 as not yet supported.
 >
 > This document is the supported-surface contract for the public
-> alpha. The follow-up requirements the alpha does **not** close are
+> alpha. The pre-tag requirements the alpha does **not** close are
 > recorded in [`docs/RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md)
 > and [`docs/KNOWN-LIMITATIONS.md`](KNOWN-LIMITATIONS.md).
 >
 > **Status legend (used in § 2 below):**
 >
 > - **PASS** — executed on the current HEAD in the environment of § 1
->   against this release and reproduced the claimed outcome.
+>   against this candidate and reproduced the claimed outcome.
 > - **EVIDENCE** — code path is the documented contract; specific lab
 >   numbers come from prior lab bases and the path is unchanged on this
 >   HEAD, but a fresh end-to-end run on this exact HEAD was not
@@ -42,7 +42,7 @@ which the § 2 PASS rows were produced.
 | OS | Windows 10 |
 | Python | 3.11.16 |
 | Install mode | Fresh `venv` + standard non-editable `pip install` from this repo's clean-export wheel/ directory (one fresh Git commit; see the export manifests) |
-| PostgreSQL | `pgvector/pgvector:pg17` Docker container, **disposable** (not a production database) |
+| PostgreSQL | `pgvector/pgvector:pg17` Docker container, **disposable** (not the production PG historically referenced in this repo's docs) |
 | Profile directory | Explicit, absolute path set by top-level `basePath` in `config.yaml` (engine does **not** expand `~`, does **not** default to a particular user path) |
 | Required env | `V3CORE_PG_PASSWORD` (declared in `plugin.yaml` under `requires_env`) |
 | Hermes host | A working Hermes Agent; the fresh venv used the highest available PyPI host package (`hermes-agent==0.19.0`) — `pip check` and core/plugin/tools imports PASS, plugin reports `get_tool_schemas` count = 13 |
@@ -159,14 +159,14 @@ that may exist:
 - **Multi-writer** coordination (no distributed lease implementation).
 - **Multi-agent** routing / namespacing (only reserved by the schema).
 - **Cloud-hosted service** (no managed offering exists).
-- **Stable production deployment** of this technical preview — this
-  release is not a stable production release.
+- **Production deployment** of this alpha as a stable release — the
+  public alpha tag has not been cut.
 - **Historical data migration** into the supported surface. The
   supported surface assumes a fresh environment.
 - **Long-soak evidence** (`LONG_SOAK`) — PENDING / NON-BLOCKING; do
   not infer stability from the alpha E2E alone.
 - **Full pytest green across the repository** — not claimed. The focused
-  acceptance scope for this release was run file-by-file to avoid known
+  acceptance scope for this candidate was run file-by-file to avoid known
   order contamination: **191 passed** across bootstrap/config/embed/
   active-memory, source-ingest preservation, Hermes adapter/lifecycle/
   tool-schema, and import preservation. This number is not a full-suite
@@ -181,9 +181,9 @@ that may exist:
 
 ## 5. What the public-alpha does not close
 
-These are follow-up requirements the alpha does **not** close by
+These are pre-tag requirements the alpha does **not** close by
 itself. Read [`docs/RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md) for
-the full follow-up list. Statuses here reflect the evidence in § 2 on
+the full pre-tag list. Statuses here reflect the evidence in § 2 on
 this HEAD, not historical carryover from earlier candidates.
 
 | Area | Status for this alpha | Backing |
@@ -191,7 +191,7 @@ this HEAD, not historical carryover from earlier candidates.
 | Data safety (declared supported surface only) | **CLOSED on declared surface** — clean-export E2E from empty DB produced `DURABLE_COMMITTED`, exact retry returned `DEDUPLICATED`, restart-survivable cursor advance. Limited to the surface in § 2.2, § 2.3, § 2.6. | § 2.2, § 2.3, § 2.6; clean-export E2E run report. |
 | Recovery (dump/restore into an empty isolated PG) | **CLOSED on declared surface** — fresh export pg_dump/pg_restore reproduced `raw` = 2, `QA` = 0, `explicit` = 1, then post-restore write + keyword recall succeeded. | § 2.5; fresh export pg_dump/pg_restore run. |
 | Installability (fresh-install matrix) | **CLOSED on declared surface** — clean-export wheel (one fresh Git commit; see the export manifests) installed in fresh venv; `pip check` clean; core/plugin/tools imports PASS; plugin `get_tool_schemas` count = 13; alpha bootstrap on empty tmpfs pgvector/pg17 (7 tables, idempotent second run) PASS. | § 2.1; clean-export wheel install + bootstrap run. |
-| Privacy / security | **PASS for this publication** — the clean-history public tree contains no real credentials, private endpoints, or local runtime state; provider credentials are supplied locally and are not bundled. | Clean-export builder + publication security/privacy scan; see `docs/RELEASE-CHECKLIST.md` § C. |
+| Privacy / security | **CLEAN EXPORT = PASS** (one fresh Git commit / no historical credentials in the exported tree). **Credential rotation receipt at the source provider is OPEN (Section R of RELEASE-CHECKLIST.md)**; this is a hard pre-tag gate that the alpha evidence does not close by itself. | Clean-export builder + local secret scanner output; RELEASE-CHECKLIST.md § R. |
 | Basic production usability | **PASS on declared alpha smoke slice** — fresh export stranger install covered info, sync_turn, v3_store, keyword readback, new-process restart, and restore write/recall. LLM/observer live paths, long-soak, and full suite remain outside the claim; focused acceptance was **191 passed**. | § 2.1–§ 2.6; fresh export install smoke. |
 
 ---

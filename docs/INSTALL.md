@@ -1,13 +1,14 @@
-# Install Hippocampus v0.1-alpha
+# Install — v3 Memory Plugin (Public Alpha Hardening)
 
 > **Audience:** first-time trial users on a Windows machine who want to
 > evaluate the supported public-alpha surface against a disposable,
 > isolated PostgreSQL/pgvector.
 >
-> **Scope:** install both `v3-core` and `v3-hermes-plugin` from this
-> repo's source tree, point v3 at a disposable pgvector, run the
-> explicit DB bootstrap, and confirm the install succeeds on a fresh
-> `venv` with a non-editable local-source `pip install`.
+> **Scope:** build non-editable wheel + sdist artifacts for both
+> `v3-core` and `v3-hermes-plugin` from this repo's source tree,
+> install the built wheels into a fresh venv, point v3 at a disposable
+> pgvector, run the explicit DB bootstrap via the packaged
+> `hippocampus` console, and confirm the install succeeds.
 >
 > **Out of scope:** connecting to any pre-existing production
 > PostgreSQL, importing historical data, replacing a live deployment,
@@ -15,12 +16,13 @@
 > surface assumes a fresh environment.
 >
 > **Verification status:** this install recipe is the documented
-> bring-up path. The clean-history public-tree E2E run on a fresh
+> bring-up path. The clean-history export E2E run on a fresh
 > disposable Windows 10 / Python 3.11.16 / `pgvector/pgvector:pg17`
 > environment is recorded in
 > [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
 > § 2.1 (PASS rows for clean-install + `pip check` + bootstrap
-> idempotency). Remaining alpha limitations are listed in
+> idempotency). Pre-tag blockers the alpha does **not** close by
+> itself are listed in
 > [`docs/RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md)
 > § D (Install / upgrade / rollback readiness).
 
@@ -47,15 +49,19 @@
 ## 2. Clone
 
 ```powershell
-git clone https://github.com/yuzi001a/hippocampus-memory
-cd hippocampus-memory
+git clone https://example.invalid/v3-memory-plugin.git
+cd v3-memory-plugin
 ```
 
-This is the Hippocampus v0.1-alpha public repository. Do not assume
-that a package name or internal version number has been renamed: the
-compatible internal commands remain `v3-core` and `v3-core info`.
+The public repository URL above is a placeholder for the not-yet-
+published public mirror. Replace it with the published URL once the
+public release is cut; do not assume any specific tag, branch, or
+commit SHA from this document — every supported-surface row in
+[`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
+§ 2 records the evidence under whatever `HEAD` the verifier checked
+out, not a fixed internal identifier.
 
-Verify the working tree is the public-alpha release:
+Verify the working tree is the public-alpha candidate:
 
 ```powershell
 git log --oneline -1
@@ -68,12 +74,15 @@ git log --oneline -1
 
 Use a **fresh** virtualenv per evaluation. Mixing venvs across different
 versions of v3-core or across different profile names is the most
-common source of "it worked yesterday" bugs.
+common source of "it worked yesterday" bugs. The shipped workflow
+uses [`uv`](https://docs.astral.sh/uv/) to create and manage the
+venv; if `uv` is not yet on the host, install it once with the
+official installer (`pip install uv`, `winget install astral-sh.uv`,
+or `irm https://astral.sh/uv/install.ps1 | iex`) before continuing.
 
 ```powershell
-py -3.11 -m venv .venv
+uv venv --python 3.11 .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -U pip wheel
 ```
 
 Confirm you're inside the venv:
@@ -85,7 +94,31 @@ where python
 
 ---
 
-## 4. Disposable pgvector container
+## 4. Build non-editable wheel + sdist artifacts
+
+The documented distribution path is to **build artifacts first**, then
+install the actual built wheels into the fresh venv — not `pip install`
+straight from the source tree. From the repo root:
+
+```powershell
+uv build --wheel --sdist --out-dir .\dist\v3-core .\src\v3-core
+uv build --wheel --sdist --out-dir .\dist\v3-hermes-plugin .\src\v3-hermes-plugin
+```
+
+This produces (paths relative to repo root):
+
+- `dist\v3-core\v3_core-4.0.0-py3-none-any.whl`
+- `dist\v3-core\v3_core-4.0.0.tar.gz`
+- `dist\v3-hermes-plugin\v3_hermes_plugin-4.0.0-py3-none-any.whl`
+- `dist\v3-hermes-plugin\v3_hermes_plugin-4.0.0.tar.gz`
+
+These exact filenames are what step 6 installs. The sprint does **not**
+push these to PyPI; there is no PyPI project to claim, and this
+document does not direct you to install from a registry.
+
+---
+
+## 5. Disposable pgvector container
 
 Use Docker. The image is the official `pgvector/pgvector:pg17`
 (matches the clean-history export E2E run; see
@@ -122,44 +155,84 @@ You should see a version string (e.g. `0.7.x`).
 
 ---
 
-## 5. Local-source `pip install` (non-editable)
-
-The documented install path is **non-editable** local-source `pip
-install`:
+## 6. Install the actual built wheels (non-editable, fresh venv)
 
 ```powershell
-pip install .\src\v3-core
-pip install .\src\v3-hermes-plugin
+uv pip install .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
+uv pip install .\dist\v3-hermes-plugin\v3_hermes_plugin-4.0.0-py3-none-any.whl
+```
+
+Then run `uv pip check` (pip-compatible) to confirm the two wheels
+agree on every transitive dependency. Do not skip this step; a clean
+`uv pip check` is part of the supported-surface evidence.
+
+```powershell
+uv pip check
 ```
 
 What this does:
 
-- Builds `v3-core` from `src/v3-core/pyproject.toml` (declares
-  `psycopg2-binary`, `pgvector`, `pyyaml`, `numpy`, `requests`,
-  `openai`, `jieba`, `pyahocorasick>=2.3.0`).
-- Builds `v3-hermes-plugin` from
-  `src/v3-hermes-plugin/pyproject.toml` (declares `v3-core>=4.0.0`,
-  `requests`, `pyyaml`).
-- Installs a `v3-core` console script (`v3-core info`).
+- Installs `v3-core` from the wheel (declares `psycopg2-binary`,
+  `pgvector`, `pyyaml`, `numpy`, `requests`, `openai`, `jieba`,
+  `pyahocorasick>=2.3.0`).
+- Installs `v3-hermes-plugin` from the wheel (declares
+  `v3-core>=4.0.0,<5.0.0`, `requests`, `pyyaml`).
+- Installs two `v3-core` console scripts:
+  - `v3-core` — preserved verbatim (e.g. `v3-core info`).
+  - `hippocampus` — distribution-facing console (Gate 2). Provides
+    `hippocampus doctor` (read-only install check) and
+    `hippocampus bootstrap` (apply packaged SQL to an explicit
+    target; refuses production-boundary DSNs unconditionally).
+- Registers the Hermes memory provider entry point
+  `hermes_agent.memory_providers / deep_memory_v3 →
+  v3hermes:register` (matches the manifest `name: deep_memory_v3`).
 
 > 💡 The `pyahocorasick` dependency is a C extension. On Windows this
 > needs a working C compiler (e.g. the MSVC build tools that match
 > your Python). If `pip install` fails on this step, see
 > [`docs/KNOWN-LIMITATIONS.md`](KNOWN-LIMITATIONS.md) before retrying.
+>
+> The legacy `src/v3-core/scripts/bootstrap_alpha_db.py` script
+> remains in the tree for source-tree development only. It is **not**
+> the primary distribution path for this alpha — use
+> `hippocampus bootstrap` (step 8).
 
 ---
 
-## 6. DB bootstrap (explicit, NOT automatic)
+## 7.5 `hippocampus doctor --static` — read-only install check
+
+After `uv pip install` of the built wheels (step 6), run the
+distribution-facing read-only sanity check before touching any
+database:
+
+```powershell
+hippocampus doctor --static
+```
+
+Expected: a single JSON object on stdout with `command: doctor`,
+`static: true`, and `checks.packaged_sql` listing `alpha_bootstrap.sql`
+and `explicit_memories.sql` (both with sha256). The `--static` flag
+skips config resolution so the command is safe in packaging / CI
+contexts. Without `--static`, doctor also resolves the active
+profile's config (read-only) and prints a secret-redacted summary.
+
+`doctor --static` is the documented pre-bootstrap gate: do not run
+`hippocampus bootstrap --target <DSN>` until this reports `status:
+ok`.
+
+---
+
+## 8. DB bootstrap (explicit, NOT automatic) — packaged command
 
 > ⚠️ **This step is explicit.** The `v3core.active_memory_store`
 > writer does **not** apply the schema artifact. You **must** run
-> `bootstrap_alpha_db.py` against your disposable PG before the first
+> `hippocampus bootstrap` against your disposable PG before the first
 > write, or the writer will fail with a missing-table error.
 
 The supported alpha run produced `7` tables on an empty tmpfs pg17 and
 was idempotent on the second run (no errors). See
 [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
-§ 2.1, "DB schema applied via `bootstrap_alpha_db.py`" row.
+§ 2.1, "DB schema applied via `hippocampus bootstrap`" row.
 
 ```powershell
 # Set the password via env so it never appears on a CLI argument list.
@@ -168,30 +241,32 @@ was idempotent on the second run (no errors). See
 $env:V3CORE_PG_PASSWORD = $pgPassword
 $env:PGPASSWORD = $pgPassword
 
-python .\src\v3-core\scripts\bootstrap_alpha_db.py `
-  --host 127.0.0.1 `
-  --port $pgPort `
-  --database v3embeddings_alpha `
-  --user postgres
+hippocampus bootstrap --target "postgres://postgres@127.0.0.1:${pgPort}/v3embeddings_alpha"
 ```
 
 What this does:
 
-- Applies `src/v3-core/schema/alpha_bootstrap.sql` verbatim, which
-  includes the canonical `explicit_memories.sql` artifact.
+- Applies the packaged `src/v3-core/src/v3core/schema/alpha_bootstrap.sql`
+  verbatim, which inlines the canonical
+  `src/v3-core/src/v3core/schema/explicit_memories.sql` artifact (the
+  repo-root `src/v3-core/schema/*.sql` copies are the canonical
+  source-of-truth and the package copies are byte-identical to them).
 - Is idempotent: every DDL uses `IF NOT EXISTS` / `ADD COLUMN IF NOT
   EXISTS`. Running twice is a no-op.
-- Refuses to run against a default production boundary DSN by
-  default; the placeholder DSN above is the documented disposable one.
+- Refuses to run against a default production boundary DSN: port
+  `5433` is unconditionally refused, and the combination of
+  loopback host + database `v3embeddings` is also refused. There is
+  no override flag; secrets never appear on argv.
 
-> 🛑 **Never point this at a production PG.** The script refuses the
-> default production boundary DSN by default; if you pass a different
+> 🛑 **Never point this at a production PG.** The packaged
+> `hippocampus bootstrap` command refuses the default production
+> boundary DSN unconditionally; if you pass a different
 > production-looking DSN, you accept the risk. The alpha contract
 > assumes a disposable PG.
 
 ---
 
-## 7. Bootstrap v3 engine config
+## 9. Bootstrap v3 engine config
 
 `v3-hermes-plugin` reads engine config from the absolute path you
 chose for the profile directory. The supported canonical key is the
@@ -237,16 +312,15 @@ Fill in:
 
 ---
 
-## 8. Smoke check the engine
+## 10. Smoke check the engine
 
 ```powershell
 v3-core info
 ```
 
-Expected: a short minimal status summary. This command is not the
-provider-health contract and must not be interpreted as requiring a
-literal `pg: OK` line; use the documented `v3_health` path when you
-need per-provider health.
+Expected: a short status banner that prints the engine version and
+reports the PG connection state. If PG is unreachable, the banner
+will say so — that is expected during bring-up, not a build failure.
 
 To exercise the durable path without a full Hermes host, you can also
 run the lab recipe in [`docs/BACKUP-RESTORE.md`](BACKUP-RESTORE.md)
@@ -254,27 +328,42 @@ against your disposable PG.
 
 ---
 
-## 9. (Optional) Plug into Hermes
+## 11. (Optional) Plug into Hermes
+
+> **Hermes is a separate prerequisite, not a host package dependency
+> here.** This repo does not claim a Hermes wheel/sdist exists. Install
+> Hermes first using its official docs and only then install the
+> `v3-hermes-plugin` artifact into the **same** Hermes host
+> environment.
 
 If you also have a Hermes Agent host available and want to exercise
 the end-to-end hook contract:
 
-1. In your Hermes `config.yaml` add:
+1. Install the upstream Hermes host from its official source and
+   verify with `hermes --version`. The reproducible host path used
+   for the alpha sprint is a shallow clone of the current upstream
+   repository followed by `uv sync`.
+2. In your Hermes `config.yaml` add:
    ```yaml
    memory:
      provider: deep_memory_v3
    ```
-2. Point Hermes at the venv you built in step 3 (Hermes loads the
-   plugin package from the active Python).
-3. Start Hermes. (No automated setup wizard is provided; the
+3. Install the **same** `v3_hermes_plugin-4.0.0-py3-none-any.whl`
+   from step 6 (Build → Install path) into the Hermes host
+   environment. The plugin entry point is
+   `hermes_agent.memory_providers / deep_memory_v3 →
+   v3hermes:register`.
+4. Start Hermes. (No automated setup wizard is provided; the
    `requires_env: [V3CORE_PG_PASSWORD]` constraint must be satisfied
    before the plugin loads.)
-4. Have a conversation; observe `sync_turn` writes land in
-   `conversation_stream` and active memories you `v3_store` are
-   readable by a follow-up `v3_search`.
+5. Have a conversation; observe `sync_turn` writes land in
+   `conversation_stream` and active memories you `v3_add` are
+   readable by a follow-up `v3_get` / `v3_search`.
 
 The plugin manifest is `src/v3-hermes-plugin/plugin.yaml` (`name:
-deep_memory_v3`, 6 hooks, requires `V3CORE_PG_PASSWORD`).
+deep_memory_v3`, requires `V3CORE_PG_PASSWORD`). The installed
+provider honors `HERMES_HOME` and profile selection before
+initialization; do not point it at a production profile.
 
 > ⚠️ **Hermes is a host dependency.** Without a working Hermes host,
 > the plugin-mediated contract is not exercised. `v3-core` itself
@@ -282,7 +371,7 @@ deep_memory_v3`, 6 hooks, requires `V3CORE_PG_PASSWORD`).
 
 ---
 
-## 10. Tear down
+## 12. Tear down
 
 ```powershell
 # Drop the disposable PG (destructive)
@@ -295,31 +384,32 @@ Remove-Item -Recurse -Force .\.venv
 
 ---
 
-## 11. What this install does not do
+## 13. What this install does not do
 
-- It does **not** auto-apply the `public.explicit_memories` DDL. You
-  run `bootstrap_alpha_db.py` explicitly (step 6). The
+- It does **not** auto-apply the `public.explicit_memories` DDL. Run
+  `hippocampus bootstrap` explicitly (step 8). The
   `v3core.active_memory_store` writer does not apply DDL.
 - It does **not** import historical data, replay old conversation
   streams, or run any of the legacy migration scripts that exist
   elsewhere in the repo history. Those are out of scope for the
   supported surface.
-- It does **not** touch production environments, migrate historical
-  data, or replace a live deployment.
+- It does **not** rotate, invalidate, or check any production
+  credentials. See [`docs/PRIVACY-DATA-FLOW.md`](PRIVACY-DATA-FLOW.md)
+  for what to do if you find historical credentials in the repo.
 
 ---
 
-## 12. Next steps
+## 14. Next steps
 
 - [`docs/CONFIGURATION.md`](CONFIGURATION.md) — every config key, every
   env var, default behavior when a provider is unconfigured.
 - [`docs/BACKUP-RESTORE.md`](BACKUP-RESTORE.md) — the
   `pg_dump` + `pg_restore` recipe. The clean-export E2E run on empty
-  tmpfs pg17 reproduced the row counts (`raw` = 2, `QA` = 0,
+  tmpfs pg17 reproduced the row counts (`raw` = 3, `QA` = 2,
   `explicit` = 1) — see
   [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
   § 2.5.
 - [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
   — what is and isn't promised, with each row's evidence pointer.
 - [`docs/RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md) —
-  the alpha publication gates and post-alpha limitations.
+  the five blocking classes and their current pre-tag status.

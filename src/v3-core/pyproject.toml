@@ -6,9 +6,24 @@ build-backend = "setuptools.build_meta"
 name = "v3-core"
 version = "4.0.0"
 description = "v3 memory core engine — PostgreSQL/pgvector source ingest and explicit-memory storage"
+readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "AGPL-3.0-or-later"}
+license = "AGPL-3.0-or-later"
 authors = [{name = "yuzi"}]
+maintainers = [{name = "yuzi"}]
+keywords = ["memory", "postgresql", "pgvector", "hippocampus", "v3-core"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "pyyaml",
     "numpy",
@@ -32,14 +47,39 @@ embed-local = ["sentence-transformers", "onnxruntime"]
 llm-local = ["ollama"]
 full = ["requests", "psycopg2-binary", "pgvector", "sentence-transformers", "onnxruntime", "ollama"]
 
+[project.urls]
+Homepage = "https://github.com/yuzi001a/hippocampus-memory"
+Repository = "https://github.com/yuzi001a/hippocampus-memory"
+Documentation = "https://github.com/yuzi001a/hippocampus-memory/tree/main/docs"
+Source = "https://github.com/yuzi001a/hippocampus-memory/tree/main/src/v3-core"
+Issues = "https://github.com/yuzi001a/hippocampus-memory/issues"
+Changelog = "https://github.com/yuzi001a/hippocampus-memory/blob/main/CHANGELOG.md"
+
+# ── Console scripts ──
+# `v3-core`   — kept verbatim so existing invocations (e.g. `v3-core info`)
+#               and CI smoke checks continue to work.
+# `hippocampus` — public distribution-facing console (Gate 2 deliverable).
+#               Provides `doctor` and `bootstrap` subcommands. Read-only
+#               by default; explicit `--target` required for any mutation.
 [project.scripts]
 v3-core = "v3core.__main__:main"
+hippocampus = "v3core.distribution_cli:main"
 
 [tool.setuptools]
 packages = {find = {where = ["src"]}}
 
+# Ship the canonical SQL resources INSIDE the installed v3core package so
+# the `hippocampus doctor` and `hippocampus bootstrap` commands never
+# depend on repo-relative paths after install. `package-data` is additive
+# on top of the existing `*.json/*.md/*.yaml` rule.
 [tool.setuptools.package-data]
-"v3core" = ["*.json", "*.md", "*.yaml"]
+"v3core" = [
+    "*.json",
+    "*.md",
+    "*.yaml",
+    "schema/alpha_bootstrap.sql",
+    "schema/explicit_memories.sql",
+]
 
 [tool.pytest.ini_options]
 # Isolated PG integration tests live outside this default unit collection root.

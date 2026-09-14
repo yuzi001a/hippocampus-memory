@@ -1,0 +1,37 @@
+name: deep_memory_v3
+version: 4.0.0
+description: "v3-core Hermes 插件 — 13 工具 + 6 hooks + prefetch + ingest"
+kind: exclusive
+provides_tools:
+  # ── 统一入口 (4) ──
+  - v3_add        # 写 (转发 v3_store / hm_write)
+  - v3_get        # 读 (转发 status/search/overview/hand帐/prefetch/message/handbook/hm)
+  - v3_update     # 整理 (转发 organize/dedup/sync/delete/topic_maintain/affinity)
+  - v3_manage     # 维护 (转发 extract/import_seed/import_full)
+
+  # ── 高频核心 (5) ──
+  - v3_store
+  - v3_search
+  - v3_status
+  - v3_extract
+  - v3_prefetch
+
+  # ── 主题/手帐 (3) ──
+  - v3_topic_correct
+  - v3_moc_overview
+  - v3_moc_get
+
+  # ── 健康 (1) ──
+  - v3_health
+pip_dependencies:
+  - v3-hermes-plugin>=4.0.0
+  - v3-core>=4.0.0
+requires_env:
+  - V3CORE_PG_PASSWORD
+hooks:
+  - on_session_switch
+  - on_pre_compress
+  - sync_turn
+  - prefetch
+  - system_prompt_block
+  - on_delegation

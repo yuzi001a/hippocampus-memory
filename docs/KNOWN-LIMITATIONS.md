@@ -1,4 +1,4 @@
-# Known Limitations — Hippocampus v0.1-alpha
+# Known Limitations — v3 Memory Plugin (Public Alpha Hardening)
 
 > This document lists things that are **known to be incomplete, deferred,
 > experimental, or unverified** at the time of writing. It does not list
@@ -10,7 +10,7 @@
 > E2E run from an empty tmpfs pgvector/pg17 + the pg_dump/pg_restore
 > cycle. Items still **UNKNOWN / NOT TESTED** on this HEAD are marked
 > as such, not silently carried over from earlier gates. The focused
-> acceptance scope for this release is **191 passed**; this is not a
+> acceptance scope for this candidate is **191 passed**; this is not a
 > full-suite claim.
 
 ---
@@ -157,7 +157,7 @@ contract.
 
 ### 2.7. Full pytest green
 
-The focused acceptance scope for this release is **191 passed** when
+The focused acceptance scope for this candidate is **191 passed** when
 run file-by-file to avoid known order contamination. This is not a
 claim that the historical full repository suite is green; run the full
 suite yourself against a disposable PG if you need that broader
@@ -180,9 +180,10 @@ disabled and local deterministic embeddings.
 
 ## 3. What the public-alpha does not close
 
-These are boundaries the alpha does **not** close. They are recorded in
+These are pre-tag requirements the alpha does **not** close by
+itself. They are recorded in
 [`docs/RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md) (the public
-checklist). Read that document for the full follow-up list. Statuses
+checklist). Read that document for the full pre-tag list. Statuses
 reflect the evidence window described in § 1.6, not historical
 carryover.
 
@@ -191,12 +192,12 @@ carryover.
 | Data safety (declared supported surface only) | **CLOSED on declared surface** — fresh export v3_store returned `DURABLE_COMMITTED`, restart recall passed, and the focused ingest/active-memory suites passed. | Continued lab work beyond the clean-boundary slice; full-suite green. |
 | Recovery (dump/restore into an empty isolated PG) | **CLOSED on declared surface** — fresh export pg_dump/pg_restore reproduced `raw` = 2, `QA` = 0, `explicit` = 1; post-restore write + keyword recall passed. | Same-image-tag restore is the contract; cross-major-version restore is still out of scope. |
 | Installability (fresh-install matrix) | **CLOSED on declared surface** — fresh export installed in a fresh venv; `pip check`, `v3-core info`, adapter init, bootstrap, and second bootstrap passed. | Independent-user fresh-install matrix on multiple OS / Python combinations is still pending. |
-| Privacy / security | **PASS for this publication** — the clean-history public tree contains no real credentials, private endpoints, or local runtime state; provider credentials are supplied locally and are not bundled. | Re-run the same publication security gate for any future release that changes the tree or introduces new provider credentials. |
+| Privacy / security | **CLEAN EXPORT = PASS** (one fresh Git commit / no historical credentials in the exported tree). **Credential rotation / invalidation receipt at the source provider is OPEN** ([`docs/RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md) § R). | Credential rotation / invalidation receipt at the source providers + the user's publication go-ahead. |
 | Basic production usability | **PASS on declared alpha smoke slice** — fresh export covered info, sync_turn, v3_store, keyword readback, process restart, and restore write/recall; focused acceptance was **191 passed**. | Long-soak evidence, live host-networked provider run, and full-suite green. |
 
-These limitations do not block this technical preview; they define
-what Hippocampus v0.1-alpha does not claim to be. A future stable
-release would need its own broader evidence.
+The pre-tag requirements are not blockers for a trial user with a
+disposable PG; they **are** blockers for declaring this a stable
+public release.
 
 ---
 

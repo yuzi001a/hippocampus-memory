@@ -1,15 +1,15 @@
-# Backup & Restore — Hippocampus v0.1-alpha
+# Backup & Restore — v3 Memory Plugin
 
 > **Status (this HEAD):** the dump/restore recipe below was executed
 > end-to-end against an empty disposable pgvector/pg17 container in the
 > clean-history export E2E run. Source `pg_dump -Fc` produced a
 > self-contained file including the `vector` extension and the
 > canonical active-memory DDL; `pg_restore` into the empty target
-> reproduced table presence + row counts (`raw` = 2, `QA` = 0,
+> reproduced table presence + row counts (`raw` = 3, `QA` = 2,
 > `explicit` = 1) and the post-restore active-memory write + recall
 > proof passed. See
 > [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
-> § 2.5. Remaining alpha limitations are
+> § 2.5. Pre-tag blockers the alpha does **not** close by itself are
 > listed in
 > [`docs/RELEASE-CHECKLIST.md`](RELEASE-CHECKLIST.md)
 > § E (Backup / restore).
