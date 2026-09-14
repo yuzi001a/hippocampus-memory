@@ -26,7 +26,30 @@ logger = logging.getLogger("v3core.tools.write")
 
 HM_WRITE_SCHEMA = {
     "name": "hm_write",
-    "description": "[2-写卡] Write a memory card with optional handbook integration (replaces v3_store for new development).",
+    # A0 explicit-memory opt-in contract: same ownership rule
+    # as V3_STORE_SCHEMA / V3_ADD_SCHEMA. Every hm_write → durable write
+    # into public.explicit_memories (and optionally also a handbook
+    # entry when to_handbook=True). Allowed ONLY when the caller has
+    # explicit authorization (user asks to remember / store / save /
+    # retain a specific durable item, OR an explicitly authorized host
+    # workflow requests it). NOT authorization: dev experience, reviewer
+    # findings, debugging notes, task status / summary, implementation
+    # decisions, inferred preferences / facts, generic lessons, or
+    # 'summarize tonight'.
+    "description": (
+        "[2-写卡] OPT-IN explicit-memory write with optional handbook "
+        "integration (replaces v3_store for new development). Each call "
+        "commits a row into public.explicit_memories (canonical durable "
+        "store); allowed ONLY when the user explicitly asks to remember / "
+        "store / save / retain a specific durable item, or an explicitly "
+        "authorized host workflow (handbook sync, seed import, etc.) "
+        "requests it. NOT authorization: dev experience, reviewer "
+        "findings, debugging notes, task status / summary, implementation "
+        "decisions, inferred preferences / facts, generic lessons, or "
+        "'summarize tonight'. to_handbook=True adds a derived handbook "
+        "entry; that handbook write is non-canonical and follows the same "
+        "explicit user/host authorization."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -36,11 +59,11 @@ HM_WRITE_SCHEMA = {
             },
             "title": {
                 "type": "string",
-                "description": "Card title (P2a: no length cap; full content preserved)",
+                "description": "Card title (explicit-memory boundary: no length cap; full content preserved)",
             },
             "content": {
                 "type": "string",
-                "description": "Card body (P2a: no length cap; full content preserved)",
+                "description": "Card body (explicit-memory boundary: no length cap; full content preserved)",
             },
             "tags": {
                 "type": "array",
@@ -62,7 +85,7 @@ HM_WRITE_SCHEMA = {
 
 
 def _handbook_manager_supports_config() -> bool:
-    """P2a: HandbookManager(config=None) 接受 config kwarg — 这里做轻量探测.
+    """explicit-memory boundary: HandbookManager(config=None) 接受 config kwarg — 这里做轻量探测.
 
     防止硬绑到构造签名 — 万一未来 HandbookManager 改回不带参, 这里也不会
     把 effective_config 错传过去 (inspect 比 try/except 更精确, 不会因为
@@ -82,7 +105,7 @@ def _handbook_manager_supports_config() -> bool:
     )
 
 
-# P2a: 启动期一次探测, 进程内稳定.
+# explicit-memory boundary: 启动期一次探测, 进程内稳定.
 _HANDBOOK_SUPPORTS_CONFIG = _handbook_manager_supports_config()
 
 
@@ -107,14 +130,14 @@ def handle_hm_write(args: dict, **kw) -> str:
          (派生副作用 — 失败走 warning, 不动 durable 真值)
       3. Return combined JSON result
 
-    P2a (2026-09-09) 工具层契约:
+    explicit-memory boundary 工具层契约:
       - success=True 仅当 PG 真值写入成功 (card_result.durable=True).
       - 失败时 success=False/durable=False/error, 绝不伪装 SQLite-only 成功.
       - handbook 写失败只追加 warnings + handbook="failed", durable/status
         保持原状 (PG 真值不被派生副作用覆盖).
       - 透传 effective_config 给 HandbookManager (若其构造签名支持 config=).
 
-    P2a clean-boundary (branch p2a/active-memory-clean-boundary-20260909):
+    explicit-memory boundary:
       - **保留完整 content**: 不再对 ``title`` / ``content`` 强加任意长度
         上下界 (旧版 ``title > 100`` / ``content ∉ [100, 500]`` 是经验
         启发式, 与 ActiveMemoryWriter canonical 算法无关, 真值落
@@ -126,7 +149,7 @@ def handle_hm_write(args: dict, **kw) -> str:
     """
     try:
         cat = args.get("category", "")
-        # P2a clean-boundary: title / content 原值保留, 仅在判空时
+        # explicit-memory boundary: title / content 原值保留, 仅在判空时
         # ``.strip()``. 不再拒 >3000 / 不再强制 [100, 500] 区间.
         title = args.get("title", "")
         content = args.get("content", "")
@@ -149,7 +172,7 @@ def handle_hm_write(args: dict, **kw) -> str:
                 ensure_ascii=False,
             )
 
-        # P2a clean-boundary: 不再对 title (>100) / content (100..500)
+        # explicit-memory boundary: 不再对 title (>100) / content (100..500)
         # 强加任意长度上限. ActiveMemoryWriter / schema 才是真值存储
         # 边界的最终决定者, 工具层做长度门会与 caller 期望的"全文保留"
         # 契约冲突. 这里只保留 handbook_key 的语义校验 (它不是存储宽度,
@@ -170,7 +193,7 @@ def handle_hm_write(args: dict, **kw) -> str:
         # -- Step 1: Write card via V3Core.store_card() (PG 真值路径) --
 
         from .. import V3Core
-        # P2a (2026-09-09): 从 args 白名单透传 caller 提供的来源溯源 kwargs,
+        # explicit-memory boundary: 从 args 白名单透传 caller 提供的来源溯源 kwargs,
         # 与 store._PROVENANCE_KEYS 同语义 — caller 没传就不传, 不生成 QA id.
         # 让 core 走 filename 兜底.
         from .store import _extract_provenance
@@ -185,7 +208,7 @@ def handle_hm_write(args: dict, **kw) -> str:
         card_success = bool(getattr(card_result, "success", False))
         card_durable = bool(getattr(card_result, "durable", card_success))
         if not card_success or not card_durable:
-            # P2a: PG 真值失败 — 整 receipt 都标失败, 不写 handbook,
+            # explicit-memory boundary: PG 真值失败 — 整 receipt 都标失败, 不写 handbook,
             # 不让派生副作用覆盖源真值.
             return json.dumps(
                 {
@@ -235,7 +258,7 @@ def handle_hm_write(args: dict, **kw) -> str:
                 response["handbook"] = "failed"
                 warnings.append(f"handbook write failed: {_safe_err(h_e)}")
 
-            # P2a (2026-09-09): handbook 派生副作用失败 — PG durable 已成功,
+            # explicit-memory boundary: handbook 派生副作用失败 — PG durable 已成功,
             # status 升级为 DERIVED_WARNING, warnings 保留, success/durable
             # 不降级 (PG 真值不被派生副作用覆盖). 若 caller 已经拿到更严重
             # 的信号 (如 DEDUPLICATED 表示 PG 已存在), 不强行覆盖.

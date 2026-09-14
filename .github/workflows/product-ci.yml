@@ -1,0 +1,195 @@
+# Track A — product / control-plane CI gate
+#
+# Scope (deliberately narrow):
+#   * python 3.11 (matches the upstream Hermes Agent runtime)
+#   * install v3-core (editable) + v3-hermes-plugin (editable)
+#   * install pytest + pyyaml
+#   * import smoke (v3core + v3-hermes plugin modules)
+#   * py_compile of every .py under src/ (catches syntax regressions)
+#   * focused secret-free tests:
+#       - the G5a control-plane contract (config_cli / config_control)
+#       - the A0 explicit-memory opt-in contract (schema + skill + doc)
+#       - the existing public-alpha gates that have no PG / no provider
+#         dependency
+#
+# Explicitly NOT in scope (handled by separate workflows):
+#   * distribution-packaging-smoke.yml — the Windows wheel/sdist build
+#     + real upstream Hermes install + uv pip check. That is the
+#     PACKAGING CI; this is the PRODUCT CI.
+#   * anything that needs psycopg2.connect to a real PostgreSQL
+#   * anything that needs V3CORE_PG_PASSWORD / OPENAI_API_KEY / etc.
+#   * any provider-side action
+#
+# No GitHub Actions secret context is used anywhere in this workflow.
+# If this workflow ever goes red, the failure must be a real code/test
+# regression, not a missing secret or a flaky provider.
+
+name: product-ci
+
+on:
+  pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+# Cancel in-flight runs on the same PR when a new commit is pushed.
+concurrency:
+  group: product-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"
+
+jobs:
+  product-ci:
+    name: product-ci (py${{ env.PYTHON_VERSION }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: cache-pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: product-ci-pip-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('src/v3-core/pyproject.toml', 'src/v3-hermes-plugin/pyproject.toml') }}
+          restore-keys: |
+            product-ci-pip-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+
+      # --- install ---
+      - name: pip-install-pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pytest>=8,<10" "pyyaml>=6"
+
+      - name: pip-install-v3-core
+        run: |
+          python -m pip install -e ./src/v3-core
+
+      - name: pip-install-v3-hermes-plugin
+        run: |
+          python -m pip install -e ./src/v3-hermes-plugin
+
+      # --- import smoke ---
+      - name: import-smoke
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src:${{ env.PYTHONPATH }}
+        run: |
+          python - <<'PY'
+          import importlib
+          for mod in (
+              "v3core",
+              "v3core.config",
+              "v3core.config_cli",
+              "v3core.config_control",
+              "v3core.tools.api_add",
+              "v3core.tools.api_manage",
+              "v3core.tools.extract_tool",
+              "v3core.tools.store",
+              "v3core.tools.write_tool",
+              "v3core.tools.health",
+              "v3hermes",
+          ):
+              importlib.import_module(mod)
+              print(f"import-smoke OK: {mod}")
+          PY
+
+      # --- py_compile ---
+      - name: py-compile-src
+        run: |
+          python -m compileall -q src/v3-core/src src/v3-core/scripts src/v3-hermes-plugin/src
+          echo "py-compile OK"
+
+      # --- focused tests ---
+      # The selection below is the secret-free / no-PG / no-provider
+      # product-ci contract slice. The G5a and A0 tests are local /
+      # no-PG additions from this PR. Only tests that currently
+      # collect and pass in the public PR #2 baseline are referenced.
+      #
+      #   test_config_control_plane.py
+      #     G5a control plane — show / validate / set-provider /
+      #     set-key / set-toggle / test, atomic YAML mutation, nested
+      #     ownership, semantic round-trip, secret-safe input,
+      #     comments/unknown fields, CRLF.
+      #
+      #   test_a0_explicit_memory_opt_in_contract.py (v3-core)
+      #     A0 schema description / default contract — five canonical
+      #     write entry points.
+      #
+      #   test_alpha_bootstrap_contract.py
+      #     alpha bootstrap/config contract — reads schema/*.sql and
+      #     scripts/{bootstrap,backup}_alpha.py as text. Hard-blocks
+      #     psycopg2.connect in tests/conftest.py.
+      #
+      #   test_config_pg_password_env.py
+      #     V3CORE_PG_PASSWORD -> legacy storage.pg.password env-fills
+      #     contract; uses [REDACTED] placeholders, no real secrets.
+      #
+      # What is intentionally NOT here:
+      #   * the distribution-packaging smoke (lives in
+      #     distribution-packaging-smoke.yml — the PACKAGING CI)
+      #   * anything that requires a live PG or provider key
+      - name: focused-tests-v3-core
+        working-directory: src/v3-core
+        env:
+          # Hard-empty the secrets the production code base would
+          # otherwise try to read. Belt-and-braces — the selected tests
+          # do not call the provider, but we don't want a refactor to
+          # silently break the gate.
+          V3CORE_PG_PASSWORD: ""
+          OPENAI_API_KEY: ""
+          OPENAI_API_BASE: ""
+          V3_LLM_API_KEY: ""
+          V3_LLM_BASE_URL: ""
+          V3CORE_PG_HOST: ""
+          V3CORE_PG_PORT: ""
+          V3CORE_PG_DB: ""
+          V3CORE_PG_USER: ""
+          V3_LLM_PROVIDER: ""
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src \
+            python -m pytest -v --no-header \
+              -p no:cacheprovider \
+              tests/test_config_control_plane.py \
+              tests/test_a0_explicit_memory_opt_in_contract.py \
+              tests/test_alpha_bootstrap_contract.py \
+              tests/test_config_pg_password_env.py
+
+      - name: focused-tests-v3-hermes-plugin
+        working-directory: src/v3-hermes-plugin
+        env:
+          # Same hard-empty contract as the v3-core gate.
+          V3CORE_PG_PASSWORD: ""
+          OPENAI_API_KEY: ""
+          OPENAI_API_BASE: ""
+          V3_LLM_API_KEY: ""
+          V3_LLM_BASE_URL: ""
+          V3CORE_PG_HOST: ""
+          V3CORE_PG_PORT: ""
+          V3CORE_PG_DB: ""
+          V3CORE_PG_USER: ""
+          V3_LLM_PROVIDER: ""
+        run: |
+          set -euo pipefail
+          PYTHONPATH=../v3-core/src \
+            python -m pytest -v --no-header \
+              -p no:cacheprovider \
+              tests/test_a0_explicit_memory_opt_in_contract.py
+
+      # --- done ---
+      - name: summary
+        if: always()
+        run: |
+          echo "product-ci finished with status: ${{ job.status }}"

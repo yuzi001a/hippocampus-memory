@@ -22,17 +22,43 @@ logger = logging.getLogger("v3core.tools.api_manage")
 
 V3_MANAGE_SCHEMA = {
     "name": "v3_manage",
-    "description": "[4-管理] 维护操作 — 对话提取/种子导入/全量导入",
+    # A0 explicit-memory opt-in contract: when action="extract",
+    # this dispatches to v3_extract which is opt-in (default write=False).
+    # extract(write=True) is a canonical explicit-memory write and follows
+    # the v3_store / v3_add opt-in authorization rule.
+    "description": (
+        "[4-管理] 维护操作 — 对话提取/种子导入/全量导入. action='extract' "
+        "delegates to v3_extract (default write=False, preview-only / "
+        "non-durable). extract(write=True) is a canonical explicit-memory "
+        "write into public.explicit_memories and follows the v3_store / "
+        "v3_add opt-in contract — caller MUST have explicit authorization "
+        "(user asks to remember / store / save / retain a specific durable "
+        "item, or an explicitly authorized host workflow requests it). NOT "
+        "authorization: dev experience, reviewer findings, debugging notes, "
+        "task status / summary, implementation decisions, inferred "
+        "preferences / facts, generic lessons, or 'summarize tonight'."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
                 "enum": ["extract", "import_seed", "import_full"],
-                "description": "维护动作: extract=从对话提取记忆, import_seed=导入记忆文件到印层, import_full=全量导入(碑层)",
+                "description": "维护动作: extract=从对话提取记忆 (默认 write=False, preview-only), import_seed=导入记忆文件到印层, import_full=全量导入(碑层)",
             },
             "raw_text": {"type": "string", "description": "待提取的对话文本 (extract mode, 最少200字符)"},
-            "write": {"type": "boolean", "description": "extract: true=写入, false=预览 (默认 false)", "default": False},
+            # A0: default=False, description flags it as
+            # opt-in canonical write (same contract as v3_extract).
+            "write": {
+                "type": "boolean",
+                "description": (
+                    "extract: OPT-IN — true=commit extracted cards into "
+                    "public.explicit_memories (durable canonical write; "
+                    "follows v3_store opt-in contract), false=preview only "
+                    "(default)."
+                ),
+                "default": False,
+            },
             "experts": {
                 "type": "array",
                 "items": {"type": "string", "enum": ["decisions", "lessons", "projects", "system"]},

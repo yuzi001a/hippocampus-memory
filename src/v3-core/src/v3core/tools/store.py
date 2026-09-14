@@ -25,7 +25,7 @@ logger = logging.getLogger("v3core.tools.store")
 # 提醒式不硬拒绝——agent 看到提醒后决定是否调用 hm_handbook_set 登记。
 _HANDBOOK_REMIND_CATEGORIES = {"decisions", "projects", "system", "shou_zhang"}
 
-# P2a (2026-09-09) clean-boundary: ``v3_store`` 不再自动把手帐卡
+# explicit-memory boundary: ``v3_store`` 不再自动把手帐卡
 # 写到 filesystem ``cards/<cat>/<id>.md``. 它委托给
 # ``V3Core.store_card`` → ``ActiveMemoryWriter``, 真值落到
 # ``public.explicit_memories``. 旧版描述 "(hand帐: only
@@ -33,7 +33,31 @@ _HANDBOOK_REMIND_CATEGORIES = {"decisions", "projects", "system", "shou_zhang"}
 # — ``_auto_register`` 仅在 legacy ``durable_store`` 路径触发.
 V3_STORE_SCHEMA = {
     "name": "v3_store",
-    "description": "[2-写卡] write a memory card (P2a clean-boundary: delegates to V3Core.store_card → ActiveMemoryWriter; durable_store='explicit_memories')",
+    # A0 explicit-memory opt-in contract:
+    # `public.explicit_memories` is opt-in user/host-owned canonical memory.
+    # Every call here = an authorized durable write (DML into
+    # explicit_memories). Allowed ONLY when the caller has explicit
+    # authorization — user asks to remember/store/save/retain a specific
+    # durable item, OR an explicitly authorized host workflow (handbook
+    # sync, seed import, etc.) requests it. NOT allowed for:
+    # development experience / reviewer findings / debugging notes /
+    # task status or summary / implementation decisions / inferred
+    # preferences or facts / generic lessons / "summarize tonight" /
+    # any passive observation derived from session traffic — those are
+    # passive/automatic paths (sync_turn, observer, E1, topics) and must
+    # never be silently promoted to explicit memory.
+    "description": (
+        "[2-写卡] OPT-IN explicit-memory write. Each call commits a row into "
+        "public.explicit_memories (explicit-memory boundary: delegates to "
+        "V3Core.store_card → ActiveMemoryWriter; durable_store='explicit_memories'). "
+        "Allowed ONLY when the user explicitly asks to remember / store / save / retain "
+        "a specific durable item, or an explicitly authorized host workflow (handbook "
+        "sync, seed import, etc.) requests it. NOT authorization: dev experience, "
+        "reviewer findings, debugging notes, task status / summary, implementation "
+        "decisions, inferred preferences / facts, generic lessons, or 'summarize tonight'. "
+        "Passive paths (sync_turn / observer / E1 / topics) own their own derived state "
+        "and must not silently promote into explicit memory."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -41,7 +65,7 @@ V3_STORE_SCHEMA = {
             "title": {"type": "string", "description": "title (max 20 chars)"},
             "content": {"type": "string", "description": "body (100-300 chars)"},
             "tags": {"type": "array", "items": {"type": "string"}, "description": "optional tags"},
-            # P2a SOL-review C (2026-09-09): 公共 tool schema 收窄 —
+            # explicit-memory boundary SOL-review C: 公共 tool schema 收窄 —
             # ``source_id`` 保留 (caller 显式身份), ``source`` /
             # ``source_j_ids`` 是内部 provenance 字段, 不再作为公共 v3_store
             # property 暴露. 内部兼容: handler (handle_v3_store) 仍走
@@ -54,7 +78,7 @@ V3_STORE_SCHEMA = {
     },
 }
 
-# P2a (2026-09-09): 可透传给 core.store_card 的"来源溯源"kwargs。
+# explicit-memory boundary: 可透传给 core.store_card 的"来源溯源"kwargs。
 # 工具层绝不伪造这些字段 — caller 没传就不传, 让 core 走确定性的请求身份兜底.
 _PROVENANCE_KEYS = ("source_id", "source", "source_j_ids", "when", "where",
                     "who", "why", "confidence", "observation_count")
@@ -106,7 +130,7 @@ def _auto_register(cat: str, title: str, content: str, result_path: str,
                    config=None, source_id: str = "") -> str | None:
     """Register card in hand account index.
 
-    P2a: 返回 warning 字符串而非静默 swallow. None = 成功; str = 警告文本
+    explicit-memory boundary: 返回 warning 字符串而非静默 swallow. None = 成功; str = 警告文本
     (调用方把它挂到 receipt.warnings 上, 不擦 durable 真值).
     """
     try:
@@ -134,7 +158,7 @@ def _auto_register(cat: str, title: str, content: str, result_path: str,
 def handle_v3_store(args: dict, **kw) -> str:
     """Delegate to V3Core.store_card, then auto-register in hand account if category is shou_zhang
 
-    P2a (2026-09-09) 工具层契约:
+    explicit-memory boundary 工具层契约:
       - success=True 仅当 PG 真值写入成功 (result.durable=True).
       - 失败时返回 success=False/durable=False/error, 绝不伪装 SQLite-only 成功.
       - 派生副作用 (SQLite/topic/cache/auto_register) 失败只走 warnings,
@@ -142,7 +166,7 @@ def handle_v3_store(args: dict, **kw) -> str:
       - 透传 caller 提供的来源溯源 kwargs (source_id/source/source_j_ids/...);
         caller 没传就让 core 走 filename 兜底, 不伪造 QA id.
 
-    P2a clean-boundary (branch p2a/active-memory-clean-boundary-20260909):
+    explicit-memory boundary:
       - **保留完整 content**: 不对 ``title`` / ``content`` 做 ``.strip()``
         之外的"规范化" — 全角空格、换行、Markdown 标记、用户刻意保留的
         前后空白都原值透传给 ``core.store_card``. strip 已经够用,
@@ -161,7 +185,7 @@ def handle_v3_store(args: dict, **kw) -> str:
         cat = args.get("category", "")
         title = args.get("title", "")
         content = args.get("content", "")
-        # P2a clean-boundary: title / content 只做 ``.strip()`` 不再修
+        # explicit-memory boundary: title / content 只做 ``.strip()`` 不再修
         # 改任何字符. .strip() 仅用于"前后空白 → 空串"判定非空; 原值
         # (含中间空白 / 换行 / 全角空格 / markdown) 全量透传给 core.
         # ActiveMemoryWriter 内部 canonical id 派生使用 raw content.
@@ -190,7 +214,7 @@ def handle_v3_store(args: dict, **kw) -> str:
         if cat in _HANDBOOK_REMIND_CATEGORIES:
             remind = "；此卡属于主动记忆类({})，建议用 hm_handbook_set 登记手帐保持'当前状态'可被态势总览覆盖".format(cat)
 
-        # P2a clean-boundary: 新 writer 路径 ``durable_store ==
+        # explicit-memory boundary: 新 writer 路径 ``durable_store ==
         # 'explicit_memories'`` 跳过 ``_auto_register`` (包括
         # shou_zhang), ``_auto_register`` 是 legacy filesystem /
         # SQLite / PG cards 表的派生索引, 在 explicit_memories 路径
