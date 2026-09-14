@@ -931,3 +931,228 @@ class TestDeterministicLaneTiming:
             t.finish_lane(LANE_VECTOR, finished_monotonic=2_050.0)
         assert t1.lane_summaries[LANE_VECTOR].duration_ms == \
                t2.lane_summaries[LANE_VECTOR].duration_ms == 50_000.0
+
+
+# ===========================================================================
+# 23. FIX A — recursive metadata privacy: _cap() must sanitize content-like
+#     keys at EVERY mapping depth and propagate include_content.
+# ===========================================================================
+
+class TestRecursiveMetadataPrivacy:
+    def test_a1_nested_dict_body_absent(self) -> None:
+        out = safe_metadata({"debug": {"body": "SECRET_BODY"}})
+        # Nested "body" key must be absent at depth, and the sentinel value
+        # must not appear anywhere in the serialized snapshot.
+        serialized = json.dumps(out, sort_keys=True)
+        assert "SECRET_BODY" not in serialized
+        assert "body" not in out["debug"]
+        assert "body" not in out  # top-level filter also dropped nothing here
+
+    def test_a2_nested_mixed_case(self) -> None:
+        out = safe_metadata({"debug": {"Body": "B", "TEXT": "T", "safe": "ok"}})
+        serialized = json.dumps(out, sort_keys=True)
+        assert "B" not in serialized
+        assert "T" not in serialized
+        assert "Body" not in out["debug"]
+        assert "TEXT" not in out["debug"]
+        assert out["debug"]["safe"] == "ok"
+
+    def test_a3_list_containing_dict_filters_nested(self) -> None:
+        out = safe_metadata(
+            {"items": [{"raw": "SECRET_BODY", "content": "SECRET_BODY", "ok": 1}]}
+        )
+        serialized = json.dumps(out, sort_keys=True)
+        assert "SECRET_BODY" not in serialized
+        # Nested raw/content keys absent; ok present.
+        nested = out["items"][0]
+        assert "raw" not in nested
+        assert "content" not in nested
+        assert nested["ok"] == 1
+
+    def test_a4_tuple_containing_nested_mapping(self) -> None:
+        out = safe_metadata(
+            {"items": ({"snippet": "SECRET_BODY", "full_text": "S", "ok": 2},)}
+        )
+        serialized = json.dumps(out, sort_keys=True)
+        assert "SECRET_BODY" not in serialized
+        assert "S" not in serialized
+        nested = out["items"][0]
+        assert "snippet" not in nested
+        assert "full_text" not in nested
+        assert nested["ok"] == 2
+
+    def test_a5_deeply_nested_sentinel_absent_from_trace_json(self) -> None:
+        trace = RecallTrace(query_context=_ctx(), query_plan=_plan())
+        c = RecallCandidate(
+            "c1", "card", "d.md", LANE_VECTOR,
+            metadata={"debug": {"deeper": {"body": "SECRET_BODY"}}},
+        )
+        trace.record_candidate(c)
+        # Default (privacy-safe) JSON must not contain the deep sentinel.
+        assert "SECRET_BODY" not in trace.to_json()
+
+    def test_a6_include_content_preserves_nested_content(self) -> None:
+        out = safe_metadata(
+            {"debug": {"body": "FULL", "safe": "ok"}}, include_content=True
+        )
+        assert out["debug"]["body"] == "FULL"
+        assert out["debug"]["safe"] == "ok"
+
+    def test_existing_bounds_still_hold_with_recursion(self) -> None:
+        # List capped at 64 + marker; dict capped at 32 + __truncated_keys__.
+        big_list = list(range(200))
+        big_dict = {f"k{i}": i for i in range(100)}
+        out = safe_metadata({"items": big_list, "d": big_dict})
+        # List bound: capped at 64 entries + 1 trailing marker = 65 max.
+        assert len(out["items"]) <= 65
+        marker = out["items"][-1]
+        assert isinstance(marker, str) and marker.startswith("__truncated_")
+        # Dict bound: __truncated_keys__ marker recorded.
+        assert "__truncated_keys__" in out["d"]
+        assert out["d"]["__truncated_keys__"] >= 1
+        assert sum(1 for k in out["d"] if not k.startswith("__")) <= 32
+
+    def test_nested_input_dict_not_mutated_in_place(self) -> None:
+        nested = {"body": "SECRET_BODY", "safe": "ok"}
+        original_id = id(nested)
+        out = safe_metadata({"debug": nested})
+        # The nested mapping identity must not be replaced or mutated by _cap.
+        assert id(nested) == original_id
+        assert nested == {"body": "SECRET_BODY", "safe": "ok"}
+        # And the snapshot is a fresh structure with the body absent at depth.
+        assert "body" not in out["debug"]
+        assert out["debug"]["safe"] == "ok"
+
+
+# ===========================================================================
+# 24. FIX B — QueryPlan lane invariant: canonical five lanes in canonical order.
+# ===========================================================================
+
+class TestQueryPlanCanonicalLanes:
+    def test_b1_duplicate_lane_rejected(self) -> None:
+        plan = _plan()
+        # Build lanes with a duplicate keyword lane.
+        dup_lanes = (
+            plan.lane(LANE_KEYWORD),
+            plan.lane(LANE_KEYWORD),
+            plan.lane(LANE_VECTOR),
+            plan.lane(LANE_TOPIC),
+            plan.lane(LANE_QA),
+            plan.lane(LANE_EXPLICIT),
+        )
+        with pytest.raises(ValueError):
+            # ValueError either from QueryPlan.__post_init__ (canonical-order
+            # mismatch) or from LanePlan.__post_init__ (unknown lane) — both
+            # are acceptable forms of the invariant rejecting the input.
+            dataclasses.replace(plan, lanes=dup_lanes)
+
+    def test_b2_missing_lane_rejected(self) -> None:
+        plan = _plan()
+        # Drop one canonical lane (use keyword slot for qa to keep names valid).
+        four_lanes = tuple(
+            lp if lp.name != LANE_KEYWORD
+            else dataclasses.replace(lp, name=LANE_QA)
+            for lp in plan.lanes
+        )
+        # After the swap the lane set is still a subset of ALL_LANES and is
+        # missing keyword; the canonical-order tuple equality must fail.
+        with pytest.raises(ValueError):
+            _ = dataclasses.replace(plan, lanes=four_lanes)
+
+    def test_b3_extra_or_unknown_lane_rejected(self) -> None:
+        plan = _plan()
+        with pytest.raises(ValueError):
+            # Replace one lane with an unknown name — LanePlan.__post_init__
+            # already raises ValueError; QueryPlan's invariant would too.
+            bad_lanes = tuple(
+                dataclasses.replace(lp, name="not_a_lane")
+                if lp.name == LANE_TOPIC else lp
+                for lp in plan.lanes
+            )
+            dataclasses.replace(plan, lanes=bad_lanes)
+
+    def test_b4_canonical_five_lane_plan_accepted(self) -> None:
+        plan = build_default_query_plan(_ctx())
+        # Order-sensitive tuple equality against ALL_LANES.
+        assert plan.lane_names() == ALL_LANES
+        # And ALL_LANES is exactly the canonical tuple.
+        assert plan.lane_names() == (
+            LANE_KEYWORD, LANE_VECTOR, LANE_TOPIC, LANE_QA, LANE_EXPLICIT,
+        )
+
+    def test_b5_deterministic_serialization_canonical_order(self) -> None:
+        plan = build_default_query_plan(_ctx())
+        d = plan.to_dict()
+        names_in_order = [lp["name"] for lp in d["lanes"]]
+        assert names_in_order == list(ALL_LANES)
+
+
+# ===========================================================================
+# 25. FIX C — metadata=None must still route through _freeze_mapping so the
+#     resulting field rejects item mutation with TypeError.
+# ===========================================================================
+
+class TestMetadataNoneImmutability:
+    def test_c1_querycontext_metadata_none_rejects_item_mutation(self) -> None:
+        ctx = QueryContext(
+            query_id="q1", query_text="hi",
+            deadline_monotonic=time.monotonic() + 1.0,
+            budget_ms=100, limit=4, max_chars=1000,
+            metadata=None,
+        )
+        with pytest.raises(TypeError):
+            ctx.metadata["k"] = "x"  # type: ignore[index]
+
+    def test_c2_laneplan_metadata_none_rejects_item_mutation(self) -> None:
+        lp = LanePlan(
+            name=LANE_VECTOR,
+            enabled=True,
+            budget_ms=100,
+            deadline_monotonic=time.monotonic() + 1.0,
+            candidate_limit=8,
+            metadata=None,
+        )
+        with pytest.raises(TypeError):
+            lp.metadata["k"] = "x"  # type: ignore[index]
+
+
+# ===========================================================================
+# 26. FIX D — RecallTrace.record_candidate must detach from the source
+#     candidate's mutable record objects (provenance / score_history /
+#     events / drop_reason) so post-record mutations cannot leak in.
+# ===========================================================================
+
+class TestTraceSnapshotDetachment:
+    def test_d1_record_candidate_detaches_from_source(self) -> None:
+        trace = RecallTrace(query_context=_ctx(), query_plan=_plan())
+        c = RecallCandidate("c1", "card", "d.md", LANE_VECTOR)
+        c.merge_provenance(LANE_QA, "qa", "d.md")
+        c.record_score("final", 0.9, k="v")
+        c.record_event(CandidateEventType.FUSED, note="rrf")
+        trace.record_candidate(c)
+        snap = trace.candidate_snapshots["c1"]
+
+        # Snapshot provenance must be a different list object.
+        assert snap.provenance is not c.provenance
+        # Capture snapshot's pre-mutation values for comparison.
+        snap_prov_lane = snap.provenance[0].lane
+        snap_score_value = snap.score_history[0].value
+        snap_score_params = dict(snap.score_history[0].params)
+        snap_event_note = snap.events[0].note
+
+        # Now mutate the SOURCE candidate.
+        c.provenance[0].lane = "mutated"
+        c.score_history[0].value = 999.0
+        c.score_history[0].params["k"] = "mutated"
+        c.events[0].note = "mutated"
+
+        # Snapshot must be unchanged.
+        assert snap.provenance[0].lane == snap_prov_lane
+        assert snap.score_history[0].value == snap_score_value
+        assert snap.score_history[0].params == snap_score_params
+        assert snap.events[0].note == snap_event_note
+        # Spot-checks against the mutated source values to be explicit.
+        assert snap.provenance[0].lane != "mutated"
+        assert snap.score_history[0].value != 999.0
+        assert snap.score_history[0].params.get("k") != "mutated"
+        assert snap.events[0].note != "mutated"

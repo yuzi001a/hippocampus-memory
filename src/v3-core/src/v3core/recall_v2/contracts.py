@@ -63,24 +63,28 @@ class CandidateEventType(str, Enum):
 
 # Helpers
 
-def _cap(v: Any) -> Any:
+def _cap(v: Any, *, include_content: bool = False) -> Any:
     if isinstance(v, str):
         return v[:_META_MAX] if len(v) > _META_MAX else v
     if isinstance(v, list):
-        capped = [_cap(x) for x in v[:_META_LIST_MAX]]
+        capped = [_cap(x, include_content=include_content) for x in v[:_META_LIST_MAX]]
         if len(v) > _META_LIST_MAX:
             capped.append(f"__truncated_{len(v) - _META_LIST_MAX}_more__")
         return capped
     if isinstance(v, tuple):
-        capped = tuple(_cap(x) for x in v[:_META_LIST_MAX])
+        capped = tuple(_cap(x, include_content=include_content) for x in v[:_META_LIST_MAX])
         if len(v) > _META_LIST_MAX:
             capped = capped + (f"__truncated_{len(v) - _META_LIST_MAX}_more__",)
         return capped
-    if isinstance(v, dict):
-        items = list(v.items())[:_META_DICT_MAX]
-        out = {k: _cap(x) for k, x in items}
-        if len(v) > _META_DICT_MAX:
-            out["__truncated_keys__"] = len(v) - _META_DICT_MAX
+    if isinstance(v, Mapping):
+        kept = [(k, x) for k, x in v.items()
+                if include_content or str(k).lower() not in _CONTENT_LIKE]
+        dropped = len(v) - len(kept)
+        kept = kept[:_META_DICT_MAX]
+        out = {k: _cap(x, include_content=include_content) for k, x in kept}
+        overflow = max(0, len(v) - dropped - _META_DICT_MAX)
+        if dropped or overflow:
+            out["__truncated_keys__"] = dropped + overflow
         return out
     return v
 
@@ -95,7 +99,7 @@ def safe_metadata(m: Mapping[str, Any] | None, *, include_content: bool = False)
         key = str(k)
         if not include_content and key.lower() in _CONTENT_LIKE:
             continue
-        out[key] = _cap(v)
+        out[key] = _cap(v, include_content=include_content)
         if isinstance(v, str) and len(v) > _META_MAX:
             out[f"{key}_truncated"] = True
     return out
@@ -156,11 +160,10 @@ class QueryContext:
         object.__setattr__(self, "normalized_query", _WS.sub(" ", self.query_text).strip() if self.query_text else "")
         if self.query_embedding is not None:
             object.__setattr__(self, "query_embedding", tuple(float(x) for x in self.query_embedding))
-        # Treat metadata as immutable: copy to a fresh dict and bind via Mapping.
-        if self.metadata is None:
-            object.__setattr__(self, "metadata", {})
-        else:
-            object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+        # Treat metadata as immutable: always route through the helper so
+        # ``metadata=None`` and ``metadata={...}`` share the same MappingProxy
+        # view contract.
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
     def remaining_budget_ms(self) -> float:
         """Remaining ms, capped at ``budget_ms`` and clamped at 0.0."""
@@ -281,11 +284,10 @@ class LanePlan:
             raise ValueError(f"unknown lane {self.name!r}")
         _check_nonneg("budget_ms", self.budget_ms)
         _check_nonneg("candidate_limit", self.candidate_limit)
-        if self.metadata is None:
-            object.__setattr__(self, "metadata", {})
-        else:
-            # Treat metadata as immutable.
-            object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
+        # Treat metadata as immutable: always route through the helper so
+        # ``metadata=None`` and ``metadata={...}`` share the same MappingProxy
+        # view contract.
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -311,9 +313,11 @@ class QueryPlan:
     algorithm: CanonicalAlgorithmSnapshot
 
     def __post_init__(self) -> None:
-        names = [lp.name for lp in self.lanes]
-        if set(names) != set(ALL_LANES):
-            raise ValueError(f"QueryPlan must include all lanes exactly once (got {names})")
+        names = tuple(lp.name for lp in self.lanes)
+        if names != ALL_LANES:
+            raise ValueError(
+                f"QueryPlan must include all five canonical lanes exactly once in canonical order (got {list(names)})"
+            )
         _check_nonneg("budget_ms", self.budget_ms)
         _check_nonneg("rerank_limit", self.rerank_limit)
         _check_nonneg("final_limit", self.final_limit)

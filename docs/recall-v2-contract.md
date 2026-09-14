@@ -78,7 +78,10 @@ co-exist until G6B cuts over.
   whitespace only (never mutates semantics).
 * `query_embedding` may be supplied; converted to an immutable tuple.
   The contract layer **never** computes an embedding.
-* `deadline_monotonic` is an absolute `time.monotonic()` value.
+* `deadline_monotonic` is an absolute `time.monotonic()` value;
+  this is process-local monotonic-clock state, valid for in-process
+  scheduling and budget checks but NOT a portable wall-clock value
+  across process restart.
 * `budget_ms`, `limit`, `max_chars` must be non-negative.
 * `remaining_budget_ms()` returns `min(time-to-deadline, budget_ms)`
   clamped at 0.0 — combines the absolute deadline with the configured

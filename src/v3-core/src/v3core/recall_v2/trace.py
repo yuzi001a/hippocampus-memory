@@ -273,14 +273,14 @@ class RecallTrace:
                 selected=candidate.selected,
                 injected=candidate.injected,
                 dropped=candidate.dropped,
-                drop_reason=candidate.drop_reason,
+                drop_reason=(DropReason(code=candidate.drop_reason.code, detail=candidate.drop_reason.detail, stage=candidate.drop_reason.stage) if candidate.drop_reason else None),
                 content=candidate.content if capture_content else None,
                 text_reference=candidate.text_reference,
                 timestamp=candidate.timestamp,
                 metadata=safe_metadata(candidate.metadata, include_content=False),
-                provenance=list(candidate.provenance),
-                score_history=list(candidate.score_history),
-                events=list(candidate.events),
+                provenance=[ProvenanceRecord(p.lane, p.source_type, p.source_id, ts=p.ts) for p in candidate.provenance],
+                score_history=[ScoreRecord(s.stage, s.value, s.operation, dict(s.params) if s.params else {}) for s in candidate.score_history],
+                events=[CandidateEvent(e.event_type, e.note, ts=e.ts) for e in candidate.events],
                 contributing_lanes=list(candidate.contributing_lanes),
             )
             self.candidate_snapshots[candidate.candidate_id] = snap
