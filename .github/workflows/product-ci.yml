@@ -7,12 +7,19 @@
 #   * import smoke (v3core modules only — v3-hermes-plugin imports the
 #     upstream Hermes `agent` host, so product-ci does NOT smoke-import
 #     v3hermes; that host binding is owned by distribution-packaging-smoke)
-#   * py_compile of every .py under src/ (catches syntax regressions)
+#   * py_compile of every .py under src/ (catches syntax regressions),
+#     including the G5b evaluator package under src/v3-core/eval
 #   * focused secret-free tests:
 #       - the G5a control-plane contract (config_cli / config_control)
 #       - the A0 explicit-memory opt-in contract (schema + skill + doc)
 #       - the existing public-alpha gates that have no PG / no provider
 #         dependency
+#       - the G5b REAL MEMORY EVALUATOR contract (Lane A deterministic
+#         fake pool, failure taxonomy, scenario schema, scenario counts,
+#         Track-E v2 corpus (86 scenarios), 25-scenario gold regression
+#         subset, and the offline differential evaluator). Lane B is
+#         opt-in and stays fail-closed under these tests; the live PG
+#         branch is never opened here.
 #
 # Explicitly NOT in scope (handled by separate workflows):
 #   * distribution-packaging-smoke.yml — the Windows wheel/sdist build
@@ -109,14 +116,18 @@ jobs:
       # --- py_compile ---
       - name: py-compile-src
         run: |
-          python -m compileall -q src/v3-core/src src/v3-core/scripts src/v3-hermes-plugin/src
+          python -m compileall -q src/v3-core/src src/v3-core/scripts src/v3-core/eval src/v3-hermes-plugin/src
           echo "py-compile OK"
 
       # --- focused tests ---
       # The selection below is the secret-free / no-PG / no-provider
       # product-ci contract slice. The G5a and A0 tests are local /
-      # no-PG additions from this PR. Only tests that currently
-      # collect and pass in the public PR #2 baseline are referenced.
+      # no-PG additions from this PR. The G5b evaluator tests run
+      # under Lane A (deterministic in-memory) and exercise the
+      # 40-scenario v1 baseline, the 86-scenario Track-E v2 expansion,
+      # the 25-scenario gold regression subset, and the offline
+      # differential evaluator. Lane B (live PG) stays fail-closed
+      # under these tests — no real PG connection is opened here.
       #
       #   test_config_control_plane.py
       #     G5a control plane — show / validate / set-provider /
@@ -137,10 +148,37 @@ jobs:
       #     V3CORE_PG_PASSWORD -> legacy storage.pg.password env-fills
       #     contract; uses [REDACTED] placeholders, no real secrets.
       #
+      #   test_g5b_evaluator.py
+      #     Lane A deterministic pool contract, failure taxonomy,
+      #     Lane B safety guard (reserved port/dbname/host, env-only,
+      #     both-set), Lane B safe-exception-message (no DSN/password
+      #     echo), Lane B schema DDL path resolution, scenario schema
+      #     validation, category coverage, exact v1 scenario count
+      #     pin (40), runner wiring and metrics invariants.
+      #
+      #   test_corpus_expansion.py
+      #     Track-E v2 corpus: 80-100 scenario band, v2 ⊇ v1, all 12
+      #     categories covered, every scenario parses, no duplicate
+      #     scenario IDs, expansion ∩ v1 = ∅, v2 runs end-to-end with
+      #     zero pipeline errors; 25-scenario gold regression subset
+      #     with all 12 categories, exact subset of v2, parses and runs
+      #     end-to-end through Lane A; CLI corpus selection
+      #     (--corpus {v1,v2,gold}) including --scenarios file path
+      #     precedence over --corpus.
+      #
+      #   test_compare.py
+      #     Offline differential evaluator — structural validation,
+      #     fail-closed error paths (missing metric keys, wrong
+      #     container types, scenario-count and lane mismatches),
+      #     numeric deltas (pass rate, hit@k, MRR, latency),
+      #     per-category sorting, verdict classification, JSON
+      #     round-trip, CLI exit codes.
+      #
       # What is intentionally NOT here:
       #   * the distribution-packaging smoke (lives in
       #     distribution-packaging-smoke.yml — the PACKAGING CI)
       #   * anything that requires a live PG or provider key
+      #   * any Lane B setup that would open a real psycopg2.connect
       - name: focused-tests-v3-core
         working-directory: src/v3-core
         env:
@@ -167,6 +205,36 @@ jobs:
               tests/test_a0_explicit_memory_opt_in_contract.py \
               tests/test_alpha_bootstrap_contract.py \
               tests/test_config_pg_password_env.py
+
+      - name: focused-tests-g5b-evaluator
+        working-directory: src/v3-core
+        env:
+          # Hard-empty contract — the G5b evaluator must NEVER touch
+          # real credentials, even if a refactor accidentally wires
+          # something through. Lane B (live PG) is opt-in and stays
+          # fail-closed under these tests; no real psycopg2.connect
+          # is opened.
+          V3CORE_PG_PASSWORD: ""
+          OPENAI_API_KEY: ""
+          OPENAI_API_BASE: ""
+          V3_LLM_API_KEY: ""
+          V3_LLM_BASE_URL: ""
+          V3CORE_PG_HOST: ""
+          V3CORE_PG_PORT: ""
+          V3CORE_PG_DB: ""
+          V3CORE_PG_USER: ""
+          V3_LLM_PROVIDER: ""
+          G5B_EVAL_LIVE_PG: ""
+          G5B_EVAL_LAB_DSN: ""
+          G5B_EVAL_LAB_DSN_OPT_IN: ""
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src \
+            python -m pytest -v --no-header \
+              -p no:cacheprovider \
+              eval/g5b_real_memory_evaluator/tests/test_g5b_evaluator.py \
+              eval/g5b_real_memory_evaluator/tests/test_corpus_expansion.py \
+              eval/g5b_real_memory_evaluator/tests/test_compare.py
 
       - name: focused-tests-v3-hermes-plugin
         working-directory: src/v3-hermes-plugin
