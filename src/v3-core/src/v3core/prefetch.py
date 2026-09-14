@@ -184,7 +184,7 @@ def _try_get_sqlite_store(config):
 def prefetch(query: str, limit: int = 5, config=None,
              card_index: dict | None = None, pg=None, q_emb: list[float] | None = None,
              pg_was_connected: bool = False, fmt: str = "list",
-             core=None, *, deadline=None):
+             core=None, *, deadline=None, trace=None):
     """Recall related memories.
 
     fmt controls output shape:
@@ -247,6 +247,10 @@ def prefetch(query: str, limit: int = 5, config=None,
     )
     if deadline is not None:
         recall_kwargs["deadline"] = deadline
+    # B1 (G6B Slice B): forward the trace kwarg to recall_pool exactly
+    # the way deadline is forwarded — only when it is not None.
+    if trace is not None:
+        recall_kwargs["trace"] = trace
     hits, _ = recall_pool(**recall_kwargs)
     return [h.to_dict() for h in hits]
 
@@ -302,7 +306,7 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
                               is_new_session: bool = False,
                               core=None,
                               max_chars: int | None = None,
-                              *, deadline=None) -> str:
+                              *, deadline=None, trace=None) -> str:
     """召回 + 格式化为可注入 context block
 
     2026-08-05 整合: 单路化 — topics RRF 融合召回 (向量+关键词) 为主路径。
@@ -323,6 +327,20 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
     deadline = coerce_deadline(deadline)
     if deadline is not None:
         deadline.check(context="prefetch context")
+    # B1 (G6B Slice B): local copy of ``recall_pool._probe`` so this
+    # module does not import a private helper from recall_pool.  When
+    # ``trace`` is None the helper is a pure no-op — byte-identical to
+    # the pre-trace behaviour.
+    def _probe(trace, method, *args, **kwargs):
+        if trace is None:
+            return
+        try:
+            fn = getattr(trace, method, None)
+            if fn is not None:
+                fn(*args, **kwargs)
+        except Exception:
+            return
+
     # B 路: 扁平 RRF 融合 (topics 向量 + 关键词) — 主路径
     prefetch_kwargs = {
         "pg_was_connected": pg_was_connected,
@@ -330,6 +348,8 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
     }
     if deadline is not None:
         prefetch_kwargs["deadline"] = deadline
+    if trace is not None:
+        prefetch_kwargs["trace"] = trace
     results = prefetch(query, limit, config, card_index, pg, q_emb,
                        **prefetch_kwargs)
     if not results:
@@ -384,8 +404,19 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
         # 旧路径：保留完全兼容的输出 (含 FU5 预览语义)
         lines = list(_preamble_lines)
         for r in results:
-            lines.extend(_render_result_block(r))
+            _unit_lines = _render_result_block(r)
+            lines.extend(_unit_lines)
             lines.append("")
+            # B2 (G6B Slice B): every rendered result in the legacy
+            # max_chars=None path is unconditionally injected.  Emit an
+            # inject probe with the joined unit-text length.  The
+            # source_id MUST be the result dict's own source_id value.
+            try:
+                _joined_unit = "\n".join(_unit_lines)
+                _probe(trace, 'inject', r.get("source_id", ""),
+                       char_count=len(_joined_unit))
+            except Exception:
+                pass
         _append_tail_qas(lines, pg=pg, is_new_session=is_new_session, deadline=deadline)
         return "\n".join(lines)
 
@@ -420,8 +451,23 @@ def prefetch_to_context_block(query: str, limit: int = 5, config: dict | None = 
                 len("\n".join(unit_lines)),
                 max_chars - len("\n".join(_compose_units(selected_units))),
             )
+            # B2 (G6B Slice B): record the budget-driven skip on the
+            # trace.  source_id MUST be the result dict's own value.
+            try:
+                _probe(trace, 'drop', r.get("source_id", ""),
+                       'CHAR_BUDGET', stage='injection')
+            except Exception:
+                pass
             continue
         selected_units.append(unit_lines)
+        # B2 (G6B Slice B): record the successful injection with the
+        # newline-joined unit-text length (the lines actually appended).
+        try:
+            _joined_unit = "\n".join(unit_lines)
+            _probe(trace, 'inject', r.get("source_id", ""),
+                   char_count=len(_joined_unit))
+        except Exception:
+            pass
 
     lines = _compose_units(selected_units)
 
