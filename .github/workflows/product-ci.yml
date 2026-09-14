@@ -204,7 +204,9 @@ jobs:
               tests/test_config_control_plane.py \
               tests/test_a0_explicit_memory_opt_in_contract.py \
               tests/test_alpha_bootstrap_contract.py \
-              tests/test_config_pg_password_env.py
+              tests/test_config_pg_password_env.py \
+              tests/test_topic_radar.py \
+              tests/test_e1_topic_radar_contract.py
 
       - name: focused-tests-g5b-evaluator
         working-directory: src/v3-core
