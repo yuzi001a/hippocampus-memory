@@ -46,7 +46,7 @@ env:
 
 jobs:
   product-ci:
-    name: product-ci (py${{ env.PYTHON_VERSION }})
+    name: product-ci (py3.11)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
