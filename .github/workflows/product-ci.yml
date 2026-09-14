@@ -4,7 +4,9 @@
 #   * python 3.11 (matches the upstream Hermes Agent runtime)
 #   * install v3-core (editable) + v3-hermes-plugin (editable)
 #   * install pytest + pyyaml
-#   * import smoke (v3core + v3-hermes plugin modules)
+#   * import smoke (v3core modules only — v3-hermes-plugin imports the
+#     upstream Hermes `agent` host, so product-ci does NOT smoke-import
+#     v3hermes; that host binding is owned by distribution-packaging-smoke)
 #   * py_compile of every .py under src/ (catches syntax regressions)
 #   * focused secret-free tests:
 #       - the G5a control-plane contract (config_cli / config_control)
@@ -99,7 +101,6 @@ jobs:
               "v3core.tools.store",
               "v3core.tools.write_tool",
               "v3core.tools.health",
-              "v3hermes",
           ):
               importlib.import_module(mod)
               print(f"import-smoke OK: {mod}")
