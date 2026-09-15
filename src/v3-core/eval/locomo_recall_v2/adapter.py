@@ -59,7 +59,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
-from typing import Any, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 
 # ---------------------------------------------------------------------------
@@ -80,12 +80,33 @@ DEFAULT_INCLUDE_FLAGS: dict[str, bool] = {
 }
 
 
+# Mode flag for ``run_case`` / ``run_cases``.
+#
+# * ``"structural"`` — the original G6C-A behaviour.  A single ``q_emb``
+#   may be supplied; when present the adapter forwards it to the
+#   facade as-is.  All-zero vectors are accepted (the engine is
+#   responsible for any further validation).  This is the default so
+#   existing callers / tests stay green.
+# * ``"objective"`` — the G6C-A2 evaluator path.  A ``q_emb_by_case``
+#   mapping keyed by ``case_id`` is the canonical input; the
+#   expected embedding dimension MUST be supplied via
+#   ``expected_dim`` and every per-case vector is validated for
+#   dimension AND rejected when all-zero (no silent fallback).
+#   The legacy single ``q_emb`` kwarg is still accepted for
+#   backwards compatibility but a key miss in ``q_emb_by_case``
+#   raises rather than silently substituting ``q_emb``.
+MODE_STRUCTURAL: str = "structural"
+MODE_OBJECTIVE: str = "objective"
+
+
 # Re-export the import path the spec mandates so tests / callers can
 # ``from v3core.eval.locomo_recall_v2.adapter import RecallTrace`` if
 # they want to introspect types.  We don't re-export *internals*.
 __all__ = [
     "CaseRecord",
     "DEFAULT_INCLUDE_FLAGS",
+    "MODE_OBJECTIVE",
+    "MODE_STRUCTURAL",
     "build_effective_flags",
     "get_prefetch_facade",
     "resolve_trace_source_ids",
@@ -132,6 +153,7 @@ class CaseRecord:
     answer: str
     gold_evidence_dia_ids: tuple[str, ...]
     gold_source_ids: tuple[str, ...]
+    unmapped_dia_ids: tuple[str, ...]
     unresolved_evidence: tuple[str, ...]
     context_block_length: int
     trace_id: str
@@ -156,6 +178,7 @@ class CaseRecord:
             "answer": self.answer,
             "gold_evidence_dia_ids": list(self.gold_evidence_dia_ids),
             "gold_source_ids": list(self.gold_source_ids),
+            "unmapped_dia_ids": list(self.unmapped_dia_ids),
             "unresolved_evidence": list(self.unresolved_evidence),
             "context_block_length": int(self.context_block_length),
             "trace_id": self.trace_id,
@@ -289,15 +312,156 @@ def get_prefetch_facade() -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _normalise_gold_evidence(
+    *,
+    gold_evidence_dia_ids: Sequence[str] | None = None,
+    gold_source_ids: Sequence[str] | None = None,
+    unmapped_dia_ids: Sequence[str] | None = None,
+    unresolved_evidence: Sequence[str] | None = None,
+    gold_evidence: Any = None,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Normalise GoldEvidence inputs into the four-tuple ``CaseRecord`` needs.
+
+    Two input shapes are supported and merged deterministically:
+
+      1. **Explicit fields** — ``gold_evidence_dia_ids``,
+         ``gold_source_ids``, ``unmapped_dia_ids`` and
+         ``unresolved_evidence`` are read directly.
+      2. **GoldEvidence-shaped object** — ``gold_evidence`` is an
+         object exposing ``source_ids``, ``unmapped_dia_ids`` and
+         ``unresolved`` attributes (the
+         :class:`dataset.GoldEvidence` dataclass shape).
+
+    When both are provided, explicit fields take precedence; the
+    ``gold_evidence`` object only fills in keys that are missing
+    or empty on the explicit side.  The four returned tuples are
+    always string tuples so ``CaseRecord`` stays JSON-safe.
+    """
+    ge_src: list[str] = []
+    ge_unmapped: list[str] = []
+    ge_unresolved: list[str] = []
+    if gold_evidence is not None:
+        try:
+            ge_src = list(getattr(gold_evidence, "source_ids", ()) or ())
+        except Exception:
+            ge_src = []
+        try:
+            ge_unmapped = list(getattr(gold_evidence, "unmapped_dia_ids", ()) or ())
+        except Exception:
+            ge_unmapped = []
+        try:
+            ge_unresolved = list(getattr(gold_evidence, "unresolved", ()) or ())
+        except Exception:
+            ge_unresolved = []
+        # Some callers pass a plain dict with the same keys.
+        if isinstance(gold_evidence, Mapping):
+            ge_src = list(gold_evidence.get("source_ids", ge_src) or ())
+            ge_unmapped = list(gold_evidence.get("unmapped_dia_ids", ge_unmapped) or ())
+            ge_unresolved = list(gold_evidence.get("unresolved", ge_unresolved) or ())
+
+    # Gold evidence dia_ids carry the *raw* eval-row evidence strings —
+    # the dataset treats them as opaque.  They are NOT the
+    # ``source_ids``; they are kept distinct in the serialised
+    # record so downstream audit can read them without confusion.
+    dia_ids = tuple(str(x) for x in (gold_evidence_dia_ids or ()) if x is not None)
+    source_ids = tuple(str(x) for x in (gold_source_ids or ()))
+    if not source_ids and ge_src:
+        source_ids = tuple(str(x) for x in ge_src)
+    unmapped = tuple(str(x) for x in (unmapped_dia_ids or ()))
+    if not unmapped and ge_unmapped:
+        unmapped = tuple(str(x) for x in ge_unmapped)
+    unresolved = tuple(str(x) for x in (unresolved_evidence or ()))
+    if not unresolved and ge_unresolved:
+        unresolved = tuple(str(x) for x in ge_unresolved)
+    return dia_ids, source_ids, unmapped, unresolved
+
+
+def _resolve_q_emb_for_case(
+    *,
+    case_id: str,
+    mode: str,
+    q_emb_by_case: Mapping[str, Sequence[float]] | None,
+    q_emb: Sequence[float] | None,
+    expected_dim: int | None,
+) -> list[float] | None:
+    """Resolve the per-case ``q_emb`` for one facade invocation.
+
+    Mode contract:
+
+      * ``"structural"`` (default) — accepts a single ``q_emb`` and
+        forwards it as-is.  ``q_emb_by_case`` is IGNORED.  All-zero
+        vectors are passed through (the engine owns further
+        validation; the adapter must not silently substitute).
+        ``expected_dim`` is IGNORED.
+      * ``"objective"`` — ``q_emb_by_case`` is the canonical input;
+        ``expected_dim`` MUST be supplied (the caller is the
+        production embedding provider and owns the dimension).
+        The lookup MUST find a vector for ``case_id`` (missing key
+        raises ``ValueError``).  Extra keys are ignored.  The
+        per-case vector is validated for dimension (raises
+        ``ValueError``) and rejected when all-zero (raises
+        ``ValueError``).  ``q_emb`` is accepted for backwards
+        compatibility but is only used when the case is not in
+        the mapping — and even then only when no key miss is
+        raised in the strict contract.
+
+    Returns the vector that will be forwarded to the facade as a
+    plain Python list (so the adapter never holds a reference to
+    the caller's container), or ``None`` when no vector is
+    available for the case.
+    """
+    if mode == MODE_STRUCTURAL:
+        if q_emb is None:
+            return None
+        return [float(x) for x in q_emb]
+    if mode == MODE_OBJECTIVE:
+        if q_emb_by_case is None:
+            raise ValueError(
+                "objective mode requires q_emb_by_case mapping keyed by case_id"
+            )
+        if expected_dim is None or int(expected_dim) <= 0:
+            raise ValueError(
+                "objective mode requires an explicit positive expected_dim "
+                f"(got {expected_dim!r})"
+            )
+        try:
+            vec = q_emb_by_case[case_id]
+        except KeyError as exc:
+            raise ValueError(
+                f"objective mode missing q_emb for case_id={case_id!r} "
+                "(q_emb_by_case must cover every case)"
+            ) from exc
+        if vec is None:
+            raise ValueError(
+                f"objective mode q_emb for case_id={case_id!r} is None"
+            )
+        coerced = [float(x) for x in vec]
+        if len(coerced) != int(expected_dim):
+            raise ValueError(
+                f"objective mode q_emb dimension mismatch for "
+                f"case_id={case_id!r}: got {len(coerced)}, "
+                f"expected {int(expected_dim)}"
+            )
+        if not any(coerced):
+            raise ValueError(
+                f"objective mode q_emb for case_id={case_id!r} "
+                "is all-zero — refusing to forward a degenerate vector"
+            )
+        return coerced
+    raise ValueError(f"unknown adapter mode {mode!r}")
+
+
 def run_case(
     *,
     sample_id: str,
     query_idx: int,
     question: str,
     gold_answer: str,
-    gold_evidence_dia_ids: Sequence[str],
-    gold_source_ids: Sequence[str],
+    gold_evidence_dia_ids: Sequence[str] = (),
+    gold_source_ids: Sequence[str] = (),
+    unmapped_dia_ids: Sequence[str] = (),
     unresolved_evidence: Sequence[str] = (),
+    gold_evidence: Any = None,
     category: str = "",
     limit: int = 5,
     max_chars: Optional[int] = None,
@@ -311,26 +475,37 @@ def run_case(
     is_new_session: bool = False,
     deadline: Any = None,
     pg_was_connected: bool = False,
+    mode: str = MODE_STRUCTURAL,
+    q_emb_by_case: Mapping[str, Sequence[float]] | None = None,
+    expected_dim: int | None = None,
 ) -> CaseRecord:
     """Run one benchmark case through the production-shaped facade.
 
     The function:
 
       1. Computes the stable ``case_id``.
-      2. Builds the typed ``QueryContext`` + ``QueryPlan`` (effective
+      2. Resolves the four evidence fields via
+         :func:`_normalise_gold_evidence` (accepting either the
+         GoldEvidence dataclass shape or explicit fields — both
+         serialise separately to ``to_dict``).
+      3. Builds the typed ``QueryContext`` + ``QueryPlan`` (effective
          flags derived from ``config``).
-      3. Constructs ONE ``RecallTrace`` (with a deterministic
+      4. Resolves the per-case ``q_emb`` via
+         :func:`_resolve_q_emb_for_case` (objective mode enforces
+         dimension + non-zero validation; structural mode passes
+         a single ``q_emb`` through).
+      5. Constructs ONE ``RecallTrace`` (with a deterministic
          ``trace_id = f"locomo-{case_id}"``) and ONE ``LegacySink``
          that wraps it, and passes the sink as ``trace=`` to the
          facade.  The facade will call the engine exactly once on
          the success path.
-      4. Reads the SAME trace back via ``sink._trace`` (the public
+      6. Reads the SAME trace back via ``sink._trace`` (the public
          facade does not accept a ``trace_out=`` holder, so the
          sink we passed IS the trace the engine writes to) and
          extracts ranked / selected / injected / candidate source
          IDs through the typed snapshot map.  The adapter NEVER
          invents source IDs and NEVER bypasses the engine.
-      5. Returns a :class:`CaseRecord` ready for JSON serialisation.
+      7. Returns a :class:`CaseRecord` ready for JSON serialisation.
 
     Exactly-once contract: the facade is invoked AT MOST ONCE per
     call.  Any exception — including ``TypeError`` from a caller
@@ -344,6 +519,58 @@ def run_case(
     started = time.monotonic()
     error_msg = ""
     status = "ok"
+
+    # Normalise evidence inputs — explicit fields win, gold_evidence
+    # object fills gaps.  Two shapes are kept distinct on the
+    # serialised record so downstream audit can recover the mapping
+    # intent.
+    dia_ids_norm, source_ids_norm, unmapped_norm, unresolved_norm = (
+        _normalise_gold_evidence(
+            gold_evidence_dia_ids=gold_evidence_dia_ids,
+            gold_source_ids=gold_source_ids,
+            unmapped_dia_ids=unmapped_dia_ids,
+            unresolved_evidence=unresolved_evidence,
+            gold_evidence=gold_evidence,
+        )
+    )
+
+    # Per-case q_emb resolution.  In objective mode this raises
+    # BEFORE the facade is called when the mapping is incomplete
+    # or the vector is degenerate — no silent fallback.
+    try:
+        case_q_emb = _resolve_q_emb_for_case(
+            case_id=case_id,
+            mode=mode,
+            q_emb_by_case=q_emb_by_case,
+            q_emb=q_emb,
+            expected_dim=expected_dim,
+        )
+    except ValueError as exc:
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        return CaseRecord(
+            case_id=case_id,
+            sample_id=sample_id,
+            query_idx=query_idx,
+            category=category,
+            question=question,
+            answer=gold_answer,
+            gold_evidence_dia_ids=dia_ids_norm,
+            gold_source_ids=source_ids_norm,
+            unmapped_dia_ids=unmapped_norm,
+            unresolved_evidence=unresolved_norm,
+            context_block_length=0,
+            trace_id="",
+            ranked_source_ids=(),
+            selected_source_ids=(),
+            candidate_source_ids=(),
+            injected_source_ids=(),
+            lane_summaries=(),
+            injection_summary=None,
+            drop_summary={},
+            elapsed_ms=float(elapsed_ms),
+            status="invalid_q_emb",
+            error=str(exc),
+        )
 
     # Observe the public facade's own trace_out channel.  The facade
     # creates the real RecallTrace internally when no external trace
@@ -372,7 +599,7 @@ def run_case(
             config=config,
             card_index=card_index,
             pg=pg,
-            q_emb=list(q_emb) if q_emb is not None else None,
+            q_emb=case_q_emb,
             pg_was_connected=pg_was_connected,
             is_new_session=is_new_session,
             core=core,
@@ -512,9 +739,10 @@ def run_case(
         category=category,
         question=question,
         answer=gold_answer,
-        gold_evidence_dia_ids=tuple(str(x) for x in gold_evidence_dia_ids),
-        gold_source_ids=tuple(str(x) for x in gold_source_ids),
-        unresolved_evidence=tuple(str(x) for x in unresolved_evidence),
+        gold_evidence_dia_ids=dia_ids_norm,
+        gold_source_ids=source_ids_norm,
+        unmapped_dia_ids=unmapped_norm,
+        unresolved_evidence=unresolved_norm,
         context_block_length=int(context_block_length),
         trace_id=trace_id,
         ranked_source_ids=ranked_source_ids,
@@ -567,14 +795,32 @@ def run_cases(
     max_chars: Optional[int] = None,
     limit: int = 5,
     deadline: Any = None,
+    mode: str = MODE_STRUCTURAL,
+    q_emb_by_case: Mapping[str, Sequence[float]] | None = None,
+    expected_dim: int | None = None,
 ) -> list[CaseRecord]:
     """Run a batch of cases through :func:`run_case`.
 
     Each ``case`` dict must carry: ``sample_id``, ``query_idx``,
     ``question``, ``answer``, ``gold_evidence_dia_ids`` (sequence
     of dia IDs), ``gold_source_ids`` (sequence of source IDs),
-    ``unresolved_evidence`` (optional), ``category`` (optional),
-    ``session_id`` / ``conversation_id`` (optional).
+    ``unmapped_dia_ids`` (optional, distinct from
+    ``unresolved_evidence``), ``unresolved_evidence`` (optional),
+    ``gold_evidence`` (optional, GoldEvidence-shaped object — used
+    to fill gaps when explicit fields are absent), ``category``
+    (optional), ``session_id`` / ``conversation_id`` (optional).
+
+    In ``mode="objective"`` the ``q_emb_by_case`` mapping MUST
+    contain an entry for every case ``case_id``; missing keys
+    raise ``ValueError`` (no silent fallback to ``q_emb``).  In
+    ``mode="structural"`` the ``q_emb`` vector is forwarded to
+    every case unchanged.
+
+    The adapter batch is fail-closed in objective mode: when a
+    per-case ``run_case`` produces a record with
+    ``status='invalid_q_emb'`` (a degenerate vector was
+    forwarded) the batch aborts with ``RuntimeError`` so a
+    downstream consumer cannot silently score the case.
     """
     out: list[CaseRecord] = []
     for case in cases:
@@ -585,7 +831,9 @@ def run_cases(
             gold_answer=str(case.get("answer", "") or ""),
             gold_evidence_dia_ids=tuple(case.get("gold_evidence_dia_ids", ()) or ()),
             gold_source_ids=tuple(case.get("gold_source_ids", ()) or ()),
+            unmapped_dia_ids=tuple(case.get("unmapped_dia_ids", ()) or ()),
             unresolved_evidence=tuple(case.get("unresolved_evidence", ()) or ()),
+            gold_evidence=case.get("gold_evidence"),
             category=str(case.get("category", "") or ""),
             limit=limit,
             max_chars=max_chars,
@@ -596,5 +844,23 @@ def run_cases(
             q_emb=q_emb,
             core=core,
             deadline=deadline,
+            mode=mode,
+            q_emb_by_case=q_emb_by_case,
+            expected_dim=expected_dim,
         ))
+        # Fail-closed: an invalid_q_emb record in objective mode
+        # MUST abort the batch rather than silently continue with
+        # a status a downstream consumer might score as a normal
+        # hit.  Structural mode intentionally tolerates
+        # status='invalid_q_emb' records (none should be produced
+        # anyway).
+        if (
+            mode == MODE_OBJECTIVE
+            and out[-1].status == "invalid_q_emb"
+        ):
+            raise RuntimeError(
+                f"adapter.run_cases aborted in objective mode: "
+                f"case_id={out[-1].case_id!r} produced "
+                f"status='invalid_q_emb' ({out[-1].error!r})"
+            )
     return out

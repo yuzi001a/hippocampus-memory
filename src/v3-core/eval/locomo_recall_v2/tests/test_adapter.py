@@ -609,3 +609,233 @@ def test_build_effective_flags_defaults_and_rerank_gating():
     cfg_no_ep = {"storage": {"rerank": {"some_other": 1}}}
     flags3 = adapter_module.build_effective_flags(cfg_no_ep)
     assert flags3["rerank_top_n"] is None
+
+
+# ---------------------------------------------------------------------------
+# GoldEvidence / unmapped_dia_ids contract tests
+# ---------------------------------------------------------------------------
+
+
+def test_case_record_to_dict_serialises_unmapped_and_unresolved_separately():
+    """``unmapped_dia_ids`` and ``unresolved_evidence`` are kept as
+    two distinct fields on both the dataclass and the serialised
+    JSON dict — they are NOT folded into one.
+    """
+    _ensure_modules()
+    _patch_facade_for_noop_hits(monkeypatch=__import__("pytest").MonkeyPatch())
+
+    # Build a CaseRecord via run_case with explicit fields.
+    import pytest
+    mp = pytest.MonkeyPatch()
+    try:
+        _patch_facade_for_noop_hits(mp)
+        rec = adapter_module.run_case(
+            sample_id="s-unmapped",
+            query_idx=0,
+            question="Q?",
+            gold_answer="A.",
+            gold_evidence_dia_ids=("d-1", "d-2"),
+            gold_source_ids=("src-mapped",),
+            unmapped_dia_ids=("d-3",),
+            unresolved_evidence=("d-1, d-2",),
+            category="c",
+        )
+    finally:
+        mp.undo()
+
+    # Three-state evidence preserved on the dataclass.
+    assert rec.gold_source_ids == ("src-mapped",)
+    assert rec.unmapped_dia_ids == ("d-3",)
+    assert rec.unresolved_evidence == ("d-1, d-2",)
+
+    # Three-state evidence preserved in to_dict() — distinct keys,
+    # no folding, no shared list.
+    blob = rec.to_dict()
+    assert blob["gold_source_ids"] == ["src-mapped"]
+    assert blob["unmapped_dia_ids"] == ["d-3"]
+    assert blob["unresolved_evidence"] == ["d-1, d-2"]
+    # The lists must be distinct objects (not the same list).
+    assert blob["gold_source_ids"] is not blob["unmapped_dia_ids"]
+    assert blob["unmapped_dia_ids"] is not blob["unresolved_evidence"]
+
+
+def test_run_case_accepts_gold_evidence_shaped_input():
+    """``gold_evidence=`` GoldEvidence-shaped object fills gaps
+    while explicit fields take precedence."""
+    _ensure_modules()
+    from types import SimpleNamespace
+    import pytest
+
+    ge = SimpleNamespace(
+        source_ids=("ge-src", "ge-src-2"),
+        unmapped_dia_ids=("ge-unmapped",),
+        unresolved=("ge-unresolved",),
+    )
+    mp = pytest.MonkeyPatch()
+    try:
+        _patch_facade_for_noop_hits(mp)
+        rec = adapter_module.run_case(
+            sample_id="s-ge",
+            query_idx=0,
+            question="Q?",
+            gold_answer="A.",
+            gold_evidence_dia_ids=("d-1",),
+            gold_evidence=ge,
+            category="c",
+        )
+    finally:
+        mp.undo()
+    # Explicit dia_ids survive; explicit gold_source_ids absent so
+    # the GoldEvidence source_ids fill in.
+    assert rec.gold_evidence_dia_ids == ("d-1",)
+    assert rec.gold_source_ids == ("ge-src", "ge-src-2")
+    # unmapped_dia_ids / unresolved_evidence come from GoldEvidence.
+    assert rec.unmapped_dia_ids == ("ge-unmapped",)
+    assert rec.unresolved_evidence == ("ge-unresolved",)
+
+
+def test_run_case_explicit_fields_override_gold_evidence():
+    """When both are supplied, explicit fields win."""
+    _ensure_modules()
+    from types import SimpleNamespace
+    import pytest
+
+    ge = SimpleNamespace(
+        source_ids=("ge-src",),
+        unmapped_dia_ids=("ge-unmapped",),
+        unresolved=("ge-unresolved",),
+    )
+    mp = pytest.MonkeyPatch()
+    try:
+        _patch_facade_for_noop_hits(mp)
+        rec = adapter_module.run_case(
+            sample_id="s-over",
+            query_idx=0,
+            question="Q?",
+            gold_answer="A.",
+            gold_evidence_dia_ids=("d-1",),
+            gold_source_ids=("explicit-src",),
+            unmapped_dia_ids=("explicit-unmapped",),
+            unresolved_evidence=("explicit-unresolved",),
+            gold_evidence=ge,
+            category="c",
+        )
+    finally:
+        mp.undo()
+    assert rec.gold_source_ids == ("explicit-src",)
+    assert rec.unmapped_dia_ids == ("explicit-unmapped",)
+    assert rec.unresolved_evidence == ("explicit-unresolved",)
+
+
+# ---------------------------------------------------------------------------
+# q_emb_by_case / objective-mode contract tests
+# ---------------------------------------------------------------------------
+
+
+def _objective_vec(seed: int, dim: int = 1024) -> list[float]:
+    """Deterministic non-zero vector of length ``dim``."""
+    return [float((seed * 31 + i + 1) % 17) / 17.0 for i in range(dim)]
+
+
+def _record_facade_q_embs():
+    """Return a list that captures every ``q_emb`` the facade sees."""
+    captured: list[list[float] | None] = []
+
+    def _fake_facade(query, **kwargs):
+        captured.append(list(kwargs.get("q_emb") or []) if kwargs.get("q_emb") is not None else None)
+        return "[fake]\n"
+
+    return _fake_facade, captured
+
+
+def test_objective_mode_different_case_vectors_reach_facade():
+    """In objective mode every case must receive ITS OWN vector —
+    never one shared fallback."""
+    _ensure_modules()
+    import pytest
+    mp = pytest.MonkeyPatch()
+
+    fake_facade, captured = _record_facade_q_embs()
+    mp.setattr(adapter_module, "prefetch_to_context_block", fake_facade)
+    try:
+        q_emb_by_case = {
+            "s|0": _objective_vec(seed=1),
+            "s|1": _objective_vec(seed=2),
+            "s|2": _objective_vec(seed=3),
+        }
+        cases = [
+            {"sample_id": "s", "query_idx": i, "question": f"Q{i}", "answer": "A"}
+            for i in range(3)
+        ]
+        out = adapter_module.run_cases(
+            cases,
+            mode=adapter_module.MODE_OBJECTIVE,
+            q_emb_by_case=q_emb_by_case,
+            expected_dim=1024,
+        )
+        # One facade invocation per case.
+        assert len(captured) == 3
+        # Each captured vector equals the per-case mapping entry
+        # byte-for-byte (deterministic dispatch).
+        for i in range(3):
+            assert captured[i] == q_emb_by_case[f"s|{i}"]
+        # Records produced for every case.
+        assert [r.case_id for r in out] == ["s|0", "s|1", "s|2"]
+    finally:
+        mp.undo()
+
+
+def test_structural_mode_allows_all_zero_q_emb():
+    """Structural mode (the default) does NOT reject all-zero
+    vectors — that policy is exclusive to objective mode."""
+    _ensure_modules()
+    import pytest
+    mp = pytest.MonkeyPatch()
+    fake_facade, captured = _record_facade_q_embs()
+    mp.setattr(adapter_module, "prefetch_to_context_block", fake_facade)
+    try:
+        # No ValueError; the zero vector is forwarded as-is.
+        rec = adapter_module.run_case(
+            sample_id="s",
+            query_idx=0,
+            question="Q",
+            gold_answer="A",
+            gold_evidence_dia_ids=(),
+            gold_source_ids=(),
+            q_emb=[0.0] * 1024,
+        )
+        # The fake facade received the zero vector verbatim.
+        assert captured == [[0.0] * 1024]
+        assert rec.case_id == "s|0"
+    finally:
+        mp.undo()
+
+
+def test_structural_mode_ignores_q_emb_by_case_mapping():
+    """In structural mode the ``q_emb_by_case`` mapping is
+    IGNORED — only the single ``q_emb`` kwarg is forwarded."""
+    _ensure_modules()
+    import pytest
+    mp = pytest.MonkeyPatch()
+    fake_facade, captured = _record_facade_q_embs()
+    mp.setattr(adapter_module, "prefetch_to_context_block", fake_facade)
+    try:
+        shared = _objective_vec(seed=5)
+        # A mapping with different vectors; structural mode must
+        # ignore it and forward ``shared`` to both cases.
+        q_emb_by_case = {
+            "s|0": _objective_vec(seed=99),
+            "s|1": _objective_vec(seed=100),
+        }
+        cases = [
+            {"sample_id": "s", "query_idx": 0, "question": "Q0", "answer": "A"},
+            {"sample_id": "s", "query_idx": 1, "question": "Q1", "answer": "A"},
+        ]
+        adapter_module.run_cases(
+            cases,
+            q_emb=shared,
+            q_emb_by_case=q_emb_by_case,
+        )
+        assert captured == [list(shared), list(shared)]
+    finally:
+        mp.undo()

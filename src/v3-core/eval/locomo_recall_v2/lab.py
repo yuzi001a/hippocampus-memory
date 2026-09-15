@@ -51,9 +51,10 @@ installed (the G5B contract).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +444,105 @@ def _rows_have(rows: Iterable[Any], key: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# pgvector coercion — safe import of a 1024-dim embedding.
+# ---------------------------------------------------------------------------
+
+
+# Default vector dimension for the canonical alpha working set
+# (qa_pairs.embedding, conversation_stream.embedding, etc. — all
+# ``VECTOR(1024)`` in ``alpha_bootstrap.sql``). The importer refuses
+# any list/tuple whose length disagrees with this constant.
+_VECTOR_DIM_DEFAULT = 1024
+
+
+class LabVectorError(LabImportError):
+    """Raised when an embedding row is not a valid pgvector payload."""
+
+
+def _serialize_pgvector_literal(
+    values: Any,
+    *,
+    dim: int = _VECTOR_DIM_DEFAULT,
+) -> str:
+    """Serialize a Python list/tuple of floats as a pgvector literal.
+
+    The returned string is the ``[x,y,z,...]`` form that
+    PostgreSQL accepts as a ``vector`` constant when the column
+    is cast via ``::vector``. We refuse:
+
+      * non-list/tuple inputs,
+      * length mismatches with ``dim``,
+      * non-numeric values,
+      * non-finite values (NaN / +inf / -inf).
+
+    Failures raise :class:`LabVectorError` so the caller never
+    silently drops a malformed embedding.
+    """
+
+    if not isinstance(values, (list, tuple)):
+        raise LabVectorError(
+            f"lab: embedding must be a list/tuple of floats "
+            f"(got {type(values).__name__})"
+        )
+    if len(values) != dim:
+        raise LabVectorError(
+            f"lab: embedding length {len(values)} != expected "
+            f"vector({dim})"
+        )
+    parts: list[str] = []
+    for i, x in enumerate(values):
+        # bool is a subclass of int in Python — refuse explicitly so
+        # ``[True, False]`` cannot slip through as ``[1, 0]``.
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            raise LabVectorError(
+                f"lab: embedding[{i}] is not numeric "
+                f"(got {type(x).__name__})"
+            )
+        fx = float(x)
+        if not math.isfinite(fx):
+            raise LabVectorError(
+                f"lab: embedding[{i}] is not finite ({fx!r})"
+            )
+        # ``repr`` keeps the float round-trippable through PG; ``str``
+        # is fine for finite IEEE-754 doubles.
+        parts.append(repr(fx))
+    return "[" + ",".join(parts) + "]"
+
+
+def _coerce_embedding(value: Any) -> Any:
+    """Coerce one ``embedding`` cell.
+
+    Contract (G6C-A2 lab seam):
+
+      * ``None`` → preserved (structural-only import path).
+      * ``list`` / ``tuple`` of finite floats → pgvector literal
+        ``[x,y,z,...]`` string ready for ``::vector`` binding.
+      * ``str`` → passed through verbatim. Pre-serialised
+        pgvector literals are accepted so an upstream pipeline
+        that already produced a literal does not pay the cost
+        of a second parse.
+      * Anything else → :class:`LabVectorError` (fail-closed).
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        # Pre-serialised literal — accepted as-is.
+        if not (value.startswith("[") and value.endswith("]")):
+            raise LabVectorError(
+                "lab: embedding string must be a pgvector literal "
+                "starting with '[' and ending with ']'"
+            )
+        return value
+    if isinstance(value, (list, tuple)):
+        return _serialize_pgvector_literal(value)
+    raise LabVectorError(
+        f"lab: embedding must be None / list / tuple / pgvector "
+        f"literal string (got {type(value).__name__})"
+    )
+
+
 def _coerce_row(row: Any, columns: tuple[str, ...]) -> tuple[Any, ...]:
     if not isinstance(row, dict):
         raise LabImportError(
@@ -450,10 +550,13 @@ def _coerce_row(row: Any, columns: tuple[str, ...]) -> tuple[Any, ...]:
         )
     out = []
     jsonb_columns = {"tool_calls", "tool_results", "evidence"}
+    vector_columns = {"embedding"}
     for c in columns:
         v = row.get(c, None)
         if c in jsonb_columns and v is not None and not isinstance(v, str):
             v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+        elif c in vector_columns:
+            v = _coerce_embedding(v)
         out.append(v)
     return tuple(out)
 
@@ -500,7 +603,18 @@ def _execute_many(
 
     if not rows:
         return 0
-    placeholders = ", ".join(["%s"] * len(columns))
+    # Per-column placeholder. ``VECTOR`` columns are bound through
+    # a ``%s::vector`` cast so the pgvector literal serialised by
+    # :func:`_serialize_pgvector_literal` is accepted by the column
+    # type. Other columns keep the bare ``%s`` placeholder.
+    _vector_cast_cols = {"embedding"}
+    placeholder_parts: list[str] = []
+    for c in columns:
+        if c in _vector_cast_cols:
+            placeholder_parts.append("%s::vector")
+        else:
+            placeholder_parts.append("%s")
+    placeholders = ", ".join(placeholder_parts)
     col_list = ", ".join(columns)
     sql = f"INSERT INTO public.{table} ({col_list}) VALUES ({placeholders})"
     if on_conflict:
@@ -628,11 +742,387 @@ def import_rows(
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Evaluator-only provenance mapping (read-only; no retrieval SQL).
+# ---------------------------------------------------------------------------
+
+
+# Production-shaped candidate IDs the eval pipeline sees:
+#
+#   * ``qa_<numeric>`` — QA lane / QA-vector candidates emitted by
+#     ``v3core.recall_pool``. The numeric suffix is the
+#     ``qa_pairs.id`` (BIGSERIAL). Used in trace snapshots,
+#     coverage audit, and ranked/selected/injected id lists.
+#   * ``topic_<numeric>`` — topic-card candidates (kept for
+#     completeness; not the focus of this seam).
+#   * Numeric strings (``"<n>"``) — raw ``conversation_stream.id``
+#     values from the live recall path that have not yet been
+#     promoted to a ``qa_<n>`` form.
+#
+# The mapping helper resolves these to the canonical lab
+# ``source_id`` so an evaluator can score ranked candidates
+# against the gold LoCoMo pair ``source_id`` without touching
+# production recall SQL.
+_QA_ID_RE = re.compile(r"^qa_(\d+)$")
+_TOPIC_ID_RE = re.compile(r"^topic_(\d+)$")
+
+
+def _extract_qa_pair_source_id(row: Mapping[str, Any]) -> str | None:
+    """Read ``source_id`` from a qa_pairs row.
+
+    Returns the verbatim ``source_id`` if present and non-empty,
+    else ``None``. Defensive against dict-shaped and object-shaped
+    rows (the caller may hand us either).
+    """
+
+    if not isinstance(row, Mapping):
+        return None
+    sid = row.get("source_id")
+    if isinstance(sid, str) and sid:
+        return sid
+    return None
+
+
+def _extract_dia_ids_from_qa_row(row: Mapping[str, Any]) -> tuple[str, ...]:
+    """Read the canonical dia_id provenance from a qa_pairs row.
+
+    The ``build_import_rows`` contract writes
+    ``tool_calls[0]`` as ``{q_provenance, a_provenance, ...}``.
+    Both ``q_provenance`` and ``a_provenance`` are dicts with a
+    ``dia_id`` field. We extract both (deduped, order preserved)
+    so the caller can resolve either side to a pair ``source_id``
+    via the supplied ``dia_id_to_source_id`` map.
+    """
+
+    if not isinstance(row, Mapping):
+        return ()
+    tc = row.get("tool_calls")
+    if not isinstance(tc, list) or not tc:
+        return ()
+    head = tc[0]
+    if not isinstance(head, dict):
+        return ()
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in ("q_provenance", "a_provenance"):
+        prov = head.get(key)
+        if isinstance(prov, Mapping):
+            did = prov.get("dia_id")
+            if isinstance(did, str) and did and did not in seen:
+                seen.add(did)
+                out.append(did)
+    return tuple(out)
+
+
+def _extract_dia_id_from_conversation_row(row: Mapping[str, Any]) -> str | None:
+    """Read the canonical ``dia_id`` from a conversation_stream row.
+
+    The ``build_import_rows`` contract writes
+    ``tool_calls[0]`` as ``{sample_id, session_key, dia_id, ...}``.
+    """
+
+    if not isinstance(row, Mapping):
+        return None
+    tc = row.get("tool_calls")
+    if not isinstance(tc, list) or not tc:
+        return None
+    head = tc[0]
+    if not isinstance(head, Mapping):
+        return None
+    did = head.get("dia_id")
+    if isinstance(did, str) and did:
+        return did
+    return None
+
+
+def build_provenance_map(
+    qa_pairs_rows: Iterable[Mapping[str, Any]] | None = None,
+    conversation_stream_rows: Iterable[Mapping[str, Any]] | None = None,
+    *,
+    dia_id_to_source_id: Mapping[str, str] | None = None,
+    qa_id_index: Mapping[Any, str] | None = None,
+) -> dict[str, Any]:
+    """Build the evaluator-only provenance mapping (read-only).
+
+    This is **not** retrieval SQL. It walks the imported rows in
+    Python, never opens a cursor, and returns a structure that
+    lets the evaluator resolve production-shaped candidate IDs
+    to canonical lab ``source_id``s without changing production
+    recall.
+
+    The returned structure is::
+
+        {
+          "qa_id_to_source_id":     { "qa_123": "locomo|eval_v2|...|d1>d2", ... },
+          "conv_id_to_source_id":   { "456":    "locomo|eval_v2|...|d1>d2", ... },
+          "topic_id_to_source_id":  { "topic_7": "<qa_pairs.source_id or ''>", ... },
+          "counts": {
+            "qa_pairs_input":          <int>,
+            "conversation_stream_input": <int>,
+            "qa_id_resolved":          <int>,
+            "qa_id_unresolved":        <int>,
+            "conv_id_resolved":        <int>,
+            "conv_id_unresolved":      <int>,
+            "topic_id_resolved":       <int>,
+            "topic_id_unresolved":     <int>,
+            "qa_pairs_without_source_id": <int>,
+            "qa_pairs_without_dia_id":    <int>,
+          },
+        }
+
+    Parameters
+    ----------
+    qa_pairs_rows:
+        Imported ``qa_pairs`` rows (the dict shape produced by
+        :func:`dataset.build_import_rows` or read back from PG).
+        Used to infer the ``dia_id → source_id`` map when the
+        caller does not supply one explicitly.
+    conversation_stream_rows:
+        Imported ``conversation_stream`` rows. Used to map a
+        numeric ``conversation_stream.id`` to the canonical
+        LoCoMo pair ``source_id`` via the row's ``dia_id``
+        provenance plus the supplied (or inferred) dia map.
+    dia_id_to_source_id:
+        Optional explicit ``{dia_id: source_id}`` map. When the
+        caller supplies it (e.g. from
+        ``SELECT dia_id, source_id FROM qa_pairs`` after import),
+        it overrides the inferred map. The evaluator-only seam
+        never issues this SELECT — the caller hands the result
+        in.
+    qa_id_index:
+        Optional ``{qa_pairs.id (int): source_id}`` map produced
+        by an offline ``SELECT id, source_id FROM qa_pairs``.
+        When supplied, ``qa_<n>`` candidates resolve directly via
+        ``qa_id_to_source_id[f"qa_{n}"]``. When not supplied,
+        ``qa_id_to_source_id`` stays empty and the ``counts``
+        block reports ``qa_id_resolved == 0`` so the auditor can
+        detect the missing index.
+
+    Resolution rules (G6C-A2, evaluator-only):
+
+      * ``qa_<n>`` → ``qa_id_index[n]`` (when supplied).
+      * ``"<n>"`` (numeric) → the canonical pair ``source_id``
+        derived from the ``conversation_stream`` row whose
+        ``id`` equals ``n``. The mapping uses the row's
+        ``tool_calls[0].dia_id`` provenance plus the dia map.
+      * ``topic_<n>`` → no canonical mapping in lab land
+        (topics are not the focus of this seam); the
+        ``topic_id_to_source_id`` map is returned empty so the
+        caller can detect the gap.
+
+    The helper never serialises a credential or DSN. It accepts
+    plain Python dicts / Mappings only — no DSN, no connection.
+    """
+
+    # Defensive: build the qa_pairs.source_id lookup first. The
+    # importer writes one qa_pairs row per canonical pair, so the
+    # map is at most one-to-one and the ``id`` field is the
+    # BIGSERIAL primary key (see alpha_bootstrap.sql).
+    qa_rows_list = list(qa_pairs_rows or ())
+    conv_rows_list = list(conversation_stream_rows or ())
+
+    # Build a ``dia_id → source_id`` map. We prefer the caller-
+    # supplied map (it may carry extra edges that are not present
+    # in qa_pairs alone — e.g. conversation_stream dia_ids that
+    # pair into a qa pair). When the caller does not supply one,
+    # we fall back to inferring from the qa_pairs rows via their
+    # ``q_provenance`` / ``a_provenance`` dia_ids.
+    dia_map: dict[str, str] = {}
+    if dia_id_to_source_id is not None:
+        for k, v in dia_id_to_source_id.items():
+            if isinstance(k, str) and k and isinstance(v, str) and v:
+                dia_map[k] = v
+    if not dia_map:
+        # Infer from qa_pairs rows. First-seen wins (the dataset
+        # is bijective when no pair re-uses a dia_id on both
+        # sides of different pairs).
+        for row in qa_rows_list:
+            sid = _extract_qa_pair_source_id(row)
+            if sid is None:
+                continue
+            for did in _extract_dia_ids_from_qa_row(row):
+                dia_map.setdefault(did, sid)
+
+    # ``qa_<n>`` → source_id via the caller-supplied BIGSERIAL
+    # index. The lab importer does not expose ``id`` (it is
+    # BIGSERIAL and assigned by PG), so without ``qa_id_index``
+    # we cannot resolve ``qa_<n>`` → source_id safely. We
+    # surface the resolved count so the auditor can detect the
+    # missing index rather than silently inventing entries.
+    qa_id_to_source_id: dict[str, str] = {}
+    qa_id_unresolved = 0
+    if qa_id_index is not None:
+        for k, v in qa_id_index.items():
+            sid = v
+            if not (isinstance(sid, str) and sid):
+                continue
+            # Accept int / str / str(int) keys.
+            if isinstance(k, int) and k > 0:
+                key = f"qa_{k}"
+            elif isinstance(k, str) and k.isdigit():
+                key = f"qa_{int(k)}"
+            elif isinstance(k, str) and k.startswith("qa_") and k[3:].isdigit():
+                key = k
+            else:
+                continue
+            qa_id_to_source_id[key] = sid
+        qa_id_unresolved = 0  # explicit index — every key it
+        # lists resolves; the caller is responsible for
+        # completeness (we never invent missing entries).
+
+    # ``<n>`` (numeric conversation_stream id) → source_id via
+    # the row's dia_id provenance plus the dia map.
+    conv_id_to_source_id: dict[str, str] = {}
+    conv_rows_seen = 0
+    conv_rows_resolved = 0
+    for idx, row in enumerate(conv_rows_list):
+        if not isinstance(row, Mapping):
+            continue
+        conv_rows_seen += 1
+        did = _extract_dia_id_from_conversation_row(row)
+        if did is None:
+            continue
+        # The conversation_stream ``id`` is BIGSERIAL. The caller
+        # may have preserved it as ``"id"`` on the dict; if so we
+        # use it directly. Otherwise we fall back to ordinal
+        # position + 1 (PG BIGSERIAL starts at 1, and the importer
+        # preserves insertion order). Ordinal fallback is
+        # evaluator-only and never used by production recall.
+        raw_id = row.get("id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            cid_key = str(raw_id)
+        elif isinstance(raw_id, str) and raw_id.isdigit():
+            cid_key = raw_id
+        else:
+            cid_key = str(idx + 1)
+        # Resolve via dia_id → source_id. A conversation_stream
+        # row's dia_id maps to the qa pair whose ``a_dia_id`` (or
+        # ``q_dia_id``) equals it; the dia map carries that edge.
+        sid = dia_map.get(did)
+        if sid is not None:
+            conv_id_to_source_id[cid_key] = sid
+            conv_rows_resolved += 1
+
+    return {
+        "qa_id_to_source_id": qa_id_to_source_id,
+        "conv_id_to_source_id": conv_id_to_source_id,
+        "topic_id_to_source_id": {},
+        "counts": {
+            "qa_pairs_input": len(qa_rows_list),
+            "conversation_stream_input": len(conv_rows_list),
+            "qa_id_resolved": len(qa_id_to_source_id),
+            "qa_id_unresolved": qa_id_unresolved,
+            "conv_id_resolved": conv_rows_resolved,
+            "conv_id_unresolved": conv_rows_seen - conv_rows_resolved,
+            "topic_id_resolved": 0,
+            "topic_id_unresolved": 0,
+            "qa_pairs_without_source_id":
+                sum(1 for r in qa_rows_list
+                    if isinstance(r, Mapping)
+                    and _extract_qa_pair_source_id(r) is None),
+            "qa_pairs_without_dia_id":
+                sum(1 for r in qa_rows_list
+                    if isinstance(r, Mapping)
+                    and not _extract_dia_ids_from_qa_row(r)),
+        },
+    }
+
+
+def map_candidate_ids(
+    candidate_ids: Iterable[str],
+    *,
+    qa_id_to_source_id: Mapping[str, str],
+    conv_id_to_source_id: Mapping[str, str] | None = None,
+    topic_id_to_source_id: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve a sequence of production-shaped candidate IDs.
+
+    Pure function: takes the maps built by
+    :func:`build_provenance_map` (or supplied directly by the
+    caller) and returns a dict with the resolved ``source_id``
+    per candidate plus an audit count of resolved / unresolved
+    entries.
+
+    Resolution is dispatched by candidate shape:
+
+      * ``qa_<digits>`` → looked up in ``qa_id_to_source_id``.
+      * ``topic_<digits>`` → looked up in ``topic_id_to_source_id``.
+      * ``<digits>`` → looked up in ``conv_id_to_source_id``.
+
+    Unknown shapes are passed through unchanged so the caller
+    can still see them in the audit log without losing the
+    input order. We never invent a fake ``source_id``.
+    """
+
+    conv_map: Mapping[str, str] = conv_id_to_source_id or {}
+    topic_map: Mapping[str, str] = topic_id_to_source_id or {}
+
+    resolved: dict[str, str] = {}
+    unresolved: list[str] = []
+    counts = {
+        "input": 0,
+        "resolved_qa": 0,
+        "resolved_conv": 0,
+        "resolved_topic": 0,
+        "unresolved": 0,
+        "unknown_shape": 0,
+    }
+    for cid in candidate_ids or ():
+        counts["input"] += 1
+        if not isinstance(cid, str) or not cid:
+            unresolved.append(str(cid))
+            counts["unresolved"] += 1
+            continue
+        m_qa = _QA_ID_RE.match(cid)
+        if m_qa:
+            sid = qa_id_to_source_id.get(cid)
+            if sid:
+                resolved[cid] = sid
+                counts["resolved_qa"] += 1
+            else:
+                unresolved.append(cid)
+                counts["unresolved"] += 1
+            continue
+        m_topic = _TOPIC_ID_RE.match(cid)
+        if m_topic:
+            sid = topic_map.get(cid)
+            if sid:
+                resolved[cid] = sid
+                counts["resolved_topic"] += 1
+            else:
+                unresolved.append(cid)
+                counts["unresolved"] += 1
+            continue
+        if cid.isdigit():
+            sid = conv_map.get(cid)
+            if sid:
+                resolved[cid] = sid
+                counts["resolved_conv"] += 1
+            else:
+                unresolved.append(cid)
+                counts["unresolved"] += 1
+            continue
+        # Unknown shape — pass through as "unresolved" so the
+        # auditor can detect non-canonical ids without losing
+        # the input.
+        unresolved.append(cid)
+        counts["unknown_shape"] += 1
+
+    return {
+        "resolved": resolved,
+        "unresolved": unresolved,
+        "counts": counts,
+    }
+
+
 __all__ = [
     "LabDSNRefused",
     "LabImportError",
     "LabSchemaError",
+    "LabVectorError",
     "bootstrap_schema",
+    "build_provenance_map",
     "import_rows",
+    "map_candidate_ids",
     "validate_disposable_dsn",
 ]

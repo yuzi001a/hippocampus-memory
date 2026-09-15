@@ -49,6 +49,8 @@ from typing import Any, Iterable, Optional, Sequence, TextIO
 from .adapter import (
     CaseRecord,
     DEFAULT_INCLUDE_FLAGS,
+    MODE_OBJECTIVE,
+    MODE_STRUCTURAL,
     build_effective_flags,
     get_prefetch_facade,
     resolve_trace_source_ids,
@@ -66,6 +68,8 @@ from .metrics import (
 __all__ = [
     "CaseRecord",
     "DEFAULT_INCLUDE_FLAGS",
+    "MODE_OBJECTIVE",
+    "MODE_STRUCTURAL",
     "RunnerConfig",
     "build_effective_flags",
     "resolve_trace_source_ids",
@@ -90,6 +94,15 @@ class RunnerConfig:
     The dataclass is the runner's single seam for all knobs:
 
       * ``mode`` — ``"full"`` only today; anything else raises.
+      * ``adapter_mode`` — forwarded to the adapter so the per-case
+        ``q_emb`` resolution policy is consistent end-to-end.
+        ``"structural"`` keeps the legacy single-``q_emb`` path;
+        ``"objective"`` enables the per-case
+        ``q_emb_by_case`` mapping with strict dimension and
+        non-zero validation.
+      * ``expected_dim`` — required when ``adapter_mode ==
+        "objective"``; the per-case ``q_emb`` vector MUST have
+        exactly this many elements.  Ignored in structural mode.
       * ``limit`` / ``max_chars`` — forwarded to the adapter.
       * ``hit_at_k_limit`` — used by :func:`run_cases_with_metrics`
         when the caller wants the metrics computed inline.
@@ -100,9 +113,15 @@ class RunnerConfig:
     """
 
     mode: str = "full"
+    adapter_mode: str = MODE_STRUCTURAL
+    expected_dim: Optional[int] = None
     limit: int = 5
     max_chars: Optional[int] = None
-    hit_at_k_limit: int = 30
+    # Hit@K is reported at the observable ranking depth
+    # (``ranking_limit``).  The default 5 mirrors the production
+    # facade default so the default ``run_cases_with_metrics``
+    # call never reports an N/A ``hit_at_k`` slot.
+    hit_at_k_limit: int = 5
 
     def __post_init__(self) -> None:
         # The mode flag is FROZEN today.  Future offline paths MUST
@@ -113,6 +132,17 @@ class RunnerConfig:
                 f"runner mode {self.mode!r} is not implemented; "
                 "only 'full' is supported today."
             )
+        if self.adapter_mode not in (MODE_STRUCTURAL, MODE_OBJECTIVE):
+            raise ValueError(
+                f"adapter_mode must be {MODE_STRUCTURAL!r} or "
+                f"{MODE_OBJECTIVE!r}; got {self.adapter_mode!r}"
+            )
+        if self.adapter_mode == MODE_OBJECTIVE:
+            if self.expected_dim is None or int(self.expected_dim) <= 0:
+                raise ValueError(
+                    "RunnerConfig with adapter_mode='objective' requires a "
+                    f"positive expected_dim (got {self.expected_dim!r})"
+                )
         if int(self.limit) <= 0:
             raise ValueError(f"limit must be > 0 (got {self.limit!r})")
         if int(self.hit_at_k_limit) <= 0:
@@ -132,9 +162,11 @@ def run_case(
     query_idx: int,
     question: str,
     gold_answer: str,
-    gold_evidence_dia_ids: Sequence[str],
-    gold_source_ids: Sequence[str],
+    gold_evidence_dia_ids: Sequence[str] = (),
+    gold_source_ids: Sequence[str] = (),
+    unmapped_dia_ids: Sequence[str] = (),
     unresolved_evidence: Sequence[str] = (),
+    gold_evidence: Any = None,
     category: str = "",
     limit: int = 5,
     max_chars: Optional[int] = None,
@@ -148,6 +180,9 @@ def run_case(
     is_new_session: bool = False,
     deadline: Any = None,
     pg_was_connected: bool = False,
+    adapter_mode: str = MODE_STRUCTURAL,
+    q_emb_by_case: Mapping[str, Sequence[float]] | None = None,
+    expected_dim: Optional[int] = None,
 ) -> CaseRecord:
     """Run one benchmark case via the adapter.
 
@@ -155,6 +190,16 @@ def run_case(
     runner keeps the function so external callers can use a
     single import path (``runner.run_case``) without depending on
     the adapter module.
+
+    The ``adapter_mode`` / ``q_emb_by_case`` / ``expected_dim``
+    trio is forwarded verbatim so the per-case ``q_emb`` policy
+    is consistent across the runner and adapter surfaces.  When
+    ``adapter_mode='objective'`` the caller MUST supply a
+    ``q_emb_by_case`` mapping containing an entry for every case
+    and a positive ``expected_dim``; missing keys or wrong
+    dimensions are surfaced by the adapter as
+    ``status='invalid_q_emb'`` records so a single degenerate
+    case cannot abort the whole batch.
     """
     return _adapter_run_case(
         sample_id=sample_id,
@@ -163,7 +208,9 @@ def run_case(
         gold_answer=gold_answer,
         gold_evidence_dia_ids=gold_evidence_dia_ids,
         gold_source_ids=gold_source_ids,
+        unmapped_dia_ids=unmapped_dia_ids,
         unresolved_evidence=unresolved_evidence,
+        gold_evidence=gold_evidence,
         category=category,
         limit=limit,
         max_chars=max_chars,
@@ -177,6 +224,9 @@ def run_case(
         is_new_session=is_new_session,
         deadline=deadline,
         pg_was_connected=pg_was_connected,
+        mode=adapter_mode,
+        q_emb_by_case=q_emb_by_case,
+        expected_dim=expected_dim,
     )
 
 
@@ -196,6 +246,9 @@ def run_cases(
     limit: int = 5,
     deadline: Any = None,
     mode: str = "full",
+    adapter_mode: str = MODE_STRUCTURAL,
+    q_emb_by_case: Mapping[str, Sequence[float]] | None = None,
+    expected_dim: Optional[int] = None,
 ) -> list[CaseRecord]:
     """Run a batch of cases via the adapter.
 
@@ -207,7 +260,10 @@ def run_cases(
       * ``answer`` — the gold answer text
       * ``gold_evidence_dia_ids`` — sequence of dia IDs
       * ``gold_source_ids`` — sequence of source IDs (mapped)
+      * ``unmapped_dia_ids`` — optional sequence of unmapped dia IDs
       * ``unresolved_evidence`` — optional sequence of unresolved dia IDs
+      * ``gold_evidence`` — optional GoldEvidence-shaped object used
+        to fill gaps when explicit fields are absent
       * ``category`` — optional LoCoMo category label
       * ``session_id`` / ``conversation_id`` — optional identifiers
 
@@ -219,8 +275,26 @@ def run_cases(
     Today only ``"full"`` is accepted; any other value raises
     :class:`NotImplementedError` so a future caller cannot
     silently degrade the run.
+
+    The per-case ``q_emb`` policy is determined by ``adapter_mode``:
+
+      * ``"structural"`` (default) — the ``q_emb`` vector is
+        forwarded to every case unchanged.
+      * ``"objective"`` — ``q_emb_by_case`` MUST contain an entry
+        for every case ``case_id`` and ``expected_dim`` MUST be
+        positive.  The runner stitches the per-case vector
+        deterministically (in the iteration order of ``cases``)
+        and the adapter validates dimension + non-zero per case.
+        A degenerate case is reported via
+        ``status='invalid_q_emb'`` instead of aborting the batch.
     """
-    rc = RunnerConfig(mode=mode, limit=limit, max_chars=max_chars)
+    rc = RunnerConfig(
+        mode=mode,
+        adapter_mode=adapter_mode,
+        expected_dim=expected_dim,
+        limit=limit,
+        max_chars=max_chars,
+    )
     out: list[CaseRecord] = []
     for case in cases:
         # Stable case_id from sample_id + query_idx — verify the
@@ -231,14 +305,45 @@ def run_cases(
                 "run_cases requires every case to carry "
                 "'sample_id' and 'query_idx'"
             )
+        case_sample_id = str(case["sample_id"])
+        case_query_idx = int(case["query_idx"])
+        case_id = f"{case_sample_id}|{case_query_idx}"
+        # Per-case q_emb: in objective mode the mapping is the
+        # canonical source of truth — the adapter reads it and
+        # fails closed on missing keys / wrong dimension.  In
+        # structural mode the runner still computes
+        # ``q_emb_by_case`` for the single-``q_emb`` case so the
+        # adapter can pass it through (a missing entry falls
+        # back to ``None`` which the legacy facade treats as
+        # "no vector").
+        per_case_emb: Sequence[float] | None
+        if rc.adapter_mode == MODE_OBJECTIVE:
+            # Per-case mapping is the canonical source in
+            # objective mode.  A missing key is a hard
+            # configuration error — raise ``ValueError`` here so
+            # the caller sees the exact case_id that broke the
+            # contract.  The adapter additionally validates
+            # dimension + non-zero (degenerate vectors) and
+            # returns an ``invalid_q_emb`` record; the post-append
+            # check below translates that into ``RuntimeError``.
+            if q_emb_by_case is None or case_id not in q_emb_by_case:
+                raise ValueError(
+                    f"runner.run_cases objective mode missing q_emb for "
+                    f"case_id={case_id!r} (q_emb_by_case must cover every case)"
+                )
+            per_case_emb = q_emb_by_case[case_id]
+        else:
+            per_case_emb = q_emb
         out.append(run_case(
-            sample_id=str(case["sample_id"]),
-            query_idx=int(case["query_idx"]),
+            sample_id=case_sample_id,
+            query_idx=case_query_idx,
             question=str(case.get("question", "") or ""),
             gold_answer=str(case.get("answer", "") or ""),
             gold_evidence_dia_ids=tuple(case.get("gold_evidence_dia_ids", ()) or ()),
             gold_source_ids=tuple(case.get("gold_source_ids", ()) or ()),
+            unmapped_dia_ids=tuple(case.get("unmapped_dia_ids", ()) or ()),
             unresolved_evidence=tuple(case.get("unresolved_evidence", ()) or ()),
+            gold_evidence=case.get("gold_evidence"),
             category=str(case.get("category", "") or ""),
             limit=rc.limit,
             max_chars=rc.max_chars,
@@ -246,10 +351,26 @@ def run_cases(
             conversation_id=case.get("conversation_id"),
             config=config,
             pg=pg,
-            q_emb=q_emb,
+            q_emb=per_case_emb,
             core=core,
             deadline=deadline,
+            adapter_mode=rc.adapter_mode,
+            q_emb_by_case=q_emb_by_case,
+            expected_dim=rc.expected_dim,
         ))
+        # Objective mode is fail-closed: a degenerate per-case
+        # vector (missing key, wrong dimension, all-zero) MUST
+        # abort the batch rather than silently producing a record
+        # that downstream consumers might score as a normal hit.
+        if (
+            rc.adapter_mode == MODE_OBJECTIVE
+            and out[-1].status == "invalid_q_emb"
+        ):
+            raise RuntimeError(
+                f"runner.run_cases aborted in objective mode: case_id="
+                f"{out[-1].case_id!r} produced status='invalid_q_emb' "
+                f"({out[-1].error!r})"
+            )
     return out
 
 
@@ -264,6 +385,9 @@ def run_cases_with_metrics(
     limit: int = 5,
     deadline: Any = None,
     mode: str = "full",
+    adapter_mode: str = MODE_STRUCTURAL,
+    q_emb_by_case: Mapping[str, Sequence[float]] | None = None,
+    expected_dim: Optional[int] = None,
     engine_invocations: int = -1,
 ) -> tuple[list[CaseRecord], MetricSnapshot]:
     """Run a batch of cases and return both records and metrics.
@@ -272,6 +396,10 @@ def run_cases_with_metrics(
     detail, the metrics are the aggregate headline.  Both are
     returned in the same call so the caller does not have to
     re-run the engine to compute metrics.
+
+    The ``adapter_mode`` / ``q_emb_by_case`` / ``expected_dim``
+    trio is forwarded to :func:`run_cases` so the per-case
+    ``q_emb`` policy is identical to the non-metrics batch path.
     """
     records = run_cases(
         cases,
@@ -283,10 +411,27 @@ def run_cases_with_metrics(
         limit=limit,
         deadline=deadline,
         mode=mode,
+        adapter_mode=adapter_mode,
+        q_emb_by_case=q_emb_by_case,
+        expected_dim=expected_dim,
+    )
+    # Resolve the runner config once so we honor the SAME
+    # ``hit_at_k_limit`` validation ``run_cases`` already applied
+    # (mode/limit/objectivity gates).  ``ranking_limit`` is the
+    # actual facade ``limit`` the adapter just used — this keeps
+    # the metric-K truth contract honest: Hit@K is never reported
+    # beyond the depth the adapter actually surfaced.
+    rc_for_metrics = RunnerConfig(
+        mode=mode,
+        adapter_mode=adapter_mode,
+        expected_dim=expected_dim,
+        limit=limit,
+        max_chars=max_chars,
     )
     snap = compute_metrics(
         records,
-        hit_at_k_limit=RunnerConfig(mode=mode).hit_at_k_limit,
+        hit_at_k_limit=rc_for_metrics.hit_at_k_limit,
+        ranking_limit=int(rc_for_metrics.limit),
         engine_invocations=engine_invocations,
     )
     return records, snap

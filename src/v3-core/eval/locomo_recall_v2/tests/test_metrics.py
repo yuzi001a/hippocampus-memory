@@ -67,6 +67,7 @@ def _case(
     answer: str = "A.",
     gold_evidence_dia_ids: tuple[str, ...] = (),
     gold_source_ids: tuple[str, ...] = (),
+    unmapped_dia_ids: tuple[str, ...] = (),
     unresolved_evidence: tuple[str, ...] = (),
     ranked_source_ids: tuple[str, ...] = (),
     selected_source_ids: tuple[str, ...] = (),
@@ -94,6 +95,7 @@ def _case(
         answer: str
         gold_evidence_dia_ids: tuple[str, ...]
         gold_source_ids: tuple[str, ...]
+        unmapped_dia_ids: tuple[str, ...]
         unresolved_evidence: tuple[str, ...]
         context_block_length: int
         trace_id: str
@@ -116,6 +118,7 @@ def _case(
         answer=answer,
         gold_evidence_dia_ids=gold_evidence_dia_ids,
         gold_source_ids=gold_source_ids,
+        unmapped_dia_ids=unmapped_dia_ids,
         unresolved_evidence=unresolved_evidence,
         context_block_length=len(context_block),
         trace_id=trace_id,
@@ -319,25 +322,40 @@ def test_metric_snapshot_to_dict_round_trip():
 
 
 def test_unmapped_count_separate_from_mapped():
-    """Unmapped gold dia IDs contribute to unmapped_count, NOT to
-    mapped_gold_count.  Cases with mapped-only evidence get hit
-    scoring; cases with unmapped-only evidence skip hit scoring.
+    """Unmapped gold dia IDs contribute to unmapped_gold_count,
+    NOT to mapped_gold_count.  Cases with mapped-only evidence
+    get hit scoring; cases with unmapped-only evidence skip hit
+    scoring.  Unresolved evidence (compound / malformed strings)
+    is reported separately under unresolved_gold_count.
     """
     _ensure_module()
     cases = [
+        # Case A: unmapped-only evidence — no mapped, but two
+        # unmapped dia IDs that survived resolve_gold_evidence
+        # without finding a source_id.
         _case(case_id="u|0",
-              gold_source_ids=(),  # no mapped evidence
-              unresolved_evidence=("u1", "u2"),
+              gold_source_ids=(),
+              unmapped_dia_ids=("u1", "u2"),
+              unresolved_evidence=(),
               ranked_source_ids=("a", "b")),
+        # Case B: unresolved-only — the legacy "compound / malformed
+        # string" category.  Never contributes to hit scoring.
+        _case(case_id="r|0",
+              gold_source_ids=(),
+              unmapped_dia_ids=(),
+              unresolved_evidence=("bad,entry", "also bad"),
+              ranked_source_ids=()),
     ]
     snap = metrics_module.compute_metrics(cases)
+    # Headline denominator (mapped) is zero → no_mapped_evidence.
     assert snap.mapped_gold_count == 0
     assert snap.unmapped_gold_count == 2
+    assert snap.unresolved_gold_count == 2
     assert snap.questions_with_mapped_evidence == 0
     assert snap.questions_with_unmapped_evidence == 1
+    assert snap.questions_with_unresolved_evidence == 1
     assert snap.status == "no_mapped_evidence"
-    # Hit/MRR stay zero — the only gold dia IDs are unmapped, so
-    # there is nothing to score against.
+    # Hit/MRR stay zero — there is no mapped gold to score against.
     assert snap.hit_at_1 == 0.0
     assert snap.mrr == 0.0
 
@@ -362,3 +380,316 @@ def test_injection_outcomes_counted_in_audit():
     assert audit.selected == 2
     # candidates is sourced from candidate_source_ids.
     assert audit.candidates == 2
+
+
+# ---------------------------------------------------------------------------
+# Metric K truth — explicit tests for the new contract
+# ---------------------------------------------------------------------------
+
+
+def test_default_shape_reports_hit_at_5_equals_hit_at_k():
+    """The default production shape (``ranking_limit=5`` and
+    ``hit_at_k_limit=5``) reports Hit@5 as the ``hit_at_k``
+    slot.  This is the deployment-default invariant.
+    """
+    _ensure_module()
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              ranked_source_ids=("g", "a", "b", "c", "d")),
+    ]
+    snap = metrics_module.compute_metrics(cases)
+    assert snap.ranking_limit == 5
+    assert snap.hit_at_k_k == 5
+    assert snap.hit_at_k_status == "ok"
+    assert snap.hit_at_k == snap.hit_at_5
+    assert snap.hit_at_1 == 1.0
+    assert snap.hit_at_5 == 1.0
+
+
+def test_hit_at_k_k_above_ranking_limit_is_na_not_fabricated():
+    """When the caller asks for K > ranking_limit, the
+    ``hit_at_k`` slot is honestly N/A (None in JSON, status
+    "n_a") — never a fabricated fraction over a shorter
+    surface.
+    """
+    _ensure_module()
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              ranked_source_ids=("g", "a", "b", "c", "d")),
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=30, ranking_limit=5,
+    )
+    assert snap.ranking_limit == 5
+    assert snap.hit_at_k_k == 30
+    assert snap.hit_at_k_status == "n_a"
+    # to_dict serialises unavailable metric as None, never NaN.
+    blob = snap.to_dict()
+    assert blob["hit_at_k"] is None
+    assert blob["hit_at_k_status"] == "n_a"
+    assert blob["hit_at_k_k"] == 30
+    assert blob["ranking_limit"] == 5
+    # Hit@1 / Hit@5 stay "ok" because the deployment did surface
+    # up to 5 ranked candidates.
+    assert blob["hit_at_1"] == 1.0
+    assert blob["hit_at_1_status"] == "ok"
+    assert blob["hit_at_5"] == 1.0
+    assert blob["hit_at_5_status"] == "ok"
+
+
+def test_hit_at_5_is_na_when_ranking_limit_is_below_5():
+    """When the observable ranking depth is shallower than 5,
+    the Hit@5 slot is N/A — it cannot compute "the first 5 of a
+    shorter surface" because the surface is shorter.
+    """
+    _ensure_module()
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              ranked_source_ids=("g", "a", "b")),  # depth 3
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=3, ranking_limit=3,
+    )
+    assert snap.ranking_limit == 3
+    # Hit@1 still works (K=1 <= depth 3).
+    assert snap.hit_at_1_status == "ok"
+    assert snap.hit_at_1 == 1.0
+    # Hit@5 is N/A — the deployment did not surface 5 docs.
+    assert snap.hit_at_5_status == "n_a"
+    blob = snap.to_dict()
+    assert blob["hit_at_5"] is None
+    assert blob["hit_at_5_status"] == "n_a"
+    # Hit@K (configured K=3) is OK.
+    assert blob["hit_at_k"] == 1.0
+    assert blob["hit_at_k_status"] == "ok"
+    assert blob["hit_at_k_k"] == 3
+
+
+def test_hit_at_1_is_na_when_ranking_limit_is_zero():
+    """Edge case: a depth of zero means even Hit@1 is N/A."""
+    _ensure_module()
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              ranked_source_ids=()),
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=5, ranking_limit=0,
+    )
+    assert snap.ranking_limit == 0
+    assert snap.hit_at_1_status == "n_a"
+    assert snap.hit_at_5_status == "n_a"
+    assert snap.hit_at_k_status == "n_a"
+    blob = snap.to_dict()
+    assert blob["hit_at_1"] is None
+    assert blob["hit_at_5"] is None
+    assert blob["hit_at_k"] is None
+
+
+def test_to_dict_round_trip_avoids_nan_for_na_slots():
+    """JSON has no standard NaN literal; N/A slots surface as
+    ``None`` so a downstream JSON consumer cannot trip on the
+    non-standard literal.
+    """
+    _ensure_module()
+    import json
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              ranked_source_ids=("g", "a")),
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=30, ranking_limit=5,
+    )
+    blob = snap.to_dict()
+    # Strict JSON: NaN is not allowed; the standard json module
+    # would raise.  allow_nan=False catches any leak.
+    encoded = json.dumps(blob, allow_nan=False, sort_keys=True)
+    decoded = json.loads(encoded)
+    assert decoded["hit_at_k"] is None
+    assert decoded["hit_at_k_status"] == "n_a"
+
+
+def test_mrr_observed_over_actual_ranking_depth():
+    """MRR is always at the observed ranking depth — when
+    K > ranking_limit, MRR is computed at ranking_limit (so a
+    baseline remains comparable), and ``mrr_k`` reflects the
+    depth used.
+    """
+    _ensure_module()
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              # g is at rank 3 within a 5-deep surface.
+              ranked_source_ids=("a", "b", "g", "c", "d")),
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=30, ranking_limit=5,
+    )
+    # MRR is 1/3 — the observed rank — even though hit_at_k_k=30.
+    assert snap.mrr == pytest.approx(1.0 / 3.0)
+    assert snap.mrr_k == 5
+    # mean_relevant_rank also reflects observed rank.
+    assert snap.mean_relevant_rank == pytest.approx(3.0)
+
+
+def test_three_gold_evidence_states_reported_separately():
+    """``summarise_gold_evidence_extended`` returns three
+    distinct counts so callers can audit evidence mapping
+    without rerunning the dataset loader.
+    """
+    _ensure_module()
+    cases = [
+        # All three states represented in one row.
+        _case(case_id="s|0",
+              gold_source_ids=("g1", "g2"),        # 2 mapped
+              unmapped_dia_ids=("u1",),            # 1 unmapped
+              unresolved_evidence=("bad,entry",)),  # 1 unresolved
+        _case(case_id="s|1",
+              gold_source_ids=("g3",),
+              unmapped_dia_ids=(),
+              unresolved_evidence=()),
+    ]
+    mapped, unmapped, unresolved = (
+        metrics_module.summarise_gold_evidence_extended(cases)
+    )
+    assert mapped == 3
+    assert unmapped == 1
+    assert unresolved == 1
+
+
+def test_metric_snapshot_records_ranking_limit_and_hit_at_k_k():
+    """``ranking_limit`` and ``hit_at_k_k`` MUST be recorded on
+    the snapshot so an audit can verify the metric K truth
+    contract after the fact.
+    """
+    _ensure_module()
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              ranked_source_ids=("g", "a", "b", "c", "d")),
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=10, ranking_limit=5,
+    )
+    blob = snap.to_dict()
+    assert blob["ranking_limit"] == 5
+    assert blob["hit_at_k_k"] == 10
+    assert blob["hit_at_k_status"] == "n_a"
+    assert blob["hit_at_k"] is None
+    # Hit@1 / Hit@5 are still real (depth 5 surfaces them).
+    assert blob["hit_at_1_status"] == "ok"
+    assert blob["hit_at_5_status"] == "ok"
+    assert blob["hit_at_1"] == 1.0
+    assert blob["hit_at_5"] == 1.0
+
+
+def test_to_dict_full_json_safe_for_all_na_slots():
+    """Comprehensive JSON-safety check: when ALL hit slots are
+    N/A, the entire ``to_dict()`` payload must be
+    ``json.dumps(allow_nan=False)`` clean — no NaN literal can
+    leak through ``hit_at_1`` / ``hit_at_5`` / ``hit_at_k`` /
+    per_category / mrr / mean_relevant_rank / coverage.  This
+    pins the contract that every N/A hit slot serializes JSON-
+    safe ``None`` with a sibling ``status`` field.
+    """
+    _ensure_module()
+    import json
+    # depth 0 → every K slot is N/A, but cases still surface
+    # ranked_source_ids (so mrr/mean_relevant_rank are well-
+    # defined finite numbers, never NaN).
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              ranked_source_ids=()),
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=5, ranking_limit=0,
+    )
+    blob = snap.to_dict()
+    # Strict JSON: NaN is not allowed; allow_nan=False catches leaks.
+    encoded = json.dumps(blob, allow_nan=False, sort_keys=True)
+    decoded = json.loads(encoded)
+    # Every hit slot is N/A → None in JSON.
+    assert decoded["hit_at_1"] is None
+    assert decoded["hit_at_5"] is None
+    assert decoded["hit_at_k"] is None
+    assert decoded["hit_at_1_status"] == "n_a"
+    assert decoded["hit_at_5_status"] == "n_a"
+    assert decoded["hit_at_k_status"] == "n_a"
+    # mrr / mean_relevant_rank are finite numbers (no NaN leak).
+    assert isinstance(decoded['mrr'], float)
+    assert decoded['mrr'] == 0.0
+    assert isinstance(decoded['mean_relevant_rank'], float)
+    assert decoded['mean_relevant_rank'] == 0.0
+    # Per-category payload also JSON-safe — every hit slot is None.
+    # ``to_dict()`` returns per_category as a list of dicts (one
+    # per category, 'category' key inside the dict), so iterate
+    # accordingly.
+    for vals in decoded['per_category']:
+        cat = vals.get("category")
+        for slot in ("hit_at_1", "hit_at_5", "hit_at_k"):
+            assert vals[slot] is None, f"per_category[{cat!r}].{slot} leaked non-None"
+            assert vals[f"{slot}_status"] == "n_a"
+
+
+def test_mrr_and_mean_relevant_rank_clamped_to_observed_k():
+    """Per-case MRR and the headline ``mean_relevant_rank`` must
+    never report a value derived from a rank beyond the observed
+    ranking depth.  When the relevant doc is at rank 7 but the
+    facade only surfaced 5 docs, the per-case MRR is 0.0 and
+    ``mean_relevant_rank`` is reported over OBSERVED ranks only
+    (the doc never scored → not in the mean).
+    """
+    _ensure_module()
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g",),
+              # g is at rank 7 — beyond observable depth 5.
+              ranked_source_ids=("a", "b", "c", "d", "e", "f", "g"),
+              candidate_source_ids=("a", "b", "c", "d", "e", "f", "g")),
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=5, ranking_limit=5,
+    )
+    # Per-case: relevant doc is beyond observed depth (rank 7 > 5)
+    # → MRR is 0.0, NOT 1/7.
+    assert snap.mrr == 0.0
+    assert snap.mrr_k == 5
+    # mean_relevant_rank is 0.0 when no case has a relevant rank
+    # within the observable depth.
+    assert snap.mean_relevant_rank == 0.0
+    # Hit@1 / Hit@5 stay at 0.0 (no hit in the top 5).
+    assert snap.hit_at_1 == 0.0
+    assert snap.hit_at_5 == 0.0
+
+
+def test_mean_relevant_rank_only_over_observed_ranks():
+    """``mean_relevant_rank`` only averages ranks that fall
+    WITHIN the observable ranking depth.  Mixed input: case 0
+    hits at rank 1 (within depth 5), case 1 hits at rank 8
+    (beyond depth 5 → ignored from the mean).
+    """
+    _ensure_module()
+    cases = [
+        _case(case_id="s|0",
+              gold_source_ids=("g1",),
+              ranked_source_ids=("g1", "a", "b", "c", "d")),
+        _case(case_id="s|1",
+              gold_source_ids=("g2",),
+              ranked_source_ids=("a", "b", "c", "d", "e", "f", "g", "g2")),
+    ]
+    snap = metrics_module.compute_metrics(
+        cases, hit_at_k_limit=5, ranking_limit=5,
+    )
+    # Case 0 contributes rank 1; case 1's rank 8 is beyond
+    # observable depth and excluded from the mean.  Mean is
+    # over only observed ranks → 1.0 (single value), not
+    # (1+8)/2 = 4.5.
+    assert snap.mean_relevant_rank == pytest.approx(1.0)
+    # Per-case MRR: case 0 → 1.0, case 1 → 0.0 (rank 8 > 5).
+    # Mean = 0.5.
+    assert snap.mrr == pytest.approx(0.5)
