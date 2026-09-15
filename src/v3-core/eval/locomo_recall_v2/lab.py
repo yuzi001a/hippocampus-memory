@@ -338,7 +338,364 @@ CREATE INDEX IF NOT EXISTS eval_queries_sample_idx
 """
 
 
-def bootstrap_schema(conn: Any, repo_root: str) -> None:
+# ---------------------------------------------------------------------------
+# IVFFlat index definitions — evaluator-only knob for G6C-B0
+# ---------------------------------------------------------------------------
+#
+# All seven canonical IVFFlat indexes that ship in
+# ``alpha_bootstrap.sql`` / ``explicit_memories.sql`` are listed
+# here as a single source of truth. The list MUST stay in lock-step
+# with the schema DDL: a divergence here would silently invalidate
+# the after-import reproducibility contract (Mode C would either
+# miss an index or apply the wrong one).
+#
+# Indexes:
+#   * explicit_memories_embedding_ivfflat  (explicit_memories.embedding)
+#   * qa_pairs_embedding_ivfflat           (qa_pairs.embedding)
+#   * conversation_stream_embedding_ivfflat (conversation_stream.embedding)
+#   * topics_embedding_ivfflat             (topics.embedding)
+#   * topic_entries_embedding_ivfflat      (topic_entries.embedding)
+#   * observation_notes_embedding_ivfflat  (observation_notes.embedding)
+#   * yin_paragraphs_embedding_ivfflat     (yin_paragraphs.embedding)
+#
+# Each entry preserves the canonical
+# ``USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)``
+# shape verbatim. The helper :func:`create_vector_indexes` re-applies
+# this list; the helper :func:`_compose_bootstrap_sql_with_phase`
+# strips them when the caller asked for ``after_import``. Both
+# helpers share the same definitions so the deferred re-creation
+# is byte-identical to the bootstrap-time creation.
+_VECTOR_INDEX_DDL = (
+    """
+CREATE INDEX IF NOT EXISTS qa_pairs_embedding_ivfflat
+    ON public.qa_pairs
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+""",
+    """
+CREATE INDEX IF NOT EXISTS conversation_stream_embedding_ivfflat
+    ON public.conversation_stream
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+""",
+    """
+CREATE INDEX IF NOT EXISTS topics_embedding_ivfflat
+    ON public.topics
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+""",
+    """
+CREATE INDEX IF NOT EXISTS explicit_memories_embedding_ivfflat
+    ON public.explicit_memories
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+""",
+    """
+CREATE INDEX IF NOT EXISTS topic_entries_embedding_ivfflat
+    ON public.topic_entries
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+""",
+    """
+CREATE INDEX IF NOT EXISTS observation_notes_embedding_ivfflat
+    ON public.observation_notes
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+""",
+    """
+CREATE INDEX IF NOT EXISTS yin_paragraphs_embedding_ivfflat
+    ON public.yin_paragraphs
+    USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+""",
+)
+
+# Canonical phase values for the ``index_build_phase`` knob.
+INDEX_BUILD_PHASE_BOOTSTRAP = "bootstrap_before_import"
+INDEX_BUILD_PHASE_AFTER_IMPORT = "after_import"
+ALLOWED_INDEX_BUILD_PHASES: frozenset[str] = frozenset({
+    INDEX_BUILD_PHASE_BOOTSTRAP,
+    INDEX_BUILD_PHASE_AFTER_IMPORT,
+})
+
+
+def _strip_ivfflat_from_sql(sql: str) -> str:
+    """Remove every IVFFlat ``CREATE INDEX`` statement from ``sql``.
+
+    The real-world shape is multi-line::
+
+        CREATE INDEX IF NOT EXISTS qa_pairs_embedding_ivfflat
+            ON public.qa_pairs
+            USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100);
+
+    so we cannot rely on the first line carrying ``USING
+    ivfflat`` — the keyword can sit on any continuation line of
+    the same DDL block.  The block boundaries are detected
+    by:
+
+      * a line whose stripped form starts with ``CREATE INDEX``
+        opens a new block;
+      * the block closes on the first standalone ``;`` (the
+        PG DDL terminator) — a continuation line may NOT close
+        the block because ``ON public.qa_pairs`` is itself a
+        continuation;
+      * if ANY line inside the block contains ``ivfflat`` (case
+        insensitive) the entire block is dropped; otherwise the
+        block is kept verbatim.
+
+    Used by :func:`_compose_bootstrap_sql_with_phase` when the
+    caller asks for ``index_build_phase == "after_import"`` —
+    the bootstrap body must drop the index DDL so the import
+    path writes rows into a heap that is rebuilt AFTER import.
+    """
+
+    out: list[str] = []
+    block: list[str] | None = None
+    for line in sql.splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        if block is None:
+            if upper.startswith("CREATE INDEX"):
+                # Open a new block; we do NOT commit to keeping
+                # it until we have walked every line up to the
+                # terminating ``;``.
+                block = [line]
+                if ";" in stripped:
+                    _flush_block(out, block)
+                    block = None
+                continue
+            out.append(line)
+            continue
+        # Inside an open ``CREATE INDEX`` block.
+        block.append(line)
+        if ";" in stripped:
+            _flush_block(out, block)
+            block = None
+    # A trailing block without a terminator is malformed SQL,
+    # but we keep the parser permissive and surface it as-is so
+    # the real driver surfaces the syntax error (the alternative
+    # is silently swallowing DDL, which is the bug we are
+    # guarding against).
+    if block is not None:
+        out.extend(block)
+    return "\n".join(out)
+
+
+def _flush_block(out: list[str], block: list[str]) -> None:
+    """Append ``block`` to ``out`` iff it does not contain IVFFlat.
+
+    Helper for :func:`_strip_ivfflat_from_sql`.  The decision
+    uses a case-insensitive substring match against the joined
+    block — cheap, and correct for the canonical
+    ``USING ivfflat`` shape that lives somewhere in the middle
+    of the block.
+    """
+
+    joined = "\n".join(block)
+    if "ivfflat" in joined.lower():
+        # Drop the entire block.  We do NOT emit a sentinel
+        # comment because downstream SQL must stay byte-stable
+        # for any non-IVFFlat auditors.
+        return
+    out.extend(block)
+
+
+def _compose_bootstrap_sql_with_phase(
+    repo_root: str, *, index_build_phase: str = INDEX_BUILD_PHASE_BOOTSTRAP
+) -> str:
+    """Compose the bootstrap SQL with the requested index-build phase.
+
+    When ``index_build_phase == "bootstrap_before_import"`` (default)
+    the composed SQL is identical to :func:`_compose_bootstrap_sql`
+    — the IVFFlat indexes ride along inside the bootstrap
+    transaction.
+
+    When ``index_build_phase == "after_import"`` the IVFFlat
+    ``CREATE INDEX`` statements are stripped from the bootstrap
+    body. The caller MUST then invoke :func:`create_vector_indexes`
+    after the import step. Stripping here (instead of skipping
+    the indexes entirely) keeps the bootstrap shape byte-stable
+    for any other DDL auditors.
+    """
+
+    if index_build_phase not in ALLOWED_INDEX_BUILD_PHASES:
+        raise LabSchemaError(
+            f"lab: index_build_phase must be one of "
+            f"{sorted(ALLOWED_INDEX_BUILD_PHASES)!r}; "
+            f"got {index_build_phase!r}"
+        )
+    sql = _compose_bootstrap_sql(repo_root)
+    if index_build_phase == INDEX_BUILD_PHASE_BOOTSTRAP:
+        return sql
+    # after_import path: strip every IVFFlat CREATE INDEX block.
+    return _strip_ivfflat_from_sql(sql)
+
+
+def create_vector_indexes(conn: Any) -> dict[str, str]:
+    """Re-apply the canonical IVFFlat indexes to ``conn``.
+
+    Idempotent. Each statement uses ``CREATE INDEX IF NOT EXISTS``,
+    so a repeat call is a no-op when the indexes already exist.
+
+    Returns a mapping of ``{table_name: index_name}`` for every
+    index that was attempted — the caller can diff the returned
+    map against the schema's ``pg_indexes`` view to confirm the
+    indexes are now present.
+
+    Raises :class:`LabSchemaError` when ``conn.cursor()`` or the
+    individual ``CREATE INDEX`` statements fail. All four
+    statements run inside a single transaction; a failure on any
+    one of them rolls the entire batch back so the schema is
+    never left half-built.
+    """
+
+    try:
+        cur = conn.cursor()
+    except Exception as exc:
+        raise LabSchemaError(
+            f"lab: conn.cursor() failed during create_vector_indexes: "
+            f"{type(exc).__name__} (message suppressed)"
+        ) from exc
+
+    applied: dict[str, str] = {}
+    try:
+        for stmt in _VECTOR_INDEX_DDL:
+            try:
+                cur.execute(stmt)
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise LabSchemaError(
+                    f"lab: create_vector_indexes failed: "
+                    f"{type(exc).__name__} (message suppressed)"
+                ) from exc
+            # Parse ``CREATE INDEX [IF NOT EXISTS] <name> ON <table>``
+            # back out of the statement so the caller can confirm
+            # what was applied. We do NOT issue a SELECT against
+            # ``pg_indexes`` here — keeping this function pure
+            # SQL-emission makes it testable against a fake
+            # connection without any PG introspection.
+            upper = stmt.upper()
+            idx_marker = upper.find("INDEX IF NOT EXISTS")
+            if idx_marker < 0:
+                idx_marker = upper.find("INDEX")
+            if idx_marker >= 0:
+                after = stmt[idx_marker:].split("IF NOT EXISTS", 1)
+                after = after[-1]
+                tail = after.strip()
+                name = tail.split()[0] if tail else ""
+                tail_upper = tail.upper()
+                on_pos = tail_upper.find(" ON ")
+                if name and on_pos > 0:
+                    table_part = tail[on_pos + len(" ON "):].strip()
+                    table_name = table_part.split(".", 1)[-1].split()[0].strip()
+                    if name and table_name:
+                        applied[table_name] = name
+        try:
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise LabSchemaError(
+                f"lab: create_vector_indexes commit failed: "
+                f"{type(exc).__name__} (message suppressed)"
+            ) from exc
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return applied
+
+
+def analyze_tables(
+    conn: Any,
+    *,
+    tables: tuple[str, ...] = (
+        "qa_pairs",
+        "conversation_stream",
+        "topics",
+        "explicit_memories",
+        "topic_entries",
+        "observation_notes",
+        "yin_paragraphs",
+    ),
+) -> dict[str, str]:
+    """Run ``ANALYZE`` on the canonical corpus tables.
+
+    Used by the G6C-B0 Mode B / Mode C contract: an explicit
+    ``ANALYZE`` is required after the import step (Mode B) and
+    again after the deferred IVFFlat rebuild (Mode C) so the
+    planner has fresh statistics before the recall engine runs.
+
+    The function runs every ``ANALYZE`` inside a single
+    transaction; a failure on any one of them rolls the whole
+    batch back. ``ANALYZE`` itself is idempotent — re-running
+    it is a no-op in cost terms beyond the statistics refresh.
+
+    Returns a ``{table_name: "ok"}`` mapping on success. Raises
+    :class:`LabSchemaError` on any driver / cursor failure; the
+    caller must NOT swallow the exception — without fresh
+    statistics the planner's row-count estimates are stale and
+    the run is no longer deterministic across ``search_mode``.
+    """
+
+    if not tables:
+        return {}
+    try:
+        cur = conn.cursor()
+    except Exception as exc:
+        raise LabSchemaError(
+            f"lab: conn.cursor() failed during analyze_tables: "
+            f"{type(exc).__name__} (message suppressed)"
+        ) from exc
+
+    applied: dict[str, str] = {}
+    try:
+        for table in tables:
+            stmt = f"ANALYZE public.{table}"
+            try:
+                cur.execute(stmt)
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise LabSchemaError(
+                    f"lab: ANALYZE failed for {table!r}: "
+                    f"{type(exc).__name__} (message suppressed)"
+                ) from exc
+            applied[str(table)] = "ok"
+        try:
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise LabSchemaError(
+                f"lab: ANALYZE commit failed: "
+                f"{type(exc).__name__} (message suppressed)"
+            ) from exc
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return applied
+
+
+def bootstrap_schema(
+    conn: Any,
+    repo_root: str,
+    *,
+    index_build_phase: str = INDEX_BUILD_PHASE_BOOTSTRAP,
+) -> None:
     """Apply the public alpha bootstrap + explicit_memories to ``conn``.
 
     The composed SQL is validated statically (no destructive
@@ -346,11 +703,23 @@ def bootstrap_schema(conn: Any, repo_root: str) -> None:
     in a single transaction; on any failure we roll back and
     raise :class:`LabSchemaError`.
 
+    The ``index_build_phase`` knob (G6C-B0) selects whether the
+    canonical IVFFlat ``CREATE INDEX`` statements ride along
+    inside the bootstrap transaction (``"bootstrap_before_import"``
+    — the historical default, byte-identical to the legacy
+    behaviour) or are deferred until after import
+    (``"after_import"``). When deferred, the caller MUST invoke
+    :func:`create_vector_indexes` after :func:`import_rows`
+    returns and then :func:`analyze_tables` so the planner
+    sees fresh statistics before the recall engine runs.
+
     psycopg2 is imported inside the function so the package
     remains importable in environments without psycopg2.
     """
 
-    sql = _compose_bootstrap_sql(repo_root)
+    sql = _compose_bootstrap_sql_with_phase(
+        repo_root, index_build_phase=index_build_phase
+    )
 
     # Use the connection's own cursor. We do NOT import psycopg2
     # at module level so the lab stays dependency-light.

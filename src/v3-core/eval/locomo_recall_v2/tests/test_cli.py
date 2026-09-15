@@ -973,7 +973,31 @@ class TestRunSemanticIntegration:
         locomo_path, digest, cfg_path = self._write_fixture(tmp_path)
         from eval.locomo_recall_v2 import cli as _cli
         # Stub the lab connect so no real DSN is opened.
-        monkeypatch.setattr(_cli, "_connect_lab", lambda dsn: None)
+        # The G6C-B0 disposable-DSN preflight now also calls
+        # ``_connect_lab(dsn)``; return a stub whose cursor
+        # reports ``ivfflat.probes`` as REGISTERED so the
+        # preflight is a no-op (default ANN policy = no
+        # explicit probes, so the AVAILABLE verdict does
+        # not refuse).
+        class _StubCursor:
+            def __init__(self):
+                self._pending = None
+            def execute(self, sql, params=None):
+                # Pretend pg_settings has a row for
+                # ``ivfflat.probes`` — registered.
+                self._pending = (1,)
+            def fetchone(self):
+                return self._pending
+            def close(self):
+                pass
+
+        class _StubConn:
+            def cursor(self_inner):
+                return _StubCursor()
+            def close(self_inner):
+                pass
+
+        monkeypatch.setattr(_cli, "_connect_lab", lambda dsn: _StubConn())
         # Stub the lab bootstrap + import_rows so no PG is touched.
         from eval.locomo_recall_v2 import lab as _lab
         monkeypatch.setattr(_lab, "bootstrap_schema", lambda *a, **kw: None)
@@ -1006,6 +1030,262 @@ class TestRunSemanticIntegration:
             "--mode", "semantic",
         ])
         assert rc == cli.EXIT_INTEGRATION_GAP
+
+    def test_search_mode_exact_with_explicit_probes_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """``--search-mode exact --ivfflat-probes N`` is a
+        contradictory contract — exact mode MUST NOT pin planner
+        probe decisions. The CLI MUST reject this combination
+        BEFORE any DB bootstrap / import_rows / corpus-vector
+        prep so the disposable lab tree is never touched by a
+        run that would fail closed anyway. Without this guard the
+        contradiction only surfaces at ``apply_search_protocol``
+        lease-verify time, after bootstrap has run.
+        """
+
+        locomo_path, digest, cfg_path = self._write_fixture(tmp_path)
+
+        # Sentinel counters — if either fires the policy guard
+        # did NOT close the seam early enough and bootstrap /
+        # import_rows was reached on a contradictory policy.
+        from eval.locomo_recall_v2 import cli as _cli
+        from eval.locomo_recall_v2 import lab as _lab
+        bootstrap_calls: list[bool] = []
+        import_calls: list[bool] = []
+
+        def _boom_bootstrap(*a, **kw):
+            bootstrap_calls.append(True)
+            raise AssertionError(
+                "bootstrap_schema reached on contradictory "
+                "exact+probes policy — policy guard is too late"
+            )
+
+        def _boom_import_rows(*a, **kw):
+            import_calls.append(True)
+            raise AssertionError(
+                "import_rows reached on contradictory "
+                "exact+probes policy — policy guard is too late"
+            )
+
+        monkeypatch.setattr(_cli, "_connect_lab", lambda dsn: None)
+        monkeypatch.setattr(_lab, "bootstrap_schema", _boom_bootstrap)
+        monkeypatch.setattr(_lab, "import_rows", _boom_import_rows)
+
+        rc = cli.main([
+            "run",
+            "--dataset", str(locomo_path),
+            "--expected-sha256", digest,
+            "--dsn", GOOD_DSN,
+            "--output-dir", str(tmp_path / "out"),
+            "--cache-dir", str(tmp_path / "cache"),
+            "--source-config", str(cfg_path),
+            "--mode", "semantic",
+            "--search-mode", "exact",
+            "--ivfflat-probes", "4",
+        ])
+        assert rc == cli.EXIT_INPUT_ERROR
+        assert bootstrap_calls == [], (
+            "policy guard let the run reach bootstrap_schema"
+        )
+        assert import_calls == [], (
+            "policy guard let the run reach import_rows"
+        )
+
+    def test_explicit_probes_with_unregistered_guc_is_refused_before_bootstrap(
+        self, tmp_path, monkeypatch
+    ):
+        """``--search-mode ann --ivfflat-probes N`` against a
+        disposable lab whose ``pg_settings`` carries no row
+        for ``ivfflat.probes`` MUST be refused BEFORE
+        ``bootstrap_schema`` / ``import_rows`` runs.
+
+        Without this preflight the contract violation (a
+        custom-GUC echo of the requested value) would only
+        surface at ``apply_search_protocol`` lease-verify
+        time, AFTER the lab is touched and the disposable
+        tree is half-populated.
+        """
+
+        locomo_path, digest, cfg_path = self._write_fixture(tmp_path)
+
+        from eval.locomo_recall_v2 import cli as _cli
+        from eval.locomo_recall_v2 import lab as _lab
+
+        bootstrap_calls: list[bool] = []
+        import_calls: list[bool] = []
+
+        def _boom_bootstrap(*a, **kw):
+            bootstrap_calls.append(True)
+            raise AssertionError(
+                "bootstrap_schema reached on unregistered "
+                "ivfflat.probes — preflight is too late"
+            )
+
+        def _boom_import_rows(*a, **kw):
+            import_calls.append(True)
+            raise AssertionError(
+                "import_rows reached on unregistered "
+                "ivfflat.probes — preflight is too late"
+            )
+
+        # The preflight calls ``_connect_lab(dsn)`` exactly
+        # once and runs ``SELECT 1 FROM pg_settings WHERE
+        # name = 'ivfflat.probes'`` against the disposable
+        # DSN.  We monkey-patch ``_connect_lab`` with a fake
+        # that returns a cursor whose ``fetchone`` is
+        # ``None`` — i.e. no row in ``pg_settings`` for
+        # ``ivfflat.probes`` (the disposable pgvector 0.8.6
+        # condition).
+        class _PreflightCursor:
+            def __init__(self, _conn):
+                self._pending = None
+                self.log = []
+
+            def execute(self, sql, params=None):
+                self.log.append((str(sql), tuple(params) if params else ()))
+                text = str(sql).lstrip().upper()
+                if "FROM PG_SETTINGS" in text:
+                    # No row → UNAVAILABLE.
+                    self._pending = None
+                    return
+                # Anything else is unexpected in the
+                # preflight path.
+                raise AssertionError(
+                    f"_PreflightCursor unexpected: {sql!r}"
+                )
+
+            def fetchone(self):
+                return self._pending
+
+            def close(self):
+                pass
+
+        class _PreflightConn:
+            def cursor(self_inner):
+                return _PreflightCursor(self_inner)
+
+            def close(self_inner):
+                pass
+
+        def _stub_connect_lab(dsn):
+            return _PreflightConn()
+
+        monkeypatch.setattr(_cli, "_connect_lab", _stub_connect_lab)
+        monkeypatch.setattr(_lab, "bootstrap_schema", _boom_bootstrap)
+        monkeypatch.setattr(_lab, "import_rows", _boom_import_rows)
+
+        rc = cli.main([
+            "run",
+            "--dataset", str(locomo_path),
+            "--expected-sha256", digest,
+            "--dsn", GOOD_DSN,
+            "--output-dir", str(tmp_path / "out"),
+            "--cache-dir", str(tmp_path / "cache"),
+            "--source-config", str(cfg_path),
+            "--mode", "semantic",
+            "--search-mode", "ann",
+            "--ivfflat-probes", "1",
+        ])
+        assert rc == cli.EXIT_INPUT_ERROR, (
+            "expected EXIT_INPUT_ERROR from preflight, "
+            f"got rc={rc}"
+        )
+        assert bootstrap_calls == [], (
+            "preflight let the run reach bootstrap_schema"
+        )
+        assert import_calls == [], (
+            "preflight let the run reach import_rows"
+        )
+
+    def test_preflight_records_unavailable_for_implicit_probes(
+        self, tmp_path, monkeypatch
+    ):
+        """Implicit ``--search-mode ann`` (no ``--ivfflat-probes``)
+        against an unregistered GUC MUST NOT abort; the
+        verdict is stamped as ``UNAVAILABLE`` and the run
+        continues into the lab.
+
+        Exact mode is a separate test class — exact mode +
+        unregistered GUC is also tolerated and the auditor
+        sees ``probe_availability='UNAVAILABLE'``.
+        """
+
+        locomo_path, digest, cfg_path = self._write_fixture(tmp_path)
+
+        from eval.locomo_recall_v2 import cli as _cli
+        from eval.locomo_recall_v2 import embeddings as _embeddings
+
+        class _UnavailableConn:
+            def cursor(self_inner):
+                class _Cur:
+                    def __init__(s):
+                        s._pending = None
+                    def execute(s, sql, params=None):
+                        s.text = str(sql).lstrip().upper()
+                        s._pending = None
+                    def fetchone(s):
+                        return s._pending
+                    def close(s):
+                        pass
+                return _Cur()
+            def close(self_inner):
+                pass
+
+        monkeypatch.setattr(
+            _cli, "_connect_lab", lambda dsn: _UnavailableConn()
+        )
+        # Stub the corpus-vector prep so we never reach a real
+        # provider / HTTP.  We assert on the preflight verdict
+        # being non-raising for implicit probes — that's the
+        # whole contract under test.
+        from eval.locomo_recall_v2 import lab as _lab
+
+        class _StubStats:
+            def to_dict(s):
+                return {"calls": 0}
+
+        monkeypatch.setattr(
+            _cli, "_prepare_corpus_vectors",
+            lambda **kw: _StubStats(),
+        )
+        monkeypatch.setattr(
+            _embeddings, "prepare_query_embeddings",
+            lambda **kw: ([], [], _StubStats()),
+        )
+        # After the preflight returns UNAVAILABLE without
+        # raising, control flows into the lab.  Abort at the
+        # very next seam (``bootstrap_schema``) — that proves
+        # the preflight tolerated the implicit-probes case.
+        seen_after_preflight: list[bool] = []
+
+        def _capture_then_abort(*a, **kw):
+            seen_after_preflight.append(True)
+            raise _cli.IntegrationTODOError("forced-after-preflight")
+
+        monkeypatch.setattr(_lab, "bootstrap_schema", _capture_then_abort)
+
+        rc = cli.main([
+            "run",
+            "--dataset", str(locomo_path),
+            "--expected-sha256", digest,
+            "--dsn", GOOD_DSN,
+            "--output-dir", str(tmp_path / "out"),
+            "--cache-dir", str(tmp_path / "cache"),
+            "--source-config", str(cfg_path),
+            "--mode", "semantic",
+            "--search-mode", "ann",
+            # no --ivfflat-probes — implicit
+        ])
+        # The preflight does NOT raise for implicit probes;
+        # the lab seam raises IntegrationTODOError → rc == 2.
+        assert rc == cli.EXIT_INTEGRATION_GAP
+        # Confirm we reached the post-preflight seam — i.e.
+        # the preflight tolerated the implicit-probes case.
+        assert seen_after_preflight == [True], (
+            "preflight aborted implicit probes that should "
+            "have been tolerated"
+        )
 
 
 # ---------------------------------------------------------------------
