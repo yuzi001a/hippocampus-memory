@@ -724,3 +724,82 @@ class TestRecordDropCharBudgetTruthBoundary:
             if de.code is DropReasonCode.CHAR_BUDGET
         ]
         assert len(char_budget_drops) == 5
+
+    def test_all_selected_all_injected_no_budget_drop(self) -> None:
+        """All-injected / no-budget-drop case (the opposite extreme).
+
+        Scenario: at least two candidates are ``select()``-ed AND every
+        one of them is ``inject()``-ed.  No ``record_drop`` call lands.
+        ``char_count`` per candidate is kept strictly below ``max_chars``
+        so ``inject()`` does NOT cross the ``total_chars > char_budget``
+        threshold that would latch ``truncated`` to ``True``.  This pins
+        the symmetric complement of ``test_all_budget_dropped_zero_injected_full_closure``:
+
+          * ``injection_summary`` exists (lazy-created by ``inject``).
+          * ``injected_count == selected`` (every selected candidate
+            was injected).
+          * ``dropped_for_budget == 0`` (no CHAR_BUDGET drop recorded).
+          * ``truncated is False`` (no drop latched it; total chars
+            stayed within the budget so the overflow branch did NOT fire).
+          * ``char_budget == int(query_plan.max_chars)`` (mirrors the
+            typed query plan, not some other value).
+        """
+        max_chars = 800
+        ids = ("alpha", "beta")
+        trace, _DropReasonCode = _unit_trace(
+            max_chars=max_chars, candidate_ids=ids,
+        )
+        # Per-candidate char_count must stay strictly under max_chars
+        # (and sum under max_chars) so the inject() overflow latch does
+        # not fire — we want truncated is False to be a true statement
+        # about the absence of any budget pressure.
+        char_counts = {"alpha": 100, "beta": 120}
+        for cid in ids:
+            trace.select(cid)
+            trace.inject(cid, char_count=char_counts[cid])
+
+        s = trace.injection_summary
+        assert s is not None, (
+            "injection_summary is None after a successful inject() — "
+            "inject must create it lazily on the first call"
+        )
+        assert s.injected_count == len(ids), (
+            f"injected_count={s.injected_count} != selected={len(ids)} — "
+            "every selected candidate should have been injected in this "
+            "all-injected fixture"
+        )
+        assert s.dropped_for_budget == 0, (
+            f"dropped_for_budget={s.dropped_for_budget} != 0 — no "
+            "CHAR_BUDGET drop was recorded in this all-injected fixture"
+        )
+        assert s.truncated is False, (
+            "truncated is True in an all-injected/no-budget-drop fixture — "
+            "neither a CHAR_BUDGET drop nor an overflow past char_budget "
+            "should have latched it"
+        )
+        assert s.char_budget == max_chars, (
+            f"char_budget={s.char_budget} != query_plan.max_chars={max_chars}"
+        )
+        # Closed ledger: every selected candidate was injected and none
+        # were dropped — selected == injected + dropped_for_budget.
+        assert len(ids) == s.injected_count + s.dropped_for_budget, (
+            f"ledger drift: selected={len(ids)} != "
+            f"injected={s.injected_count} + dropped={s.dropped_for_budget}"
+        )
+        # total_chars is the sum of the per-candidate char_counts we fed.
+        assert s.total_chars == sum(char_counts.values())
+        # No drop_events were recorded — the canonical drop channel
+        # is empty for this all-injected fixture.
+        assert len(trace.drop_events) == 0, (
+            f"drop_events is non-empty ({len(trace.drop_events)}) in an "
+            "all-injected/no-budget-drop fixture"
+        )
+        # Every snapshot is both selected and injected (no orphans).
+        for cid in ids:
+            snap = trace.candidate_snapshots[cid]
+            assert snap.selected is True, (
+                f"snapshot {cid!r} is not selected after select()"
+            )
+            assert snap.injected is True, (
+                f"snapshot {cid!r} is not injected after inject()"
+            )
