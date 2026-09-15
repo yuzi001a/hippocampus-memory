@@ -31,14 +31,19 @@ for _p in (_PKG_ROOT, os.path.join(_PKG_ROOT, "src"), _PKG_ROOT):
 
 from eval.locomo_recall_v2.search_protocol import (  # noqa: E402
     ALLOWED_SEARCH_MODES,
+    PGVECTOR_LIBRARY_NAME,
     PROBE_AVAILABILITY_AVAILABLE,
     PROBE_AVAILABILITY_UNAVAILABLE,
+    PROBE_LOAD_METHOD_LOAD,
+    PROBE_LOAD_METHOD_NONE,
+    PROBE_LOAD_METHOD_VECTOR_FUNCTION,
     SEARCH_MODE_ANN,
     SEARCH_MODE_EXACT,
     SearchProtocol,
     SearchProtocolError,
     SearchProtocolReport,
     apply_search_protocol,
+    ensure_pgvector_loaded,
 )
 
 
@@ -58,6 +63,37 @@ class _FakeCursor:
         self.log.append((str(sql), tuple(params) if params else ()))
         text = str(sql).lstrip().upper()
         params_tuple = tuple(params) if params else ()
+        # ``LOAD 'vector'`` is the cheapest way to force the
+        # pgvector shared library into this backend; the new
+        # ``ensure_pgvector_loaded`` helper tries this first.
+        if text.startswith("LOAD '"):
+            # Track that the fake backend saw a library load;
+            # tests use this to assert the load-order contract.
+            self._conn.load_calls.append(text)
+            # If the connection was configured with
+            # ``load_succeeds=False`` (e.g. an unprivileged
+            # session) we raise so the helper can fall back
+            # to the vector-function path.
+            if not self._conn.load_succeeds:
+                raise RuntimeError(
+                    "permission denied to load library \"vector\""
+                )
+            # Successful LOAD → mark the GUC registered in
+            # this fake backend (mirrors what real PG does).
+            self._conn.registered_gucs.add("ivfflat.probes")
+            self._pending = None
+            return
+        # ``SELECT '[0]'::vector <=> '[0]'::vector`` is the
+        # fallback path inside ``ensure_pgvector_loaded`` — a
+        # real pgvector function that triggers the library
+        # load when ``LOAD 'vector'`` is rejected.
+        if "::VECTOR" in text:
+            if not self._conn.vector_function_succeeds:
+                raise RuntimeError("type \"vector\" does not exist")
+            self._conn.load_calls.append(text)
+            self._conn.registered_gucs.add("ivfflat.probes")
+            self._pending = (0.0,)
+            return
         if text.startswith("SELECT SET_CONFIG("):
             # Real psycopg2 binding passes ``(name, value, is_local)``
             # for ``set_config(%s, %s, false)``. The wrapper may also
@@ -109,6 +145,8 @@ class FakeConnection:
         gucs=None,
         *,
         registered_gucs: set[str] | frozenset[str] | None = None,
+        load_succeeds: bool = True,
+        vector_function_succeeds: bool = True,
     ):
         self.gucs = dict(gucs or {})
         self.gucs.setdefault("enable_indexscan", "on")
@@ -119,8 +157,8 @@ class FakeConnection:
         # observed value during fake-driven tests.  The seed
         # only affects the read-back; whether the GUC is
         # *registered* is governed by ``registered_gucs``,
-        # which defaults to {"enable_indexscan",
-        # "ivfflat.probes"} to mirror a real pgvector build
+        # which defaults to ``{"enable_indexscan",
+        # "ivfflat.probes"}`` to mirror a real pgvector build
         # that exposes the planner option.
         self.gucs.setdefault("ivfflat.probes", "1")
         if registered_gucs is None:
@@ -133,6 +171,13 @@ class FakeConnection:
             # specific names — e.g. an unregistered
             # ``ivfflat.probes``.
             self.registered_gucs = set(registered_gucs)
+        # Load-order knobs for the new ``ensure_pgvector_loaded``
+        # helper. ``load_calls`` records every LOAD / vector-
+        # function attempt so tests can assert the load-order
+        # contract.
+        self.load_succeeds = bool(load_succeeds)
+        self.vector_function_succeeds = bool(vector_function_succeeds)
+        self.load_calls: list[str] = []
         self.cursors = []
 
     def cursor(self):
@@ -413,19 +458,22 @@ class TestManifestTruth:
 # ---------------------------------------------------------------------
 # GUC-registration contract — pg_settings availability check.
 #
-# Empirical evidence (disposable
-# ``pgvector/pgvector:pg17`` 0.8.6): ``pg_settings`` carries NO
-# row for ``ivfflat.probes``; ``current_setting(..., true)``
-# returns NULL; yet ``set_config('ivfflat.probes','1',false)``
-# followed by ``current_setting(..., true)`` round-trips ``'1'``
-# — a custom-GUC echo the planner never reads.
+# The pgvector shared library registers ``ivfflat.probes`` LAZILY:
+# a fresh backend that has not yet loaded the library has NO row
+# in ``pg_settings`` for ``ivfflat.probes``.  ``apply_search_protocol``
+# therefore forces the load via ``ensure_pgvector_loaded`` BEFORE
+# re-reading ``pg_settings``; the AFTER-load read is the verdict.
+# ``current_setting(..., true)`` returns NULL for a still-unknown
+# GUC; a ``set_config('ivfflat.probes','1',false)`` followed by
+# ``current_setting(..., true)`` round-trips ``'1'`` — a custom-GUC
+# echo the planner never reads.
 #
 # The classes below pin the new contract:
 #
 #   * Explicit ``probes`` + GUC registered: round-trip is real,
 #     fail-closed on mismatch (unchanged from before).
-#   * Explicit ``probes`` + GUC unregistered: REFUSED — no
-#     custom-GUC echo fallback.
+#   * Explicit ``probes`` + GUC unregistered (after a failed
+#     forced load): REFUSED — no custom-GUC echo fallback.
 #   * Implicit probes (any mode) + GUC unregistered: no failure;
 #     ``probe_availability='UNAVAILABLE'``; never invent a
 #     numeric default.
@@ -476,12 +524,19 @@ class TestGucRegistration:
         """
 
         # ``enable_indexscan`` is registered, but
-        # ``ivfflat.probes`` is NOT — exactly the
-        # ``pgvector/pgvector:pg17`` 0.8.6 disposable-lab
-        # condition.
+        # ``ivfflat.probes`` is NOT — the
+        # ``pgvector/pgvector:pg17`` 0.8.6 condition where
+        # the shared library refuses to load AND no vector
+        # function is callable either (e.g. the extension
+        # itself was never created in this database). The
+        # load-order fix means ``ensure_pgvector_loaded``
+        # must FAIL both attempts before we record the
+        # ``UNAVAILABLE`` verdict.
         conn = FakeConnection(
             gucs={"enable_indexscan": "on", "ivfflat.probes": "1"},
             registered_gucs={"enable_indexscan"},
+            load_succeeds=False,
+            vector_function_succeeds=False,
         )
         with pytest.raises(SearchProtocolError):
             apply_search_protocol(
@@ -521,6 +576,8 @@ class TestGucRegistration:
         conn = EchoingConn(
             gucs={"enable_indexscan": "on", "ivfflat.probes": "1"},
             registered_gucs={"enable_indexscan"},
+            load_succeeds=False,
+            vector_function_succeeds=False,
         )
         with pytest.raises(SearchProtocolError):
             apply_search_protocol(
@@ -538,6 +595,8 @@ class TestGucRegistration:
         conn = FakeConnection(
             gucs={"enable_indexscan": "on", "ivfflat.probes": "1"},
             registered_gucs={"enable_indexscan"},
+            load_succeeds=False,
+            vector_function_succeeds=False,
         )
         report = apply_search_protocol(
             conn, SearchProtocol(mode="ann")
@@ -559,6 +618,8 @@ class TestGucRegistration:
         conn = FakeConnection(
             gucs={"enable_indexscan": "on", "ivfflat.probes": "1"},
             registered_gucs={"enable_indexscan"},
+            load_succeeds=False,
+            vector_function_succeeds=False,
         )
         report = apply_search_protocol(
             conn, SearchProtocol(mode="exact")
@@ -579,6 +640,8 @@ class TestGucRegistration:
         conn = FakeConnection(
             gucs={"enable_indexscan": "on", "ivfflat.probes": "1"},
             registered_gucs={"enable_indexscan"},
+            load_succeeds=False,
+            vector_function_succeeds=False,
         )
         with pytest.raises(SearchProtocolError):
             apply_search_protocol(
@@ -632,3 +695,230 @@ class TestGucRegistration:
             verified_probes=None,
         )
         assert rep.probe_availability == PROBE_AVAILABILITY_AVAILABLE
+
+
+# ---------------------------------------------------------------------
+# pgvector library load-order contract.
+#
+# The pgvector shared library registers ``ivfflat.probes`` LAZILY:
+# a fresh backend that has not yet loaded the library has NO row
+# in ``pg_settings``.  ``ensure_pgvector_loaded`` forces the load
+# BEFORE the GUC registration is re-read; ``apply_search_protocol``
+# stamps the BEFORE / AFTER reads plus the chosen load method onto
+# the report so the manifest carries the load-order evidence.
+# ---------------------------------------------------------------------
+
+
+class TestEnsurePgvectorLoaded:
+    def test_returns_load_when_load_succeeds(self):
+        """``ensure_pgvector_loaded`` returns
+        :data:`PROBE_LOAD_METHOD_LOAD` when ``LOAD 'vector'``
+        succeeds — the cheapest path.
+        """
+
+        conn = FakeConnection()  # default: load_succeeds=True
+        cur = conn.cursor()
+        result = ensure_pgvector_loaded(cur)
+        assert result == PROBE_LOAD_METHOD_LOAD
+        # The fake backend recorded exactly one LOAD attempt
+        # and no fallback vector-function call.
+        load_calls = [
+            entry for entry in conn.load_calls
+            if entry.startswith("LOAD '")
+        ]
+        assert len(load_calls) == 1
+        vector_calls = [
+            entry for entry in conn.load_calls
+            if "::VECTOR" in entry
+        ]
+        assert vector_calls == []
+
+    def test_returns_vector_function_when_load_raises(self):
+        """``ensure_pgvector_loaded`` falls back to executing a
+        pgvector function when ``LOAD 'vector'`` raises — and
+        returns :data:`PROBE_LOAD_METHOD_VECTOR_FUNCTION`.
+        """
+
+        conn = FakeConnection(load_succeeds=False)
+        cur = conn.cursor()
+        result = ensure_pgvector_loaded(cur)
+        assert result == PROBE_LOAD_METHOD_VECTOR_FUNCTION
+        # The fake backend recorded BOTH the failing LOAD
+        # attempt AND the successful vector-function call.
+        assert any(
+            entry.startswith("LOAD '") for entry in conn.load_calls
+        )
+        assert any("::VECTOR" in entry for entry in conn.load_calls)
+
+    def test_returns_none_when_both_raise(self):
+        """``ensure_pgvector_loaded`` returns
+        :data:`PROBE_LOAD_METHOD_NONE` when BOTH the LOAD and
+        the vector-function paths raise.  The function never
+        raises on load failure — the caller decides.
+        """
+
+        conn = FakeConnection(
+            load_succeeds=False,
+            vector_function_succeeds=False,
+        )
+        cur = conn.cursor()
+        result = ensure_pgvector_loaded(cur)
+        assert result == PROBE_LOAD_METHOD_NONE
+        assert conn.load_calls, (
+            "both load attempts must be recorded so the "
+            "caller can audit them"
+        )
+
+
+class TestApplySearchProtocolLoadOrder:
+    def test_load_order_happy_path_ann_with_explicit_probes(self):
+        """The whole point of the fix: a fake backend whose
+        ``pg_settings`` row for ``ivfflat.probes`` appears
+        ONLY after the forced load — exactly the lazy-LOAD
+        condition the disposable pgvector build exhibits —
+        must now report
+        ``probes_registered_before_load=False`` /
+        ``probes_registered_after_load=True`` /
+        ``pgvector_load_method='LOAD'`` /
+        ``probe_availability='AVAILABLE'`` AND the explicit
+        ANN ``probes=1`` policy must round-trip
+        (``verified_probes == 1``) instead of being
+        refused.
+        """
+
+        # The fake connection starts with NO ``ivfflat.probes``
+        # row in ``registered_gucs``; a successful ``LOAD
+        # 'vector'`` adds it.  This mirrors the
+        # lazy-registration truth.
+        conn = FakeConnection(
+            gucs={"enable_indexscan": "on"},
+            registered_gucs={"enable_indexscan"},
+        )
+        report = apply_search_protocol(
+            conn, SearchProtocol(mode="ann", probes=1)
+        )
+        assert report.probes_registered_before_load is False
+        assert report.probes_registered_after_load is True
+        assert report.pgvector_load_method == PROBE_LOAD_METHOD_LOAD
+        assert report.probe_availability == PROBE_AVAILABILITY_AVAILABLE
+        assert report.verified_probes == 1
+        assert report.ivfflat_probes == "1"
+        # The observed_value snapshot exposes all three new
+        # fields.
+        snap = report.observed_value
+        assert snap["probes_registered_before_load"] is False
+        assert snap["probes_registered_after_load"] is True
+        assert snap["pgvector_load_method"] == PROBE_LOAD_METHOD_LOAD
+        assert snap["probe_availability"] == PROBE_AVAILABILITY_AVAILABLE
+
+    def test_load_order_fail_closed_when_load_cannot_register(self):
+        """When BOTH the LOAD and the vector-function paths
+        fail (e.g. the extension itself is not installed),
+        explicit ``--ivfflat-probes`` must still be refused
+        — the fail-closed behaviour is preserved.
+        """
+
+        conn = FakeConnection(
+            gucs={"enable_indexscan": "on", "ivfflat.probes": "1"},
+            registered_gucs={"enable_indexscan"},
+            load_succeeds=False,
+            vector_function_succeeds=False,
+        )
+        with pytest.raises(SearchProtocolError):
+            apply_search_protocol(
+                conn, SearchProtocol(mode="ann", probes=1)
+            )
+
+    def test_load_order_implicit_probes_when_load_succeeds(self):
+        """Implicit probes (``None``) plus a backend where the
+        GUC appears only after the forced load: the report
+        stamps ``probe_availability='AVAILABLE'`` and the
+        observed GUC string verbatim; ``verified_probes``
+        stays ``None`` because the policy did not pin a
+        value.
+        """
+
+        conn = FakeConnection(
+            gucs={"enable_indexscan": "on", "ivfflat.probes": "1"},
+            registered_gucs={"enable_indexscan"},
+        )
+        report = apply_search_protocol(
+            conn, SearchProtocol(mode="ann")
+        )
+        assert report.probes_registered_before_load is False
+        assert report.probes_registered_after_load is True
+        assert report.pgvector_load_method == PROBE_LOAD_METHOD_LOAD
+        assert report.probe_availability == PROBE_AVAILABILITY_AVAILABLE
+        assert report.ivfflat_probes == "1"
+        assert report.verified_probes is None
+
+    def test_load_order_records_none_when_load_cannot_register(self):
+        """Implicit probes against a backend where the
+        library refuses to load: ``pgvector_load_method`` is
+        stamped as :data:`PROBE_LOAD_METHOD_NONE`,
+        ``probe_availability='UNAVAILABLE'``, no
+        ``verified_probes`` is fabricated.
+        """
+
+        conn = FakeConnection(
+            gucs={"enable_indexscan": "on", "ivfflat.probes": "1"},
+            registered_gucs={"enable_indexscan"},
+            load_succeeds=False,
+            vector_function_succeeds=False,
+        )
+        report = apply_search_protocol(
+            conn, SearchProtocol(mode="ann")
+        )
+        assert report.probe_availability == PROBE_AVAILABILITY_UNAVAILABLE
+        assert report.pgvector_load_method == PROBE_LOAD_METHOD_NONE
+        assert report.probes_registered_before_load is False
+        assert report.probes_registered_after_load is False
+        # enable_indexscan still round-trips normally.
+        assert report.enable_indexscan == "on"
+        # We never claim a numeric default for an
+        # unregistered GUC.
+        assert report.ivfflat_probes is None
+        assert report.verified_probes is None
+
+    def test_load_method_constants_exported(self):
+        """The new load-method constants must be exported
+        from ``search_protocol.__all__`` and from the
+        :data:`ALLOWED_PROBE_LOAD_METHODS` set.
+        """
+
+        from eval.locomo_recall_v2 import search_protocol as sp
+
+        assert sp.PGVECTOR_LIBRARY_NAME == "vector"
+        assert sp.PROBE_LOAD_METHOD_LOAD == "LOAD"
+        assert sp.PROBE_LOAD_METHOD_VECTOR_FUNCTION == "VECTOR_FUNCTION"
+        assert sp.PROBE_LOAD_METHOD_NONE == "NONE"
+        assert sp.ALLOWED_PROBE_LOAD_METHODS == frozenset({
+            "LOAD", "VECTOR_FUNCTION", "NONE",
+        })
+        for name in (
+            "PGVECTOR_LIBRARY_NAME",
+            "PROBE_LOAD_METHOD_LOAD",
+            "PROBE_LOAD_METHOD_VECTOR_FUNCTION",
+            "PROBE_LOAD_METHOD_NONE",
+            "ALLOWED_PROBE_LOAD_METHODS",
+        ):
+            assert name in sp.__all__
+
+    def test_search_protocol_report_load_fields_exposed(self):
+        """``SearchProtocolReport.observed_value`` exposes
+        all three new load-ordering fields.
+        """
+
+        rep = SearchProtocolReport(
+            mode="ann",
+            enable_indexscan="on",
+            ivfflat_probes="1",
+            verified_probes=None,
+            probes_registered_before_load=False,
+            probes_registered_after_load=True,
+            pgvector_load_method=PROBE_LOAD_METHOD_LOAD,
+        )
+        snap = rep.observed_value
+        assert snap["probes_registered_before_load"] is False
+        assert snap["probes_registered_after_load"] is True
+        assert snap["pgvector_load_method"] == PROBE_LOAD_METHOD_LOAD

@@ -132,9 +132,13 @@ from .search_protocol import (
     ALLOWED_SEARCH_MODES,
     PROBE_AVAILABILITY_AVAILABLE,
     PROBE_AVAILABILITY_UNAVAILABLE,
+    PROBE_LOAD_METHOD_LOAD,
+    PROBE_LOAD_METHOD_NONE,
+    PROBE_LOAD_METHOD_VECTOR_FUNCTION,
     SearchProtocol,
     SearchProtocolError,
     apply_search_protocol,
+    ensure_pgvector_loaded,
 )
 from .session_pool import (
     EvaluatorPoolClosed,
@@ -164,6 +168,7 @@ __all__ = [
     "redact_secrets_in_payload",
     "run_dry_run",
     "run_semantic",
+    "_run_semantic_sample_isolated",
 ]
 
 
@@ -711,7 +716,9 @@ def _unexpected_base_entries(path: str) -> list[str]:
     return [e for e in entries if e not in _EVALUATOR_OWNED_BASE_FILES]
 
 
-def _make_disposable_base_path(cache_dir: str, dataset_sha: str) -> str:
+def _make_disposable_base_path(
+    cache_dir: str, dataset_sha: str, scope: str | None = None,
+) -> str:
     """Create a real empty disposable experiment directory.
 
     Returns the absolute path. Raises :class:`LabConfigRefused` if a
@@ -719,10 +726,29 @@ def _make_disposable_base_path(cache_dir: str, dataset_sha: str) -> str:
     itself (the facade's own ``v3_cards.db`` may persist between runs,
     so it is explicitly allowed — that keeps reruns possible while
     still refusing to share an unrelated directory).
+
+    The optional ``scope`` keyword lets the sample-isolated
+    orchestrator derive a per-sample directory under the SAME
+    ``cache_dir`` while the legacy default (``scope=None``) keeps
+    today's path byte-identical: ``<cache_dir>/experiment-base-<sha12>``.
+    When ``scope`` is set the path becomes
+    ``<cache_dir>/experiment-base-<sha12>-<slug>`` where ``slug``
+    is sanitised with the same ``[^a-z0-9]+`` rule used for the
+    per-sample database name.
     """
 
     _ensure_dir(cache_dir)
-    base_path = os.path.join(cache_dir, f"experiment-base-{dataset_sha[:12]}")
+    if scope is None or str(scope).strip() == "":
+        dir_name = f"experiment-base-{dataset_sha[:12]}"
+    else:
+        slug = re.sub(r"[^a-z0-9]+", "_", str(scope).strip().lower()).strip("_")
+        if not slug:
+            raise LabConfigRefused(
+                f"disposable base_path scope must produce a non-empty "
+                f"slug after sanitisation (got {scope!r})"
+            )
+        dir_name = f"experiment-base-{dataset_sha[:12]}-{slug}"
+    base_path = os.path.join(cache_dir, dir_name)
     if os.path.isdir(base_path):
         unexpected = _unexpected_base_entries(base_path)
         if unexpected:
@@ -1353,18 +1379,40 @@ def _preflight_probe_availability(
 
     Opens ONE short-lived connection to the disposable lab DSN
     and asks PostgreSQL whether ``ivfflat.probes`` is registered
-    in ``pg_settings``.  A registered GUC means the planner
-    actually reads it; an unregistered one means any
+    in ``pg_settings`` AFTER forcing the pgvector shared
+    library into the backend.  A registered GUC means the
+    planner actually reads it; an unregistered one means any
     ``set_config`` only creates a custom variable the planner
     ignores — a fake round-trip.
 
+    Load-order matters: the pgvector shared library registers
+    ``ivfflat.probes`` LAZILY, when the library is first loaded
+    into a backend.  A fresh backend that has not executed any
+    pgvector function has NO row in ``pg_settings`` for
+    ``ivfflat.probes`` even on a perfectly healthy pgvector
+    build.  This preflight therefore:
+
+      1. Reads the registration BEFORE the forced load.
+      2. Forces the load via
+         :func:`search_protocol.ensure_pgvector_loaded` (tries
+         ``LOAD 'vector'`` first, then falls back to executing
+         a real pgvector function).
+      3. Reads the registration AGAIN.
+
+    The verdict (``probe_availability``) is the AFTER-load
+    read; the BEFORE-load read and the chosen load method are
+    surfaced alongside as evidence fields so the manifest can
+    carry the load-order truth.
+
     Behavioural contract:
 
-      * Explicit ``sp_policy.probes`` + ``UNAVAILABLE``: REFUSED.
-        Raise :class:`CLIError` so bootstrap_schema / import_rows
-        never run.  A run that would only echo a custom variable
-        cannot measure ANN probe count and is a contract
-        violation.
+      * Explicit ``sp_policy.probes`` + ``UNAVAILABLE`` (after
+        load): REFUSED.  Raise :class:`CLIError` so
+        ``bootstrap_schema`` / ``import_rows`` never run.  A run
+        that would only echo a custom variable cannot measure
+        ANN probe count and is a contract violation.  The error
+        message explains the library-load ordering and that a
+        failed load of ``'vector'`` left the GUC unregistered.
       * Explicit probes + ``AVAILABLE``: no failure; return a
         verdict dict so the manifest can stamp the available
         status.
@@ -1379,6 +1427,9 @@ def _preflight_probe_availability(
     """
 
     conn = None
+    registered_before: bool = False
+    registered_after: bool = False
+    load_method: str = PROBE_LOAD_METHOD_NONE
     try:
         conn = _connect_lab(dsn)
         try:
@@ -1390,18 +1441,48 @@ def _preflight_probe_availability(
             ) from exc
         try:
             try:
+                # BEFORE the forced load — a fresh backend
+                # typically has NO row in pg_settings for
+                # ivfflat.probes until the shared library is
+                # loaded.
                 cur.execute(
                     "SELECT 1 FROM pg_settings WHERE name = %s LIMIT 1",
                     ("ivfflat.probes",),
                 )
-                row = cur.fetchone()
+                row_before = cur.fetchone()
             except Exception as exc:
                 raise CLIError(
                     "cli: preflight probe-availability pg_settings "
-                    f"lookup failed: {type(exc).__name__}"
+                    f"lookup (before load) failed: {type(exc).__name__}"
                 ) from exc
-            registered = bool(
-                row is not None and len(row) >= 1 and row[0] is not None
+            registered_before = bool(
+                row_before is not None
+                and len(row_before) >= 1
+                and row_before[0] is not None
+            )
+
+            # Force the pgvector shared library into this
+            # backend so a lazy-load lag cannot produce a
+            # false UNAVAILABLE verdict.
+            load_method = ensure_pgvector_loaded(cur)
+
+            try:
+                # AFTER the forced load — this is the verdict
+                # gate.
+                cur.execute(
+                    "SELECT 1 FROM pg_settings WHERE name = %s LIMIT 1",
+                    ("ivfflat.probes",),
+                )
+                row_after = cur.fetchone()
+            except Exception as exc:
+                raise CLIError(
+                    "cli: preflight probe-availability pg_settings "
+                    f"lookup (after load) failed: {type(exc).__name__}"
+                ) from exc
+            registered_after = bool(
+                row_after is not None
+                and len(row_after) >= 1
+                and row_after[0] is not None
             )
         finally:
             try:
@@ -1417,7 +1498,7 @@ def _preflight_probe_availability(
 
     availability = (
         PROBE_AVAILABILITY_AVAILABLE
-        if registered
+        if registered_after
         else PROBE_AVAILABILITY_UNAVAILABLE
     )
 
@@ -1430,20 +1511,34 @@ def _preflight_probe_availability(
         raise CLIError(
             "cli: --ivfflat-probes N requires ivfflat.probes to be "
             "registered in pg_settings on the disposable lab; "
-            "the preflight found NO row. A SET would only create a "
-            "custom-GUC echo that the planner never reads, so the "
+            "even after forcing the pgvector shared library load "
+            "(via 'LOAD vector' / executing a pgvector function) "
+            "the preflight found NO row. A failed load of 'vector' "
+            "left the GUC unregistered, so a SET would only create "
+            "a custom-GUC echo that the planner never reads. The "
             "explicit override is refused BEFORE any "
             "bootstrap_schema / import_rows runs. Use a pgvector "
-            "build that registers ivfflat.probes, or drop "
-            "--ivfflat-probes."
+            "build whose shared library registers ivfflat.probes "
+            "once loaded, or drop --ivfflat-probes."
         )
+
+    availability_before = (
+        PROBE_AVAILABILITY_AVAILABLE
+        if registered_before
+        else PROBE_AVAILABILITY_UNAVAILABLE
+    )
 
     return {
         "probe_availability": availability,
         "probe_availability_source": (
-            "pg_settings" if registered else "pg_settings_absent"
+            "pg_settings_after_library_load"
+            if registered_after
+            else "pg_settings_absent_after_library_load"
         ),
         "probe_availability_preflight": "disposable_dsn",
+        "probe_availability_before_load": availability_before,
+        "probe_availability_after_load": availability,
+        "pgvector_load_method": load_method,
     }
 
 
@@ -2000,7 +2095,11 @@ def _compare_repeatability(
     }
 
 
-def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
+def run_semantic(
+    args: argparse.Namespace,
+    *,
+    _records_out: list | None = None,
+) -> dict[str, Any]:
     """Execute the semantic stage.
 
     Thin orchestrator over the existing modules:
@@ -2025,6 +2124,14 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
       8. Compute metrics + coverage; write the artifacts.
       9. ``--repeatability`` runs a second cached pass and
          writes ``repeatability.json``.
+
+    The private ``_records_out`` keyword lets the sample-isolated
+    orchestrator re-use this function without reconstructing
+    records from JSONL: when a list is supplied, the in-memory
+    ``CaseRecord`` objects that are also serialised into
+    ``full-objective-results.jsonl`` are appended to it just
+    before the function returns. ``main()`` never passes this
+    kwarg — the regular CLI path keeps today's return shape.
     """
 
     # ----- G6C-B0 policy resolution -----
@@ -2130,7 +2237,11 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
     # sees: ``storage.pg`` points at the disposable loopback lab and
     # ``storage.embed`` carries the borrowed ephemeral provider
     # credential (process memory only).
-    base_path = _make_disposable_base_path(str(args.cache_dir), str(sha))
+    base_path = _make_disposable_base_path(
+        str(args.cache_dir),
+        str(sha),
+        scope=getattr(args, "sample_isolated_base_scope", None),
+    )
     lab_cfg = build_isolated_lab_config(
         base_path=base_path,
         dsn=str(args.dsn),
@@ -2494,6 +2605,19 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
         "probe_availability_preflight": probe_preflight.get(
             "probe_availability_preflight"
         ),
+        # Load-ordering evidence — the pgvector shared
+        # library registers ``ivfflat.probes`` LAZILY, so the
+        # BEFORE / AFTER pg_settings reads and the chosen
+        # load method are part of the manifest.
+        "probe_availability_before_load": probe_preflight.get(
+            "probe_availability_before_load"
+        ),
+        "probe_availability_after_load": probe_preflight.get(
+            "probe_availability_after_load"
+        ),
+        "pgvector_load_method": probe_preflight.get(
+            "pgvector_load_method"
+        ),
         "index_build_phase": str(index_build_phase),
         "vector_indexes_applied_after_import": vector_indexes_applied or None,
         "analyze_applied": analyze_records or None,
@@ -2639,6 +2763,15 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Append the in-memory record objects to the optional sink
+    # (sample-isolated orchestrator only — ``main()`` never
+    # passes the kwarg). The records here are the SAME objects
+    # already serialised into ``full-objective-results.jsonl`` /
+    # ``semantic-canary-results.jsonl`` above, so no JSONL
+    # round-trip is needed for aggregation.
+    if _records_out is not None:
+        _records_out.extend(records)
+
     return summary
 
 
@@ -2773,12 +2906,869 @@ def _topic_recall_lab_data_dir_guard(lab_base_path: str):
             _v3config._resolve_data_dir = snapshot["config_module"]
             _topic_recall._resolve_data_dir = snapshot["topic_module"]
     except Exception:
-        # Belt-and-braces: re-raise after restore so the
-        # caller sees the original exception and the patch is
-        # never left dangling on a half-completed run.
-        _v3config._resolve_data_dir = snapshot["config_module"]
-        _topic_recall._resolve_data_dir = snapshot["topic_module"]
+            # Belt-and-braces: re-raise after restore so the
+            # caller sees the original exception and the patch is
+            # never left dangling on a half-completed run.
+            _v3config._resolve_data_dir = snapshot["config_module"]
+            _topic_recall._resolve_data_dir = snapshot["topic_module"]
+            raise
+
+
+# ---------------------------------------------------------------------
+# G6C-B0.1 sample-isolated orchestrator
+# ---------------------------------------------------------------------
+
+
+# Reserved-db collision guard (mirrors ``lab._RESERVED_DBS``).  We
+# import the constant instead of duplicating it so a future edit to
+# the production-side guard is picked up here automatically.
+def _sample_isolated_reserved_dbs() -> set[str]:
+    return set(getattr(_lab, "_RESERVED_DBS", set()))
+
+
+def _sample_isolated_slug(sample_id: str) -> str:
+    """Deterministic per-sample slug.
+
+    The same slug is used for the per-sample database name AND the
+    per-sample ``basePath`` scope so a debugger can correlate them.
+    ``[^a-z0-9]+`` collapses any non-alphanumeric run (including
+    ``-``, ``.``) into a single ``_``; leading / trailing underscores
+    are stripped so the final name is clean.
+    """
+
+    base = re.sub(r"[^a-z0-9]+", "_", str(sample_id).strip().lower()).strip("_")
+    if not base:
+        raise CLIError(
+            f"sample id must produce a non-empty slug after "
+            f"sanitisation (got {sample_id!r})"
+        )
+    return base
+
+
+def _sample_isolated_db_name(
+    base_dbname: str, sample_id: str,
+) -> str:
+    """Derive a per-sample database name from the base DSN dbname.
+
+    Refused when:
+      * it collides with ``lab._RESERVED_DBS``;
+      * it equals the base ``dbname`` (a separate DB must carry a
+        distinct name, otherwise the orchestrator would touch the
+        base database).
+
+    Returns ``"<base_dbname>_iso_<slug>"``.
+    """
+
+    base = str(base_dbname).strip()
+    slug = _sample_isolated_slug(sample_id)
+    candidate = f"{base}_iso_{slug}"
+    if candidate == base:
+        raise CLIError(
+            f"sample-isolated db name {candidate!r} equals the base "
+            f"dbname; refusing to alias"
+        )
+    reserved = _sample_isolated_reserved_dbs()
+    if candidate.lower() in {n.lower() for n in reserved}:
+        raise CLIError(
+            f"sample-isolated db name {candidate!r} collides with a "
+            f"reserved production/eval database name; refusing"
+        )
+    return candidate
+
+
+def _replace_dbname_in_dsn(dsn: str, new_dbname: str) -> str:
+    """Return ``dsn`` with the ``dbname=`` key replaced by ``new_dbname``.
+
+    Preserves every other key (host, port, user, password) and their
+    quoting verbatim so the per-sample DSN is byte-identical to the
+    base DSN except for the database name.  Raises :class:`CLIError`
+    when the base DSN carries no ``dbname=`` key (the upstream
+    lab guard already requires it, but we double-check here so an
+    unsafe orchestrator cannot silently fall back).
+    """
+
+    if not re.search(r"(?i)\bdbname\s*=", dsn):
+        raise CLIError(
+            "sample-isolated orchestrator: base DSN has no dbname= "
+            "key; refusing to derive a per-sample DSN"
+        )
+    return re.sub(
+        r"(?i)\bdbname\s*=\s*('(?:[^']|'')*'|\S+)",
+        f"dbname={new_dbname}",
+        dsn,
+        count=1,
+    )
+
+
+def _drop_database(
+    *, server_dsn: str, dbname: str, log: list[dict[str, Any]],
+) -> None:
+    """Drop ``dbname`` on the disposable server, never touching the
+    base database.
+
+    Opens a maintenance connection (``dbname=postgres`` /
+    ``dbname=template1`` / … — anything that parses) with
+    autocommit so ``CREATE DATABASE`` / ``DROP DATABASE`` run
+    outside a transaction. The ``dbname`` is dropped with
+    ``DROP DATABASE IF EXISTS`` so a previous failure that left
+    the database lying around does not poison this run.
+
+    The caller-supplied ``log`` list is appended to so a failure
+    here is surfaced to the aggregate summary rather than
+    swallowed silently.
+    """
+
+    if not dbname:
+        raise CLIError(
+            "_drop_database: empty dbname refused"
+        )
+    try:
+        import psycopg2  # type: ignore[import-not-found]
+    except ImportError as exc:
+        log.append({
+            "database": str(dbname),
+            "dropped": False,
+            "error": f"psycopg2 unavailable: {exc}",
+        })
         raise
+    # Maintenance DSN — same server, but ``dbname=postgres`` (or
+    # whatever the user's original base DSN already carries; we
+    # fall back to ``postgres`` only as a last resort and refuse
+    # the call if BOTH the base dbname and ``postgres`` collide
+    # with a reserved name).
+    maintenance_dsn = _replace_dbname_in_dsn(server_dsn, "postgres")
+    conn = None
+    try:
+        conn = psycopg2.connect(maintenance_dsn)
+        conn.autocommit = True
+        # Identifier-quote via SQL-standard ``"`` so the literal
+        # never reaches the wire as raw SQL.  The DSN guard has
+        # already restricted us to a known-clean loopback server
+        # so this is sufficient.
+        safe = dbname.replace('"', '""')
+        with conn.cursor() as cur:
+            cur.execute(f'DROP DATABASE IF EXISTS "{safe}"')
+        log.append({"database": str(dbname), "dropped": True, "error": None})
+    except Exception as exc:
+        log.append({
+            "database": str(dbname),
+            "dropped": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _create_database(
+    *, server_dsn: str, dbname: str,
+) -> None:
+    """Create ``dbname`` freshly on the disposable server.
+
+    Uses the same maintenance connection pattern as
+    :func:`_drop_database`.  The database is created only when it
+    does NOT already exist, so a leftover from a previous crashed
+    run does not silently overwrite real evidence; if it DOES
+    exist (a different process is racing us, or a prior run left
+    it lying around), we DROP-then-CREATE so every per-sample pass
+    starts from a guaranteed-empty schema.  Any failure raises
+    :class:`CLIError` so the orchestrator's ``finally`` path
+    tears down the database the caller asked for.
+    """
+
+    try:
+        import psycopg2  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise CLIError(
+            f"_create_database: psycopg2 unavailable: {exc}"
+        ) from exc
+    maintenance_dsn = _replace_dbname_in_dsn(server_dsn, "postgres")
+    conn = None
+    try:
+        conn = psycopg2.connect(maintenance_dsn)
+        conn.autocommit = True
+        safe = dbname.replace('"', '""')
+        with conn.cursor() as cur:
+            # Best-effort drop first so a leftover does not corrupt
+            # the new pass.  ``DROP DATABASE IF EXISTS`` is silent
+            # when the database is missing, so this is also a no-op
+            # on the common path.
+            cur.execute(f'DROP DATABASE IF EXISTS "{safe}"')
+            cur.execute(f'CREATE DATABASE "{safe}"')
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _copy_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Return a shallow copy of ``args`` safe for in-place mutation.
+
+    Each top-level attribute that this orchestrator rewrites gets
+    a fresh value; everything else is copied verbatim so the
+    downstream ``run_semantic`` sees the same dataset / source
+    config / search mode / probes / etc. that the caller chose.
+    """
+
+    return argparse.Namespace(**vars(args))
+
+
+def _resolve_sample_iter(
+    *, dataset_path: str, expected_sha256: str,
+    sample_filter: tuple[str, ...] | None,
+) -> tuple[Any, list[str]]:
+    """Return ``(data, ordered_sample_ids)``.
+
+    Order is the loader's stable iteration order (sorted by
+    ``sample_id``).  ``sample_filter`` is honoured exactly the way
+    ``_resolve_dataset_and_rows`` honours it — a sample id that
+    is not in the dataset is silently dropped so a caller that
+    passes ``--sample-filter s1,s2`` never sees ``s1`` repeated
+    in the orchestrator output.
+    """
+
+    data = _dataset.load_locomo(dataset_path, expected_sha256)
+    all_sids = [str(sid) for sid, _ in data.samples]
+    if sample_filter:
+        allowed = set(sample_filter)
+        ordered = [sid for sid in all_sids if sid in allowed]
+        if not ordered:
+            raise CLIError(
+                f"sample-isolated orchestrator: --sample-filter "
+                f"{list(sample_filter)!r} resolved to zero samples; "
+                f"refusing to run"
+            )
+    else:
+        ordered = all_sids
+    return data, ordered
+
+
+def _recompute_metrics(records: Sequence[Any]) -> dict[str, Any]:
+    """Recompute metrics over ``records`` with the production limits.
+
+    This is the orchestrator's independent recomputation: every
+    per-sample metric in the aggregate artifact is also re-derived
+    here so a test can confirm ``compute_metrics(records)`` agrees
+    with the per-sample ``run_semantic`` snapshot.
+    """
+
+    snap = _metrics.compute_metrics(
+        list(records),
+        hit_at_k_limit=5,
+        ranking_limit=5,
+        engine_invocations=len(records),
+    )
+    return snap.to_dict()
+
+
+def _per_sample_metric_summary(
+    records: Sequence[Any],
+) -> dict[str, Any]:
+    """Per-sample metric block for the ``per-sample-metrics.json``
+    aggregate artifact.
+    """
+
+    snap_dict = _recompute_metrics(records)
+    candidate_total = 0
+    for rec in records:
+        try:
+            candidate_total += len(
+                list(getattr(rec, "candidate_source_ids", ()) or ())
+            )
+        except Exception:
+            continue
+    return {
+        "sample_id": str(getattr(records[0], "sample_id", "")
+                        if records else ""),
+        "question_count": int(snap_dict.get("questions_total", 0)),
+        "hit_at_1": snap_dict.get("hit_at_1"),
+        "hit_at_5": snap_dict.get("hit_at_5"),
+        "mrr": snap_dict.get("mrr"),
+        "mean_relevant_rank": snap_dict.get("mean_relevant_rank"),
+        "status": str(snap_dict.get("status", "")),
+        "mapped_gold_count": int(snap_dict.get("mapped_gold_count", 0)),
+        "unmapped_gold_count": int(
+            snap_dict.get("unmapped_gold_count", 0)
+        ),
+        "unresolved_gold_count": int(
+            snap_dict.get("unresolved_gold_count", 0)
+        ),
+        "candidate_total": int(candidate_total),
+    }
+
+
+def _run_semantic_sample_isolated(args: argparse.Namespace) -> dict[str, Any]:
+    """Sample-isolated orchestrator.
+
+    For every sample in the selected scope (dataset order):
+
+      1. derive a per-sample disposable database name;
+      2. DROP-then-CREATE that database freshly on the same
+         disposable server as ``args.dsn``;
+      3. run **one full lab pass** whose corpus is that sample's
+         rows only (``build_import_rows(data, sample_ids={sid})``)
+         and whose eval cases are all of that sample's questions;
+      4. DROP that sample's database in a ``finally`` block;
+      5. collect the per-sample records.
+
+    The aggregate artifact set is then assembled in canonical
+    dataset order: ``full-objective-results.jsonl`` /
+    ``semantic-canary-results.jsonl`` carry the concatenated
+    ``records``; ``metrics.json`` / ``coverage-audit.json`` /
+    ``latency.csv`` carry the aggregated metrics; the per-sample
+    metrics land in ``per-sample-metrics.json``; the corpus-
+    isolation evidence lands in ``corpus-isolation.json``;
+    ``g6c-b0-protocol.json`` gains a ``corpus_isolation`` block.
+
+    ``run_semantic`` is re-used end-to-end — this orchestrator
+    does NOT re-implement bootstrap, import, recall, or metrics.
+    """
+
+    sample_filter = _coerce_sample_filter(getattr(args, "sample_filter", ""))
+    ordered = _resolve_sample_iter(
+        dataset_path=str(args.dataset),
+        expected_sha256=str(args.expected_sha256),
+        sample_filter=sample_filter,
+    )
+    data, sample_ids = ordered
+    if not sample_ids:
+        raise CLIError(
+            "sample-isolated orchestrator: no samples to process; "
+            "refusing to run"
+        )
+
+    # Validate the base DSN BEFORE we touch anything else so a bad
+    # DSN never creates an empty per-sample database.
+    base_parts = _lab.validate_disposable_dsn(str(args.dsn))
+    base_dbname = str(base_parts.get("dbname") or "").strip()
+    if not base_dbname:
+        raise CLIError(
+            "sample-isolated orchestrator: base DSN has no dbname; "
+            "refusing to derive per-sample databases"
+        )
+
+    # Resolve the per-sample database names up-front so a refusal
+    # happens BEFORE we touch the server.  This also surfaces
+    # duplicate-slug collisions (which the loader cannot produce,
+    # but a caller passing a hand-crafted dataset could).
+    plan: list[dict[str, Any]] = []
+    for sid in sample_ids:
+        slug = _sample_isolated_slug(sid)
+        dbname = _sample_isolated_db_name(base_dbname, sid)
+        plan.append({
+            "sample_id": str(sid),
+            "slug": slug,
+            "database": dbname,
+        })
+
+    # Resolve the per-sample case-id slice ONCE up-front so the
+    # inner per-sample ``run_semantic`` calls can copy the slice
+    # cheaply.  Empty / unknown ``--case-id`` values still go
+    # through ``_resolve_dataset_and_rows`` per-sample so the
+    # ``CLIError`` "unknown case_id" guard fires.
+    raw_case_ids = getattr(args, "case_ids", None)
+    if isinstance(raw_case_ids, str):
+        global_case_ids = tuple(
+            c.strip() for c in raw_case_ids.split(",") if c.strip()
+        ) or None
+    elif raw_case_ids is None:
+        global_case_ids = None
+    else:
+        global_case_ids = tuple(
+            str(c).strip() for c in raw_case_ids if str(c).strip()
+        ) or None
+
+    # Decide which per-sample directories we use.  ``scope=<slug>``
+    # keeps each sample's ``basePath`` distinct (the test suite
+    # asserts on this) while staying under the same ``cache_dir``.
+    _ensure_dir(str(args.output_dir))
+
+    aggregate_records: list[Any] = []
+    per_sample_metrics: list[dict[str, Any]] = []
+    per_sample_lab: dict[str, dict[str, Any]] = {}
+    drop_log: list[dict[str, Any]] = []
+
+    overall_status = "ok"
+    overall_error: str | None = None
+
+    for step in plan:
+        sid = step["sample_id"]
+        slug = step["slug"]
+        dbname = step["database"]
+        sample_dsn = _replace_dbname_in_dsn(str(args.dsn), dbname)
+        sample_output_dir = os.path.join(
+            str(args.output_dir), "per-sample", slug,
+        )
+        sample_base_path = _make_disposable_base_path(
+            str(args.cache_dir),
+            str(getattr(data, "source_sha256", "") or args.expected_sha256),
+            scope=slug,
+        )
+        per_sample_case_ids: tuple[str, ...] | None
+        if global_case_ids:
+            per_sample_case_ids = tuple(
+                cid for cid in global_case_ids
+                if cid.startswith(f"{sid}|")
+            )
+            # An explicit case-id set that survives the per-sample
+            # filter must NOT be empty (the inner resolver would
+            # silently narrow the corpus to a zero-row slice); we
+            # raise the same ``CLIError`` it would raise, here in
+            # the orchestrator so the per-sample DB is never
+            # created for an empty case list.
+            if not per_sample_case_ids:
+                raise CLIError(
+                    f"sample-isolated orchestrator: --case-id slice "
+                    f"{list(global_case_ids)!r} contains no ids for "
+                    f"sample {sid!r}; refusing to run an empty pass"
+                )
+        else:
+            per_sample_case_ids = None
+
+        sub_args = _copy_args(args)
+        sub_args.dsn = sample_dsn
+        sub_args.output_dir = sample_output_dir
+        sub_args.sample_ids = [sid]
+        sub_args.sample_filter = ""
+        sub_args.case_ids = per_sample_case_ids
+        sub_args.repeatability = False
+        sub_args.sample_isolated = False
+        sub_args.case_limit = None
+        # Per-sample inner ``run_semantic`` MUST derive its
+        # disposable base path under a per-sample scope so the
+        # ten per-sample passes do NOT share one directory under
+        # the same ``cache_dir`` — sharing the same base_path
+        # would route TopicRecall / card-store state through one
+        # shared directory while the PG corpora are isolated,
+        # which is a real cross-sample contamination channel.
+        sub_args.sample_isolated_base_scope = slug
+
+        # CREATE-then-run-then-DROP.  The drop lives in ``finally``
+        # so a sample that fails still has its DB destroyed.  A
+        # failed drop is recorded in ``drop_log`` and surfaced in
+        # the aggregate summary (never swallowed), but it must
+        # NOT mask the original error — we re-raise the original
+        # when the drop itself raises.
+        sample_records: list[Any] = []
+        try:
+            try:
+                _create_database(
+                    server_dsn=str(args.dsn), dbname=dbname,
+                )
+            except Exception:
+                # If CREATE fails, the database may still exist as a
+                # half-built leftover; try a best-effort drop so the
+                # next per-sample pass is not poisoned.  The drop's
+                # own failure (if any) is reported in ``drop_log``
+                # but never raised here — the original CREATE error
+                # is the one the caller sees.
+                try:
+                    _drop_database(
+                        server_dsn=str(args.dsn),
+                        dbname=dbname,
+                        log=drop_log,
+                    )
+                except Exception:
+                    pass
+                raise
+
+            sample_summary = run_semantic(
+                sub_args, _records_out=sample_records,
+            )
+        finally:
+            try:
+                _drop_database(
+                    server_dsn=str(args.dsn),
+                    dbname=dbname,
+                    log=drop_log,
+                )
+            except Exception:
+                # The per-sample teardown failure is logged but
+                # never replaces the original error.  ``drop_log``
+                # is surfaced verbatim in the aggregate summary.
+                pass
+
+        aggregate_records.extend(sample_records)
+
+        # Per-sample corpus rows are read from the per-sample
+        # ``run_semantic`` summary so the corpus-isolation
+        # evidence reports the imported row counts, not the eval-
+        # case JSONL line count.  The JSONL line count is kept
+        # under a correctly-named field so an auditor can still
+        # see how many eval cases produced the JSONL.
+        per_sample_jsonl = os.path.join(
+            sample_output_dir, "full-objective-results.jsonl",
+        )
+        qa_pairs_rows = _resolve_per_sample_corpus_rows(
+            sample_summary, "qa_pairs",
+        )
+        conversation_stream_rows = _resolve_per_sample_corpus_rows(
+            sample_summary, "conversation_stream",
+        )
+        per_sample_lab[sid] = {
+            "database": str(dbname),
+            "slug": str(slug),
+            "base_path": str(sample_base_path),
+            "qa_pairs_rows": int(qa_pairs_rows),
+            "conversation_stream_rows": int(conversation_stream_rows),
+            "evidence_written_case_count": _count_corpus_rows(
+                per_sample_jsonl
+            ),
+            "session_count": _count_per_sample_sessions(
+                data, expected_sample_id=sid,
+            ),
+            "case_count": int(len(sample_records)),
+            "output_dir": str(sample_output_dir),
+            "summary": {
+                k: v for k, v in sample_summary.items()
+                if k in {"case_count", "status", "hit_at_5", "mrr"}
+            },
+            "drop_log": [
+                e for e in drop_log if e.get("database") == dbname
+            ],
+        }
+
+        per_sample_metrics.append(
+            _per_sample_metric_summary(sample_records)
+        )
+
+    # ---------- Aggregate artifacts ----------
+
+    _ensure_dir(str(args.output_dir))
+
+    # Aggregate records stay in canonical dataset order.
+    aggregate_records_sorted = list(aggregate_records)
+
+    aggregate_jsonl = os.path.join(
+        str(args.output_dir), "full-objective-results.jsonl",
+    )
+    aggregate_canary_jsonl = os.path.join(
+        str(args.output_dir), "semantic-canary-results.jsonl",
+    )
+    _write_jsonl_atomic(
+        aggregate_jsonl,
+        [rec.to_dict() for rec in aggregate_records_sorted],
+    )
+    _write_jsonl_atomic(
+        aggregate_canary_jsonl,
+        [rec.to_dict() for rec in aggregate_records_sorted],
+    )
+
+    aggregate_snap = _metrics.compute_metrics(
+        aggregate_records_sorted,
+        hit_at_k_limit=5,
+        ranking_limit=5,
+        engine_invocations=len(aggregate_records_sorted),
+    )
+    aggregate_snap_dict = aggregate_snap.to_dict()
+    metrics_path = os.path.join(str(args.output_dir), "metrics.json")
+    _write_json_atomic(metrics_path, aggregate_snap_dict)
+
+    coverage_path = os.path.join(
+        str(args.output_dir), "coverage-audit.json",
+    )
+    _write_json_atomic(coverage_path, {
+        "coverage": aggregate_snap_dict.get("coverage", {}),
+        "snapshot_status": str(aggregate_snap_dict.get("status", "")),
+        "questions_total": int(
+            aggregate_snap_dict.get("questions_total", 0)
+        ),
+        "engine_invocations": int(
+            aggregate_snap_dict.get("questions_total", 0)
+        ),
+        "ranking_limit": int(
+            aggregate_snap_dict.get("ranking_limit", 5)
+        ),
+        "mapped_gold_count": int(
+            aggregate_snap_dict.get("mapped_gold_count", 0)
+        ),
+        "unmapped_gold_count": int(
+            aggregate_snap_dict.get("unmapped_gold_count", 0)
+        ),
+        "unresolved_gold_count": int(
+            aggregate_snap_dict.get("unresolved_gold_count", 0)
+        ),
+    })
+
+    latency_header, latency_rows = _latency_rows(aggregate_records_sorted)
+    latency_csv = os.path.join(str(args.output_dir), "latency.csv")
+    _write_csv_atomic(latency_csv, latency_header, latency_rows)
+
+    # Embedding-cache manifest: the per-sample passes reused the
+    # SAME cache directory, so the manifest is the union of the
+    # per-sample manifests (the test asserts this stays stable
+    # across the orchestrator).  We re-derive it from the aggregate
+    # so the JSON shape is identical to the single-lab case.
+    cache_manifest_path = os.path.join(
+        str(args.output_dir), "embedding-cache-manifest.json",
+    )
+    _write_json_atomic(cache_manifest_path, {
+        "cache_root": str(args.cache_dir),
+        "dataset_sha256": str(
+            getattr(data, "source_sha256", "") or args.expected_sha256
+        ),
+        "batch_size": int(args.batch_size),
+        "scope": "sample_isolated",
+        "per_sample": sorted(per_sample_lab.keys()),
+    })
+
+    # Fingerprint: the source-config is the same as in the
+    # single-lab path, so we re-derive it once.
+    embed_section = load_source_config_embed_section(
+        str(args.source_config)
+    )
+    fingerprint_payload = _resolve_fingerprint(embed_section)
+    fingerprint_path = os.path.join(
+        str(args.output_dir), "fingerprint.json",
+    )
+    _write_json_atomic(fingerprint_path, fingerprint_payload)
+
+    # Per-sample metrics artifact.
+    per_sample_metrics_path = os.path.join(
+        str(args.output_dir), "per-sample-metrics.json",
+    )
+    _write_json_atomic(per_sample_metrics_path, {
+        "mode": "sample_isolated",
+        "samples": [p["sample_id"] for p in per_sample_metrics],
+        "per_sample": {
+            p["sample_id"]: p for p in per_sample_metrics
+        },
+    })
+
+    # Corpus-isolation evidence.
+    corpus_isolation_path = os.path.join(
+        str(args.output_dir), "corpus-isolation.json",
+    )
+    _write_json_atomic(corpus_isolation_path, {
+        "mode": "sample_isolated",
+        "samples": [p["sample_id"] for p in plan],
+        "per_sample": {
+            p["sample_id"]: {
+                "database": p["database"],
+                "slug": p["slug"],
+                "base_path": str(per_sample_lab[p["sample_id"]]["base_path"]),
+                "qa_pairs_rows": int(
+                    per_sample_lab[p["sample_id"]]["qa_pairs_rows"]
+                ),
+                "conversation_stream_rows": int(
+                    per_sample_lab[p["sample_id"]]["conversation_stream_rows"]
+                ),
+                "evidence_written_case_count": int(
+                    per_sample_lab[p["sample_id"]][
+                        "evidence_written_case_count"
+                    ]
+                ),
+                "session_count": int(
+                    per_sample_lab[p["sample_id"]]["session_count"]
+                ),
+                "case_count": int(
+                    per_sample_lab[p["sample_id"]]["case_count"]
+                ),
+            } for p in plan
+        },
+    })
+
+    # Aggregate ``g6c-b0-protocol.json``: the orchestrator does
+    # NOT re-run the search protocol (the per-sample passes do);
+    # this block stamps the corpus_isolation evidence so the run
+    # auditor can confirm what each per-sample DB contained.
+    g6c_b0_manifest_path = os.path.join(
+        str(args.output_dir), "g6c-b0-protocol.json",
+    )
+    g6c_b0_manifest = {
+        "corpus_isolation": {
+            "mode": "sample_isolated",
+            "samples": [p["sample_id"] for p in plan],
+            "per_sample_lab": {
+                sid: {
+                    "database": per_sample_lab[sid]["database"],
+                    "qa_pairs_rows": int(
+                        per_sample_lab[sid]["qa_pairs_rows"]
+                    ),
+                    "conversation_stream_rows": int(
+                        per_sample_lab[sid]["conversation_stream_rows"]
+                    ),
+                    "evidence_written_case_count": int(
+                        per_sample_lab[sid]["evidence_written_case_count"]
+                    ),
+                    "case_count": int(per_sample_lab[sid]["case_count"]),
+                } for sid in (p["sample_id"] for p in plan)
+            },
+        },
+        "drop_log": drop_log,
+    }
+    _write_json_atomic(g6c_b0_manifest_path, g6c_b0_manifest)
+
+    # Aggregate case_count MUST equal the sum of per-sample case
+    # counts AND the line count of the aggregate JSONL — the
+    # orchestrator enforces this as a structural invariant so the
+    # test suite can rely on it without re-reading either side.
+    per_sample_total = sum(
+        int(per_sample_lab[p["sample_id"]]["case_count"]) for p in plan
+    )
+    if per_sample_total != len(aggregate_records_sorted):
+        raise CLIError(
+            "sample-isolated orchestrator: aggregate case_count "
+            f"({len(aggregate_records_sorted)}) does not equal the "
+            f"sum of per-sample case counts ({per_sample_total}); "
+            "refusing to write inconsistent artifacts"
+        )
+
+    return {
+        "ok": True,
+        "stage": "semantic",
+        "mode": "sample_isolated",
+        "dataset_sha256": str(
+            getattr(data, "source_sha256", "") or args.expected_sha256
+        ),
+        "source_config_sha256": _file_sha256(str(args.source_config)),
+        "case_count": int(len(aggregate_records_sorted)),
+        "per_sample_total_case_count": int(per_sample_total),
+        "sample_count": int(len(plan)),
+        "status": str(aggregate_snap_dict.get("status", "")),
+        "hit_at_5": aggregate_snap_dict.get("hit_at_5"),
+        "mrr": aggregate_snap_dict.get("mrr"),
+        "ranking_limit": int(aggregate_snap_dict.get("ranking_limit", 5)),
+        "samples": [p["sample_id"] for p in plan],
+        "per_sample": per_sample_metrics,
+        "per_sample_lab": per_sample_lab,
+        "drop_log": drop_log,
+        "metrics": metrics_path,
+        "coverage_audit": coverage_path,
+        "latency_csv": latency_csv,
+        "cache_manifest": cache_manifest_path,
+        "fingerprint": fingerprint_path,
+        "jsonl_baseline": aggregate_jsonl,
+        "jsonl_canary": aggregate_canary_jsonl,
+        "per_sample_metrics": per_sample_metrics_path,
+        "corpus_isolation": corpus_isolation_path,
+        "protocol_manifest": g6c_b0_manifest_path,
+        "overall_status": overall_status,
+        "overall_error": overall_error,
+    }
+
+
+def _coerce_sample_filter(raw: Any) -> tuple[str, ...] | None:
+    """Return ``raw`` as a tuple of trimmed sample ids, or ``None``.
+
+    Accepts the same shapes the single-lab CLI accepts (None / str /
+    iterable of str) so the sample-isolated orchestrator does not
+    duplicate the normaliser.
+    """
+
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return tuple(
+            s.strip() for s in raw.split(",") if s.strip()
+        ) or None
+    return tuple(str(s).strip() for s in raw if str(s).strip()) or None
+
+
+def _resolve_per_sample_corpus_rows(
+    sample_summary: Mapping[str, Any], kind: str,
+) -> int:
+    """Read the imported corpus row count for ``kind`` from ``sample_summary``.
+
+    ``sample_summary`` is the dict returned by a per-sample
+    :func:`run_semantic` call.  The corpus row count for one
+    family lives at ``sample_summary["corpus"][kind]["rows"]``.
+    The orchestrator reads this as the TRUE imported row count —
+    NOT the eval-case JSONL line count, which is reported
+    separately under ``evidence_written_case_count``.
+
+    A missing nested key (e.g. an older ``run_semantic``
+    implementation that did not surface ``corpus``) fails closed
+    with :class:`CLIError` rather than silently writing ``0`` or
+    a fallback; a fabricated zero would mislead the run auditor
+    into believing the per-sample DB was empty when it was in
+    fact unmeasured.
+    """
+
+    if not isinstance(sample_summary, Mapping):
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            "summary is missing or not a mapping; refusing to "
+            "fabricate a corpus row count for "
+            f"{kind!r}"
+        )
+    corpus_block = sample_summary.get("corpus")
+    if not isinstance(corpus_block, Mapping):
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            f"summary is missing 'corpus' (for kind={kind!r}); "
+            "refusing to fabricate a corpus row count"
+        )
+    kind_block = corpus_block.get(kind)
+    if not isinstance(kind_block, Mapping):
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            f"summary is missing 'corpus.{kind}'; refusing to "
+            "fabricate a corpus row count"
+        )
+    rows = kind_block.get("rows")
+    if not isinstance(rows, int) or isinstance(rows, bool):
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            f"summary 'corpus.{kind}.rows' must be an int "
+            f"(got {rows!r}); refusing to fabricate a corpus row "
+            "count"
+        )
+    if rows < 0:
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            f"summary 'corpus.{kind}.rows' must be non-negative "
+            f"(got {rows!r})"
+        )
+    return rows
+
+
+def _count_corpus_rows(jsonl_path: str) -> int:
+    """Return the line count of ``jsonl_path`` if it exists, else 0.
+
+    A 0-line result is the truth for a per-sample pass that crashed
+    before ``run_semantic`` finished writing the JSONL; the
+    aggregate ``corpus-isolation.json`` therefore records this
+    value under the correctly-named ``evidence_written_case_count``
+    field — it is NOT a corpus row count and is NOT exposed under
+    ``qa_pairs_rows`` / ``conversation_stream_rows``.  Tests
+    that want to assert the per-sample case count must use the
+    ``case_count`` field, not this row count.
+    """
+
+    if not jsonl_path or not os.path.isfile(jsonl_path):
+        return 0
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            return sum(1 for _ in f if _.strip())
+    except OSError:
+        return 0
+
+
+def _count_per_sample_sessions(
+    data: Any, expected_sample_id: str,
+) -> int:
+    """Distinct session count for ``expected_sample_id`` in ``data``.
+
+    The recall engine does not surface the per-case session set on
+    ``CaseRecord`` (only ranked / selected / candidate / injected
+    source ids), so we read the canonical LoCoMo dataset for this
+    sample and count its ``sessions`` tuple.  ``0`` means the
+    dataset did not contain the requested sample — the orchestrator
+    surfaces that honestly rather than fabricating a number.
+    """
+
+    for sid, sample in data.samples:
+        if str(sid) != str(expected_sample_id):
+            continue
+        return int(len(sample.sessions))
+    return 0
 
 
 # ---------------------------------------------------------------------
@@ -2890,6 +3880,18 @@ def make_argument_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--repeatability", action="store_true",
                      help="Run a second cached pass and write repeatability.json.")
+    run.add_argument(
+        "--sample-isolated", dest="sample_isolated",
+        action="store_true", default=False,
+        help=(
+            "G6C-B0.1 sample-isolated orchestrator: for every sample "
+            "in scope, DROP+CREATE a fresh disposable database whose "
+            "corpus is that sample's rows only (all sessions retained) "
+            "and aggregate the per-sample passes into the canonical "
+            "artifact set. Incompatible with --case-limit and "
+            "--repeatability."
+        ),
+    )
     run.add_argument("--commit-sha", default="",
                      help="40-char git SHA to stamp the manifest with.")
     run.add_argument("--write-rows", action="store_true",
@@ -2931,6 +3933,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_INPUT_ERROR
 
+    # ----- G6C-B0.1 sample-isolated guards (fail closed) -----
+    # The orchestrator cannot honor a global --case-limit because
+    # the per-sample passes see only their own cases — re-applying
+    # the cap silently would change the meaning of every slice.
+    if bool(getattr(args, "sample_isolated", False)) and (
+        getattr(args, "case_limit", None) is not None
+    ):
+        print(
+            "cli: --case-limit and --sample-isolated are incompatible; "
+            "a global cap has no unambiguous per-sample meaning. "
+            "Drop --case-limit or --sample-isolated.",
+            file=sys.stderr,
+        )
+        return EXIT_INPUT_ERROR
+    # The B0.1 gate is two independent full runs, not an in-run
+    # second pass — repeatability + sample-isolated is refused.
+    if bool(getattr(args, "sample_isolated", False)) and bool(
+        getattr(args, "repeatability", False)
+    ):
+        print(
+            "cli: --repeatability and --sample-isolated are "
+            "incompatible; the B0.1 gate is two independent full "
+            "runs. Drop --repeatability or --sample-isolated.",
+            file=sys.stderr,
+        )
+        return EXIT_INPUT_ERROR
+
     # Stage 1: dry-run — always runs.
     try:
         dry_summary = run_dry_run(args)
@@ -2963,7 +3992,10 @@ def main(argv: list[str] | None = None) -> int:
     # Stage 2: semantic. Touches the disposable lab PG and
     # the provider (via the embedding-preparation module).
     try:
-        result = run_semantic(args)
+        if bool(getattr(args, "sample_isolated", False)):
+            result = _run_semantic_sample_isolated(args)
+        else:
+            result = run_semantic(args)
     except SourceConfigRefused as exc:
         print(f"cli: semantic failed — source-config: {exc}", file=sys.stderr)
         return EXIT_INPUT_ERROR
