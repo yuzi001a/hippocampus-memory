@@ -179,6 +179,12 @@ class RecallTrace:
         self.events: list[tuple[float, str, str]] = []
         self.stage_transitions: list[StageTransition] = []
         self.drop_events: list[DropEvent] = []
+        # G6B CHAR_BUDGET dedupe set: tracks distinct
+        # ``(candidate_id, code, stage)`` triples so ``record_drop`` does
+        # not double-count duplicate CHAR_BUDGET probes.  Lives on the
+        # trace (not the summary) so it survives ``inject`` replacing the
+        # summary object — internal contract detail.
+        self._seen_char_budget_drops: set[tuple[str, DropReasonCode, str]] = set()
         self._lock = threading.RLock()
 
     @property
@@ -336,7 +342,29 @@ class RecallTrace:
         detail: str = "",
         stage: str = "",
     ) -> None:
-        """Record a drop against the snapshot, without needing the original candidate."""
+        """Record a drop against the snapshot, without needing the original candidate.
+
+        ``record_drop`` is the typed truth boundary for budget-drop
+        bookkeeping on :attr:`injection_summary`:
+
+        * When ``code is DropReasonCode.CHAR_BUDGET``, the trace
+          guarantees ``injection_summary`` exists (creating it lazily
+          even when no inject probe has landed yet),
+          ``char_budget == int(query_plan.max_chars)``, every distinct
+          ``(candidate_id, CHAR_BUDGET, stage)`` triple increments
+          ``dropped_for_budget`` by exactly one, and ``truncated`` is
+          ``True``.  Re-recording the same triple MUST NOT double-count
+          — the typed identity is the existing typed drop triple and
+          callers must NOT have to mutate trace internals.
+        * Non-CHAR_BUDGET drops do NOT inflate ``dropped_for_budget``
+          and do NOT create the budget summary (unless an inject
+          probe had already created it).  ``inject``'s existing
+          counters are preserved verbatim.
+
+        Canonical ``drop_events`` semantics are unchanged — every call
+        still appends one entry; the canonical evidence channel stays
+        complete.
+        """
         if not isinstance(code, DropReasonCode):
             raise ValueError("code must be a DropReasonCode")
         with self._lock:
@@ -355,6 +383,24 @@ class RecallTrace:
                     stage=stage,
                 )
             )
+            # G6B CHAR_BUDGET truth boundary.  Only CHAR_BUDGET drops
+            # are budget-truth; every other code leaves injection_summary
+            # alone (it may still be created later by an inject probe).
+            if code is DropReasonCode.CHAR_BUDGET:
+                # Lazy-create the summary on first CHAR_BUDGET drop,
+                # even when injected_count is still 0.
+                if self.injection_summary is None:
+                    self.injection_summary = InjectionSummary(
+                        char_budget=int(self.query_plan.max_chars)
+                    )
+                # Dedupe by typed identity (candidate_id, code, stage)
+                # so duplicate record_drop calls do not double-count.
+                seen_key = (candidate_id, code, stage)
+                if seen_key not in self._seen_char_budget_drops:
+                    self._seen_char_budget_drops.add(seen_key)
+                    self.injection_summary.dropped_for_budget += 1
+                # truncated is a one-way latch: once True, always True.
+                self.injection_summary.truncated = True
 
     def record_stage_transition(
         self,

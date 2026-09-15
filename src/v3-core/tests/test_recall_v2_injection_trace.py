@@ -30,11 +30,13 @@ monkey-patching the engine's ``recall`` method to capture the
       minus number of injected results);
   (d) every dropped id was also SELECTED on the same trace;
   (e) the trace's ``injection_summary`` is consistent with what was
-      recorded.  ``RecallTrace.inject`` only ever increments
-      ``injected_count`` / ``total_chars`` — it NEVER reads drop events
-      — so ``dropped_for_budget`` is locked at 0 by contract.  The test
-      asserts the exact current behaviour and documents the reason in a
-      comment.
+      recorded.  ``RecallTrace.record_drop`` is the typed truth boundary
+      for budget-drop bookkeeping: when ``DropReasonCode.CHAR_BUDGET`` is
+      recorded, the trace guarantees ``injection_summary`` exists with
+      ``char_budget == int(query_plan.max_chars)``, every distinct
+      ``(candidate_id, CHAR_BUDGET, stage)`` triple adds one to
+      ``dropped_for_budget``, and ``truncated`` is ``True``.  Duplicate
+      ``record_drop`` calls for the same triple MUST NOT double-count.
 
 A control assertion verifies that the same run with ``trace=None``
 returns the IDENTICAL context-block string, proving the fix did not
@@ -417,39 +419,308 @@ class TestInjectionStageTrace:
             )
 
         # ---- (e) injection_summary consistency ----
-        # NOTE: ``RecallTrace.inject`` (src/v3core/recall_v2/trace.py) is
-        # the only writer of ``injection_summary`` — it increments
-        # ``injected_count`` and ``total_chars`` from inject probes and
-        # NEVER inspects drop probes.  ``dropped_for_budget`` is therefore
-        # always 0 under the current engine, regardless of how many
-        # CHAR_BUDGET drops the facade records.  This is a known
-        # limitation of the trace contract: the summary field exists
-        # but is not auto-computed from drops.  We assert the exact
-        # current behaviour to lock the contract.
+        # ``RecallTrace.record_drop`` (src/v3core/recall_v2/trace.py) is
+        # the typed truth boundary for budget-drop bookkeeping.  When a
+        # CHAR_BUDGET drop is recorded, the trace guarantees
+        # ``injection_summary`` exists (even if no inject probe landed
+        # yet), ``char_budget`` mirrors the typed query plan, every
+        # distinct ``(candidate_id, CHAR_BUDGET, stage)`` triple adds
+        # one to ``dropped_for_budget``, and ``truncated`` is ``True``.
         summary = facade_trace.injection_summary
         assert summary is not None, (
-            "injection_summary is None — no inject probes landed"
+            "injection_summary is None — no CHAR_BUDGET drop landed and "
+            "no inject probe landed.  record_drop must create the "
+            "summary on first CHAR_BUDGET even with injected_count=0"
         )
-        # The summary reflects ONLY inject probes (it cannot see drops
-        # because ``inject`` never reads drop_events).  We assert the
-        # exact current behaviour, then explain it in a comment.
+        assert summary.char_budget == int(max_chars), (
+            f"summary.char_budget={summary.char_budget} != max_chars="
+            f"{max_chars} — record_drop must mirror query_plan.max_chars"
+        )
+        # The summary reflects the inject probes it has actually seen.
         assert summary.injected_count == len(injected_ids), (
             f"summary.injected_count={summary.injected_count} != "
             f"len(injected)={len(injected_ids)} — inject path counts drift"
         )
-        # Documented limitation: ``dropped_for_budget`` is NOT computed
-        # from ``drop_events``; the field stays at 0 even when drops
-        # are recorded.  See ``RecallTrace.inject`` (no drop read) and
-        # ``InjectionSummary.dropped_for_budget`` (only written by callers
-        # that explicitly set it).
-        assert summary.dropped_for_budget == 0, (
-            "injection_summary.dropped_for_budget is unexpectedly non-zero; "
-            "the trace contract changed — re-evaluate this assertion"
+        # The summary reflects the typed budget-drop records (one per
+        # distinct (candidate_id, CHAR_BUDGET, stage) triple).
+        assert summary.dropped_for_budget == len(char_budget_drops), (
+            f"summary.dropped_for_budget={summary.dropped_for_budget} != "
+            f"len(CHAR_BUDGET drops)={len(char_budget_drops)} — "
+            f"record_drop bookkeeping drifted from drop_events"
+        )
+        # truncated is True once any CHAR_BUDGET drop has been recorded.
+        assert summary.truncated is True, (
+            "summary.truncated must be True once a CHAR_BUDGET drop is "
+            "recorded; the typed budget boundary guarantees it"
+        )
+        # Consistency between selected, injected, dropped counts:
+        # selected == injected + dropped_for_budget.
+        assert len(selected_ids) == (
+            len(injected_ids) + summary.dropped_for_budget
+        ), (
+            f"selected={len(selected_ids)} != injected={len(injected_ids)} "
+            f"+ dropped_for_budget={summary.dropped_for_budget}"
         )
         # Drop count, however, IS observable via trace.drop_events
         # directly — that is the canonical evidence channel for the
         # budget-drop story this regression test pins down.
         assert len(char_budget_drops) == len(dropped_ids), (
             f"drop_events count ({len(char_budget_drops)}) != "
-            f"selected-but-not-injected count ({len(dropped_ids)})"
+            f"len(dropped_ids) ({len(dropped_ids)})"
         )
+
+
+# ===========================================================================
+# Focused unit tests for record_drop as a typed truth boundary
+# ===========================================================================
+
+
+def _unit_trace(max_chars: int = 2000, candidate_ids: tuple[str, ...] = ("c1", "c2")):
+    """Build a RecallTrace wired up with snapshots so record_drop can run.
+
+    Pure stdlib, no PG / providers / facade.  Each candidate gets a
+    minimal ``CandidateSnapshot`` already attached to the trace so
+    :meth:`RecallTrace.record_drop` finds the snapshot by id (the typed
+    truth boundary otherwise raises ``KeyError``).
+    """
+    import time
+    from v3core.recall_v2 import (
+        CandidateSnapshot,
+        DropReasonCode,
+        QueryContext,
+        build_default_query_plan,
+    )
+    ctx = QueryContext(
+        query_id="q-unit", query_text="hello",
+        deadline_monotonic=time.monotonic() + 5.0,
+        budget_ms=1000, limit=4, max_chars=max_chars,
+    )
+    plan = build_default_query_plan(ctx)
+    trace = RecallTrace(query_context=ctx, query_plan=plan)
+    for cid in candidate_ids:
+        snap = CandidateSnapshot(
+            candidate_id=cid, lane="keyword",
+            source_type="qa", source_id=cid,
+        )
+        trace.candidate_snapshots[cid] = snap
+    return trace, DropReasonCode
+
+
+class TestRecordDropCharBudgetTruthBoundary:
+    """Focused unit tests: ``record_drop`` is the typed truth boundary
+    for CHAR_BUDGET bookkeeping on ``injection_summary``.
+
+    Pre-fix behaviour: summary is only ever created by ``inject``,
+    ``dropped_for_budget`` stays at 0, and ``truncated`` is never
+    flipped on by ``record_drop``.  These tests pin the NEW contract.
+    """
+
+    def test_first_char_budget_drop_creates_summary_with_zero_injected(self) -> None:
+        """The first CHAR_BUDGET drop must create the summary even when
+        injected_count is still 0 (no inject probe has landed yet)."""
+        trace, DropReasonCode = _unit_trace(max_chars=1234)
+        trace.record_drop("c1", DropReasonCode.CHAR_BUDGET,
+                           stage="injection", detail="x")
+        s = trace.injection_summary
+        assert s is not None, (
+            "first CHAR_BUDGET drop did not create injection_summary; "
+            "the typed budget boundary must create it eagerly"
+        )
+        assert s.injected_count == 0
+        assert s.char_budget == 1234, (
+            f"summary.char_budget={s.char_budget} != plan.max_chars=1234"
+        )
+        assert s.dropped_for_budget == 1
+        assert s.truncated is True
+
+    def test_each_unique_budget_drop_increments_summary(self) -> None:
+        """Each distinct ``(candidate_id, CHAR_BUDGET, stage)`` triple
+        must add exactly one to ``dropped_for_budget``."""
+        trace, DropReasonCode = _unit_trace(
+            max_chars=500, candidate_ids=("c1", "c2", "c3"),
+        )
+        trace.record_drop("c1", DropReasonCode.CHAR_BUDGET, stage="injection")
+        trace.record_drop("c2", DropReasonCode.CHAR_BUDGET, stage="injection")
+        trace.record_drop("c3", DropReasonCode.CHAR_BUDGET, stage="injection")
+        assert trace.injection_summary is not None
+        assert trace.injection_summary.dropped_for_budget == 3
+        assert trace.injection_summary.char_budget == 500
+        assert trace.injection_summary.truncated is True
+
+    def test_same_budget_drop_is_not_double_counted(self) -> None:
+        """Recording the same ``(candidate_id, CHAR_BUDGET, stage)``
+        triple twice must NOT double-count ``dropped_for_budget``.
+
+        The typed identity is the existing typed drop triple — callers
+        must NOT have to manually mutate trace internals.  ``record_drop``
+        keeps the canonical ``drop_events`` list semantics (one entry
+        per recorded call) but only bumps ``dropped_for_budget`` for
+        the first occurrence of each typed triple.
+        """
+        trace, DropReasonCode = _unit_trace(max_chars=200)
+        trace.record_drop("c1", DropReasonCode.CHAR_BUDGET, stage="injection")
+        # Same triple, recorded again.
+        trace.record_drop("c1", DropReasonCode.CHAR_BUDGET, stage="injection")
+        # The third time, still the same triple.
+        trace.record_drop("c1", DropReasonCode.CHAR_BUDGET, stage="injection")
+        assert trace.injection_summary is not None
+        assert trace.injection_summary.dropped_for_budget == 1, (
+            "duplicate CHAR_BUDGET drops were double-counted — "
+            "record_drop must dedupe by typed identity"
+        )
+        # canonical drop_events still records every probe.
+        char_budget_drops = [
+            de for de in trace.drop_events
+            if getattr(de, "code", None) is DropReasonCode.CHAR_BUDGET
+        ]
+        assert len(char_budget_drops) == 3, (
+            "drop_events must keep one entry per record_drop call — "
+            "canonical semantics preserved"
+        )
+
+    def test_non_char_budget_drops_do_not_bump_dropped_for_budget(self) -> None:
+        """A non-CHAR_BUDGET drop must NOT inflate ``dropped_for_budget``
+        and must NOT create the budget summary (unless an inject probe
+        had already created it)."""
+        trace, DropReasonCode = _unit_trace(
+            max_chars=900, candidate_ids=("c1", "c2"),
+        )
+        # Select before drop (the canonical lifecycle: select then drop).
+        trace.select("c1")
+        trace.record_drop("c1", DropReasonCode.BELOW_THRESHOLD,
+                           stage="fusion")
+        trace.select("c2")
+        trace.record_drop("c2", DropReasonCode.OUTSIDE_LIMIT,
+                           stage="selection")
+        assert trace.injection_summary is None, (
+            "non-CHAR_BUDGET drop created a budget summary — must not "
+            "happen unless an inject probe had landed"
+        )
+        # Now record an inject probe — it creates the summary.
+        trace.inject("c1", char_count=10)
+        s = trace.injection_summary
+        assert s is not None
+        # The summary's budget-related counters must still be 0/False.
+        assert s.dropped_for_budget == 0
+        assert s.truncated is False
+        # A subsequent BELOW_THRESHOLD drop must not bump dropped_for_budget.
+        trace.record_drop("c1", DropReasonCode.BELOW_THRESHOLD, stage="fusion")
+        assert s.dropped_for_budget == 0
+
+    def test_inject_then_budget_drop_keeps_injected_count_and_adds_drop(self) -> None:
+        """inject() must keep its existing counters; a CHAR_BUDGET drop
+        on a different candidate must add only to dropped_for_budget /
+        truncated."""
+        trace, DropReasonCode = _unit_trace(
+            max_chars=400, candidate_ids=("kept", "dropped"),
+        )
+        trace.select("kept")
+        trace.inject("kept", char_count=120)
+        s_before = trace.injection_summary
+        assert s_before is not None
+        assert s_before.injected_count == 1
+        assert s_before.total_chars == 120
+        assert s_before.dropped_for_budget == 0
+        # CHAR_BUDGET drop on the other candidate.
+        trace.select("dropped")
+        trace.record_drop("dropped", DropReasonCode.CHAR_BUDGET,
+                           stage="injection")
+        # inject() counters preserved; budget counters reflect the drop.
+        s_after = trace.injection_summary
+        assert s_after is s_before
+        assert s_after.injected_count == 1
+        assert s_after.total_chars == 120
+        assert s_after.dropped_for_budget == 1
+        assert s_after.truncated is True
+        assert s_after.char_budget == 400
+
+    def test_all_budget_dropped_zero_injected_full_closure(self) -> None:
+        """Zero-injected / all-budget-dropped closure.
+
+        Scenario: ONE selected candidate, NO inject probe, ONE CHAR_BUDGET
+        drop with stage='injection'.  Every constraint from the Issue A
+        contract must hold simultaneously on the SAME trace:
+
+          * injection_summary exists (lazy-created by record_drop).
+          * char_budget == int(query_plan.max_chars).
+          * injected_count == 0  (no inject probe landed).
+          * dropped_for_budget == 1  (exactly one budget drop).
+          * truncated is True.
+          * selected == injected + dropped_for_budget
+            (here: 1 == 0 + 1).
+        """
+        max_chars = 777
+        trace, DropReasonCode = _unit_trace(
+            max_chars=max_chars, candidate_ids=("solo",),
+        )
+        # Select without injecting — the canonical "tried but budget-cut"
+        # shape that this slice's facade emits.
+        trace.select("solo")
+        trace.record_drop(
+            "solo", DropReasonCode.CHAR_BUDGET,
+            stage="injection", detail="no_room_left",
+        )
+        s = trace.injection_summary
+        assert s is not None, (
+            "summary missing — record_drop must create it eagerly on "
+            "the first CHAR_BUDGET drop"
+        )
+        # char_budget mirrors the typed query plan, NOT some other value.
+        assert s.char_budget == max_chars, (
+            f"char_budget={s.char_budget} != query_plan.max_chars={max_chars}"
+        )
+        # No inject probe landed, so injected_count / total_chars are 0.
+        assert s.injected_count == 0, (
+            f"injected_count must be 0 (no inject probe landed), got "
+            f"{s.injected_count}"
+        )
+        assert s.total_chars == 0
+        # Exactly one CHAR_BUDGET drop recorded → dropped_for_budget=1.
+        assert s.dropped_for_budget == 1, (
+            f"dropped_for_budget={s.dropped_for_budget}, expected 1"
+        )
+        # truncated is a one-way latch from the typed truth boundary.
+        assert s.truncated is True
+        # Closed ledger: selected == injected + dropped_for_budget.
+        assert 1 == s.injected_count + s.dropped_for_budget, (
+            "ledger not closed: selected=1 != injected=0 + dropped=1"
+        )
+        # drop_events still records exactly the one probe (canonical
+        # semantics preserved).
+        assert len(trace.drop_events) == 1
+        de = trace.drop_events[0]
+        assert de.code is DropReasonCode.CHAR_BUDGET
+        assert de.candidate_id == "solo"
+        assert de.stage == "injection"
+        assert de.detail == "no_room_left"
+
+    def test_many_selected_all_dropped_zero_injected_closure(self) -> None:
+        """N selected, 0 injected, N CHAR_BUDGET drops.
+
+        Mirror of the all-budget-dropped fixture, with multiple
+        candidates.  The closed-ledger invariant scales:
+        selected == injected + dropped_for_budget must hold for any N.
+        """
+        ids = tuple(f"c{i}" for i in range(5))
+        trace, DropReasonCode = _unit_trace(
+            max_chars=100, candidate_ids=ids,
+        )
+        for cid in ids:
+            trace.select(cid)
+            trace.record_drop(cid, DropReasonCode.CHAR_BUDGET,
+                                stage="injection")
+        s = trace.injection_summary
+        assert s is not None
+        assert s.char_budget == 100
+        assert s.injected_count == 0
+        assert s.dropped_for_budget == 5
+        assert s.truncated is True
+        # Closed ledger for N=5.
+        assert len(ids) == s.injected_count + s.dropped_for_budget
+        # canonical drop_events preserved.
+        assert len(trace.drop_events) == 5
+        char_budget_drops = [
+            de for de in trace.drop_events
+            if de.code is DropReasonCode.CHAR_BUDGET
+        ]
+        assert len(char_budget_drops) == 5

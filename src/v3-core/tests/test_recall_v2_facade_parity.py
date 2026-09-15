@@ -1142,6 +1142,228 @@ class TestQueryPlanReality:
 
 
 # ===========================================================================
+# Effective-plan rerank_enabled contract
+# ===========================================================================
+
+
+class TestEffectivePlanRerankEnabled:
+    """Focused tests for the new ``build_effective_query_plan`` rerank
+    inputs (``rerank_cfg``, ``rerank_top_n``).
+
+    The plan MUST mirror the legacy recall_pool's *pre-execution*
+    rerank gating: rerank is intended to be enabled when both the
+    config has an endpoint AND the top_n is truthy.  Runtime budget
+    skips at the 1.5s gate MUST NOT flip the plan to False — that
+    decision is execution-time, not planning-time.
+    """
+
+    def _ctx(self) -> Any:
+        import time
+        return QueryContext(
+            query_id="q-rerank", query_text="hello",
+            deadline_monotonic=time.monotonic() + 5.0,
+            budget_ms=1000, limit=4, max_chars=1000,
+        )
+
+    def test_rerank_enabled_true_when_endpoint_and_top_n(self) -> None:
+        """Both signals present => plan.rerank_enabled is True."""
+        plan = build_effective_query_plan(
+            self._ctx(),
+            include_keyword=True, include_card_vector=False,
+            include_message_vector=False, include_effective=False,
+            include_topic=True, include_yin=False, include_notes=False,
+            rerank_cfg={"endpoint": "http://rerank.example/v1"},
+            rerank_top_n=20,
+        )
+        assert plan.rerank_enabled is True, (
+            "rerank_enabled must be True when rerank_cfg.endpoint is "
+            "set AND rerank_top_n is a positive integer"
+        )
+
+    def test_rerank_enabled_false_when_no_endpoint(self) -> None:
+        """No endpoint in rerank_cfg => plan.rerank_enabled is False."""
+        plan = build_effective_query_plan(
+            self._ctx(),
+            include_keyword=True, include_card_vector=False,
+            include_message_vector=False, include_effective=False,
+            include_topic=True, include_yin=False, include_notes=False,
+            rerank_cfg={},  # no endpoint
+            rerank_top_n=20,
+        )
+        assert plan.rerank_enabled is False, (
+            "rerank_enabled must be False when rerank_cfg has no endpoint"
+        )
+
+    def test_rerank_enabled_false_when_rerank_cfg_is_none(self) -> None:
+        """rerank_cfg=None => plan.rerank_enabled is False."""
+        plan = build_effective_query_plan(
+            self._ctx(),
+            include_keyword=True, include_card_vector=False,
+            include_message_vector=False, include_effective=False,
+            include_topic=True, include_yin=False, include_notes=False,
+            rerank_cfg=None,
+            rerank_top_n=20,
+        )
+        assert plan.rerank_enabled is False, (
+            "rerank_enabled must be False when rerank_cfg is None"
+        )
+
+    def test_rerank_enabled_false_when_top_n_disabled(self) -> None:
+        """top_n disabled / None => plan.rerank_enabled is False."""
+        plan_disabled = build_effective_query_plan(
+            self._ctx(),
+            include_keyword=True, include_card_vector=False,
+            include_message_vector=False, include_effective=False,
+            include_topic=True, include_yin=False, include_notes=False,
+            rerank_cfg={"endpoint": "http://rerank.example/v1"},
+            rerank_top_n=None,
+        )
+        assert plan_disabled.rerank_enabled is False, (
+            "rerank_enabled must be False when rerank_top_n is None"
+        )
+        plan_zero = build_effective_query_plan(
+            self._ctx(),
+            include_keyword=True, include_card_vector=False,
+            include_message_vector=False, include_effective=False,
+            include_topic=True, include_yin=False, include_notes=False,
+            rerank_cfg={"endpoint": "http://rerank.example/v1"},
+            rerank_top_n=0,
+        )
+        assert plan_zero.rerank_enabled is False, (
+            "rerank_enabled must be False when rerank_top_n is 0/falsy"
+        )
+
+    def test_runtime_low_budget_skip_keeps_plan_rerank_enabled_true(self) -> None:
+        """The plan must express INTENDED rerank enablement; runtime
+        budget-skip decisions (1.5s gate) are execution-time and do
+        NOT flip plan.rerank_enabled.  This test uses a deadline
+        whose remaining budget is far below 1.5s — the legacy
+        _rerank() would skip; the plan MUST still be True.
+        """
+        import time
+        ctx = QueryContext(
+            query_id="q-rerank-skip",
+            query_text="hello",
+            # Deadline already passed: remaining budget is 0.
+            deadline_monotonic=time.monotonic() - 1.0,
+            budget_ms=1000, limit=4, max_chars=1000,
+        )
+        plan = build_effective_query_plan(
+            ctx,
+            include_keyword=True, include_card_vector=False,
+            include_message_vector=False, include_effective=False,
+            include_topic=True, include_yin=False, include_notes=False,
+            rerank_cfg={"endpoint": "http://rerank.example/v1",
+                          "min_remaining_s": 1.5},
+            rerank_top_n=20,
+        )
+        assert plan.rerank_enabled is True, (
+            "low-budget runtime skip must NOT flip plan.rerank_enabled "
+            "to False; planning reflects intended enablement only"
+        )
+
+    def test_build_default_query_plan_unchanged_by_new_rerank_inputs(self) -> None:
+        """build_default_query_plan signature / behaviour MUST NOT
+        change — the new rerank inputs are only on the effective
+        builder.  Calling build_default_query_plan still produces a
+        plan whose rerank_enabled defaults to True (its previous
+        behaviour)."""
+        from v3core.recall_v2.contracts import build_default_query_plan
+        plan = build_default_query_plan(self._ctx())
+        # Default-plan rerank_enabled stays True (matches the
+        # pre-existing default-plan contract; the G6A redline pins it).
+        assert plan.rerank_enabled is True
+        # And build_default_query_plan must NOT accept rerank_cfg /
+        # rerank_top_n as a kwarg (its signature is unchanged).
+        import inspect
+        sig = inspect.signature(build_default_query_plan)
+        for name in ("rerank_cfg", "rerank_top_n"):
+            assert name not in sig.parameters, (
+                f"build_default_query_plan signature leaked {name}; "
+                f"its semantics must not change"
+            )
+
+
+class TestEnginePassesRerankIntoEffectivePlan:
+    """Focused: RecallV2Engine must pass the live facade rerank_cfg /
+    rerank_top_n into build_effective_query_plan so the typed plan
+    mirrors the legacy recall_pool's intended rerank state.
+
+    We verify the seam by monkey-patching build_effective_query_plan
+    (the engine uses ``from .contracts import build_effective_query_plan``
+    then references it by name on the module) and capturing the kwargs.
+    The engine must forward BOTH rerank_cfg and rerank_top_n.
+    """
+
+    def test_engine_forwards_rerank_cfg_and_top_n_to_effective_builder(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured_kwargs: list[dict] = []
+        real_effective = build_effective_query_plan
+
+        def _capture(ctx: Any, **kw: Any) -> Any:
+            captured_kwargs.append({"ctx": ctx, **kw})
+            return real_effective(ctx, **kw)
+
+        # The engine uses ``from .contracts import build_effective_query_plan``;
+        # patch BOTH the contracts module attr and the engine module attr
+        # (the engine re-exports it at module scope for monkey-patch tests).
+        import v3core.recall_v2.contracts as contracts_mod
+        import v3core.recall_v2.engine as engine_mod
+        monkeypatch.setattr(contracts_mod, "build_effective_query_plan", _capture)
+        monkeypatch.setattr(engine_mod, "build_effective_query_plan", _capture)
+
+        from v3core.recall_v2.engine import RecallV2Engine
+        rows: list[tuple] = [
+            (i, "2026-09-14T10:00:00+00:00",
+             f"q-{i} needle", f"a-{i} needle")
+            for i in range(2200, 2203)
+        ]
+
+        def _fake_combined_lookup(*a: Any, **k: Any) -> tuple[dict, list]:
+            return ({"needle": 1}, [list(rows)])
+
+        _disable_optional_lanes(monkeypatch)
+        monkeypatch.setattr(
+            recall_pool, "_combined_qa_keyword_lookup",
+            _fake_combined_lookup, raising=False,
+        )
+
+        cfg = _production_config()
+        # Drive the engine directly with explicit rerank_cfg / rerank_top_n.
+        engine = RecallV2Engine(trace_enabled=True)
+        engine.recall(
+            "needle", limit=3, config=cfg, card_index={},
+            pg=_StubPg(), q_emb=None, max_chars=2000,
+            rerank_cfg={"endpoint": "http://rerank.example/v1"},
+            rerank_top_n=20,
+            # include_* flags so the engine routes through the effective
+            # builder path.
+            include_keyword=True, include_card_vector=False,
+            include_message_vector=False, include_effective=False,
+            include_topic=True, include_yin=False, include_notes=False,
+        )
+
+        assert captured_kwargs, (
+            "engine never invoked build_effective_query_plan — it fell "
+            "back to the default builder; the include_* flags path is "
+            "broken for this call"
+        )
+        last = captured_kwargs[-1]
+        assert "rerank_cfg" in last, (
+            "engine did not forward rerank_cfg to the effective plan "
+            "builder; rerank_enabled cannot mirror facade intent"
+        )
+        assert "rerank_top_n" in last, (
+            "engine did not forward rerank_top_n to the effective plan "
+            "builder; rerank_enabled cannot mirror facade intent"
+        )
+        # The forwarded values must be the same ones we passed to the engine.
+        assert last["rerank_cfg"] == {"endpoint": "http://rerank.example/v1"}
+        assert last["rerank_top_n"] == 20
+
+
+# ===========================================================================
 # Trace lifecycle
 # ===========================================================================
 

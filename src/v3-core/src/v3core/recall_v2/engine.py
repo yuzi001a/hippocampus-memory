@@ -901,6 +901,8 @@ class RecallV2Engine:
         agent_id: Optional[str],
         deadline: Any,
         effective_include_flags: Optional[Mapping[str, Any]] = None,
+        rerank_cfg: Any = None,
+        rerank_top_n: Any = None,
     ) -> _BuiltContext:
         ctx = adapters.build_query_context(
             query,
@@ -920,7 +922,19 @@ class RecallV2Engine:
         plan: QueryPlan
         if effective_include_flags:
             try:
-                plan = build_effective_query_plan(ctx, **dict(effective_include_flags))
+                # G6B effective-plan extension: forward the live
+                # facade rerank_cfg / rerank_top_n into the typed
+                # builder so ``plan.rerank_enabled`` mirrors the
+                # legacy recall_pool's pre-execution rerank intent.
+                # No execution semantics are touched here — the
+                # kwargs are forwarded to the legacy call separately
+                # via ``_build_legacy_kwargs`` further below.
+                plan = build_effective_query_plan(
+                    ctx,
+                    **dict(effective_include_flags),
+                    rerank_cfg=rerank_cfg,
+                    rerank_top_n=rerank_top_n,
+                )
             except Exception:
                 # Defensive: if the effective builder raises, fall back
                 # to the default builder rather than failing the whole
@@ -1041,6 +1055,8 @@ class RecallV2Engine:
                     agent_id=agent_id,
                     deadline=deadline,
                     effective_include_flags=effective_include_flags,
+                    rerank_cfg=rerank_cfg,
+                    rerank_top_n=rerank_top_n,
                 )
             except BaseException as e:  # noqa: BLE001 — pre-execution safety net
                 pre_exc = e
