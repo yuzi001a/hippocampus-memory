@@ -25,7 +25,8 @@ from .contracts import (
     StageTransition, DropEvent,
     # Helpers
     safe_metadata,
-    build_default_query_plan, canonical_algorithm_snapshot,
+    build_default_query_plan, build_effective_query_plan,
+    canonical_algorithm_snapshot,
 )
 from .trace import (
     RecallTrace, recall_trace_from_plan,
@@ -47,6 +48,7 @@ __all__ = [
     "CandidateSnapshot", "LaneSummary", "InjectionSummary",
     # Helpers
     "safe_metadata",
-    "build_default_query_plan", "canonical_algorithm_snapshot",
+    "build_default_query_plan", "build_effective_query_plan",
+    "canonical_algorithm_snapshot",
     "recall_trace_from_plan",
 ]

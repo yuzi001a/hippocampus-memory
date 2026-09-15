@@ -373,6 +373,148 @@ def build_default_query_plan(context: QueryContext) -> QueryPlan:
     )
 
 
+def build_effective_query_plan(
+    context: QueryContext,
+    *,
+    include_keyword: bool,
+    include_card_vector: bool,
+    include_message_vector: bool,
+    include_effective: bool,
+    include_topic: bool,
+    include_yin: bool,
+    include_notes: bool,
+    rerank_cfg: Any = None,
+    rerank_top_n: Any = None,
+) -> QueryPlan:
+    """Build a QueryPlan that mirrors the REAL legacy execution shape.
+
+    The plan must reflect what the legacy ``recall_pool`` will actually
+    do on the success path, NOT a hypothetical all-enabled ideal.  The
+    legacy keyword block owns BOTH the QA keyword/snapshot path AND the
+    QA vector path — so the ``qa`` lane is enabled iff ``include_keyword``
+    is set.  The legacy vector family (topic, yin, notes, message
+    vector, effective, card vector) all live behind the ``vector`` lane
+    for the purpose of plan enablement; ``explicit`` is the active-memory
+    seam, which lives inside the keyword block AND the vector block, so
+    it is enabled iff EITHER ``include_keyword`` OR ``include_card_vector``
+    is set (those are the two seams that call ``_active_memory_reader_for``).
+
+    A disabled lane carries a truthful ``reason`` (e.g.
+    ``"include_keyword=False"``) so the trace can never claim a lane is
+    enabled while the real legacy call skipped it.  Lanes are NOT
+    renamed and no new lanes are introduced; ``yin`` and ``notes`` stay
+    inside the vector family.
+
+    This builder is ADDITIVE — :func:`build_default_query_plan` is
+    unchanged and remains the default for callers that do NOT supply the
+    facade include_* flags.
+
+    Rerank gating (G6B effective-plan extension):
+
+    The new keyword-only inputs ``rerank_cfg`` and ``rerank_top_n``
+    carry the live facade values into planning so the typed plan
+    mirrors the legacy recall_pool's *pre-execution* rerank intent.
+    ``plan.rerank_enabled`` is ``True`` only when BOTH signals are
+    truthy: ``rerank_cfg`` is a mapping with a non-empty ``endpoint``
+    AND ``rerank_top_n`` is a truthy value (non-zero, non-None).
+    Missing endpoint, ``rerank_cfg=None``, ``rerank_top_n=None``, or
+    ``rerank_top_n==0`` all yield ``rerank_enabled=False``.  Runtime
+    budget-skip decisions (the 1.5s gate inside ``_rerank``) are
+    execution-time and MUST NOT flip the plan to False — they live
+    behind the same ``rerank_enabled=True`` plan.  This builder
+    therefore does NOT consult the deadline / remaining budget.
+
+    Backward compatibility: ``rerank_cfg`` and ``rerank_top_n`` are
+    keyword-only with safe defaults (``None``/``None``).  Direct
+    callers that never supply them get ``rerank_enabled=False`` —
+    i.e. the effective builder never invents a rerank endpoint it
+    was not told about.  This is the correct mirror of the legacy
+    recall_pool's pre-execution gate (no endpoint + no top_n ⇒ no
+    rerank).  :func:`build_default_query_plan` is unchanged and
+    remains the default for callers that do NOT supply the facade
+    include_* flags; its own ``rerank_enabled=True`` default is
+    preserved by the G6A redline and is NOT consulted here.
+    """
+    budget = max(1, int(context.budget_ms))
+    final_limit = int(context.limit) if context.limit > 0 else DEFAULT_QUERY_LIMIT
+    max_chars = int(context.max_chars) if context.max_chars > 0 else DEFAULT_INJECTION_MAX_CHARS
+    slice_ = max(50, budget // 6)
+    qa_slice = slice_ + budget // 12
+
+    kw_enabled = bool(include_keyword)
+    vec_enabled = bool(
+        include_card_vector or include_message_vector or include_effective
+        or include_topic or include_yin or include_notes
+    )
+    topic_enabled = bool(include_topic)
+    qa_enabled = bool(include_keyword)
+    explicit_enabled = bool(include_keyword or include_card_vector)
+
+    # G6B effective-plan rerank gating.  Mirror the legacy
+    # ``recall_pool._rerank`` pre-execution gate:
+    #   - endpoint present in rerank_cfg (truthy non-empty string)
+    #   - rerank_top_n is a truthy non-zero value
+    # Missing / disabled signals flip the plan to False; the 1.5s
+    # runtime budget gate is NOT consulted (planning reflects intended
+    # enablement, not runtime execution-time skips).
+    _endpoint_present = bool(
+        isinstance(rerank_cfg, Mapping)
+        and bool(rerank_cfg.get("endpoint"))
+    )
+    _top_n_truthy = bool(rerank_top_n)
+    rerank_enabled = bool(_endpoint_present and _top_n_truthy)
+
+    return QueryPlan(
+        query_id=context.query_id,
+        lanes=(
+            LanePlan(
+                LANE_KEYWORD, kw_enabled, slice_, context.deadline_monotonic,
+                max(20, final_limit * 4),
+                reason="" if kw_enabled else "include_keyword=False",
+            ),
+            LanePlan(
+                LANE_VECTOR, vec_enabled, slice_, context.deadline_monotonic,
+                max(20, final_limit * 4),
+                reason=(
+                    "" if vec_enabled
+                    else "include_card_vector=False,include_message_vector=False,"
+                         "include_effective=False,include_topic=False,"
+                         "include_yin=False,include_notes=False"
+                ),
+            ),
+            LanePlan(
+                LANE_TOPIC, topic_enabled, slice_, context.deadline_monotonic,
+                max(15, final_limit * 3),
+                reason="" if topic_enabled else "include_topic=False",
+            ),
+            LanePlan(
+                LANE_QA, qa_enabled, qa_slice, context.deadline_monotonic,
+                max(30, final_limit * 8),
+                reason="" if qa_enabled else "include_keyword=False",
+            ),
+            LanePlan(
+                LANE_EXPLICIT, explicit_enabled,
+                max(50, slice_ // 2), context.deadline_monotonic,
+                final_limit,
+                reason=(
+                    "" if explicit_enabled
+                    else "include_keyword=False,include_card_vector=False"
+                ),
+            ),
+        ),
+        deadline_monotonic=context.deadline_monotonic,
+        budget_ms=budget,
+        # Rerank gating mirrors the legacy recall_pool's pre-execution
+        # intent: the facade passes rerank_cfg + rerank_top_n, and the
+        # typed plan reflects whether those signals are present.
+        rerank_enabled=rerank_enabled,
+        rerank_limit=DEFAULT_RERANK_LIMIT,
+        final_limit=final_limit,
+        max_chars=max_chars,
+        algorithm=canonical_algorithm_snapshot(),
+    )
+
+
 # Drop reason
 
 @dataclass(frozen=True)

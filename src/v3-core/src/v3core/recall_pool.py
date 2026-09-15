@@ -81,6 +81,25 @@ def _import_ahocorasick():
 logger = logging.getLogger("v3core.recall_pool")
 
 
+def _probe(trace, method, *args, **kwargs):
+    """Additive, guarded probe that emits one legacy ``getattr`` hook call.
+
+    When ``trace`` is ``None`` (the default), this is a no-op and the
+    recall function's behaviour is byte-identical to before.  When
+    ``trace`` is supplied, ``trace`` is duck-typed — recall_v2 is never
+    imported here, so the dependency direction stays one-way.  Any
+    exception is swallowed so a faulty sink can never break retrieval.
+    """
+    if trace is None:
+        return
+    try:
+        fn = getattr(trace, method, None)
+        if fn is not None:
+            fn(*args, **kwargs)
+    except Exception:
+        return
+
+
 def _pg_is_connected(pg, deadline=None) -> bool:
     """Health check that does not hide an active prefetch deadline.
 
@@ -1760,6 +1779,7 @@ def recall_pool(
     *,
     deadline: Optional[PrefetchDeadline] = None,
     outer_admitted: bool = False,
+    trace=None,
 ):
     """Multi-path recall + RRF + optional rerank + facts enrichment.
 
@@ -1783,6 +1803,47 @@ def recall_pool(
               ``current_outer=True`` 计算, 不会把本次 outer 重复扣掉.
               False (默认) 时维持旧 direct / legacy 语义 — 不凭空多算一个
               outer reader. 不传时, 旧调用方 (含测试 fake) 行为零变化.
+        trace (G6B Slice B, keyword-only, default None):
+              可选 — 一个鸭子类型 ``LegacySink`` 兼容对象.  为 ``None`` 时
+              recall_pool 行为与之前字节级一致 (no-op probes, 零额外开销).
+              非 ``None`` 时 recall_pool 在以下阶段通过 ``_probe`` 发出
+              ``getattr`` 探针:
+
+              * 5 个 lane 的 ``lane_start`` / ``lane_finish`` (或
+                ``lane_finish(timed_out=True, reason='deadline')`` 当
+                ``PrefetchDeadlineExceeded`` 在该 lane 内重抛) —
+                ``keyword`` / ``qa`` / ``explicit`` / ``vector`` /
+                ``topic``;
+              * ``lane_candidates(lane, source_ids)`` 在每个 lane 收集结束
+                时给出该 lane 的 source_id 列表;
+              * fusion (RRF) 阶段: 每条 ``scored`` hit 发出一次
+                ``score(source_id, 'fusion', rrf_score, operation='rrf')``;
+              * temporal 阶段: 当某 hit 真实应用了 half-life 衰减时, 发出
+                ``score(source_id, 'temporal', rrf_score,
+                operation='half_life_decay', decay=, age_days=)``;
+              * rare-bonus 阶段: 当某 hit 加上 0.08 封顶的稀有词加分时,
+                发出 ``event(source_id, 'SCORED', 'rare_bonus')``;
+              * exact-QA-boost 阶段: 当某 hit 加上 0.5 保送分时, 发出
+                ``event(source_id, 'SCORED', 'exact_qa_boost')``;
+              * rerank 阶段: 实际跑 ``_rerank`` 时, 对 ``ranked`` 中每条 hit
+                发出 ``event(source_id, 'RERANKED')``; 不跑 rerank 时发出
+                ``warn('rerank skipped: <reason>')``, reason 严格从
+                ``rerank_cfg`` / ``rerank_top_n`` / 长度比较三个真实条件
+                之一派生 ('no_rerank_cfg' / 'rerank_top_n_disabled' /
+                'len_le_rerank_top_n');
+              * selection 阶段: ``final`` 里的 hit 发出
+                ``select(source_id)``; ``ranked[limit:]`` 里的 hit 发出
+                ``drop(source_id, 'OUTSIDE_LIMIT', stage='selection')``;
+              * lane degradation: 每个 lane 的 ``except Exception as e``
+                日志分支前, 发出 ``error('lane=NAME: ' + str(e)[:200])``;
+              * lane timed-out: 每个 lane 的 ``except PrefetchDeadlineExceeded``
+                重抛之前, 发出
+                ``lane_finish(NAME, timed_out=True, reason='deadline')``;
+              * pg_fail 警告: 当 recall 后 PG 失效时, 发出
+                ``warn('pg_fail=True')``.
+
+              recall_v2 模块**永不**在此模块导入 — 依赖方向保持单向
+              (recall_v2 -> recall_pool).
 
     Returns:
         (hits, pg_fail) where pg_fail=True means PG was configured but disconnected.
@@ -1845,6 +1906,30 @@ def recall_pool(
     _qa_boost_sig = {}
 
     # Keyword path — PG topics 表（优先）或 SQLite topic_blocks 兜底
+    # Keyword + QA lanes (single combined block — both seams share the
+    # `kw_ids` set + the kind discriminant on each hit).
+    _probe(trace, 'lane_start', 'keyword')
+    _probe(trace, 'lane_start', 'qa')
+    # Explicit lane (active-memory): the legacy code reuses kw_ids/vec_ids
+    # so these rows still flow through the existing RRF machinery; the probe
+    # only records that the explicit reader actually returned rows.
+    _probe(trace, 'lane_start', 'explicit')
+    # G6B Slice D (D2): always initialize the explicit-lane id-capture lists
+    # so the lane_finish probe below can read them regardless of which path
+    # ran (include_keyword and/or include_card_vector).
+    _am_kw_ids_for_probe: list[str] = []
+    _am_vec_ids_for_probe: list[str] = []
+    _am_kw_reader_seen = False  # reader resolver ran for kw seam
+    _am_vec_reader_seen = False  # reader resolver ran for vec seam
+    _am_kw_reader_present = False  # kw reader resolved to non-None
+    _am_vec_reader_present = False  # vec reader resolved to non-None
+    # G6B Slice H: QA-vector-only ids for the qa-lane provenance probe.
+    # Initialised BEFORE the QA vector block runs so the lane_candidates
+    # / lane_finish probes below can read it even if the vector path is
+    # skipped (include_card_vector=False), errors out, or pg is None.
+    # The QA-vector hit still flows through vec_ids.add(_qsid) unchanged
+    # so the frozen qa_vec_rank ranking path picks it up.
+    _qa_vec_ids_for_probe: list[str] = []
     if include_keyword:
         if deadline is not None:
             deadline.check(context="keyword path")
@@ -1857,29 +1942,65 @@ def recall_pool(
                 if deadline is not None:
                     deadline.check(context="active memory keyword path")
                 _am_reader = _active_memory_reader_for(pg, deadline)
+                _am_kw_reader_seen = True
+                _am_kw_reader_present = _am_reader is not None
                 if _am_reader is not None:
                     try:
                         _am_kw_rows = _am_reader.search_keyword(
                             query, limit=max(rerank_top_n or 0, limit * 3)
                         )
                     except PrefetchDeadlineExceeded:
+                        # A8 (G6B Slice B): record the lane timeout
+                        # BEFORE the raise.
+                        try:
+                            _probe(trace, 'lane_finish', 'explicit', timed_out=True, reason='deadline')
+                        except Exception:
+                            pass
                         raise
                     except Exception as _am_kw_exc:
+                        # A7 (G6B Slice B): record the degradation in the
+                        # trace BEFORE the existing logger call.
+                        try:
+                            _probe(trace, 'error', 'lane=explicit: ' + str(_am_kw_exc)[:200])
+                        except Exception:
+                            pass
                         logger.debug(
                             "active-memory keyword search failed: %s",
                             _safe_err(_am_kw_exc)[:200],
                         )
                         _am_kw_rows = []
+                    # Snapshot the explicit ids BEFORE adding to hits so the
+                    # probe can record the *real* active-memory provenance
+                    # even after _add_active_memory_to_hits mutates the dict.
+                    for _row in (_am_kw_rows or []):
+                        try:
+                            _mid = _row.get("memory_id") or _row.get("source_id")
+                        except Exception:
+                            _mid = None
+                        if isinstance(_mid, str) and _mid:
+                            _am_kw_ids_for_probe.append(_mid)
                     _add_active_memory_to_hits(
                         _am_kw_rows, hits=hits, target_ids=kw_ids, with_cosine=False
                     )
             except PrefetchDeadlineExceeded:
+                # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+                try:
+                    _probe(trace, 'lane_finish', 'explicit', timed_out=True, reason='deadline')
+                except Exception:
+                    pass
                 raise
             except Exception as _am_kw_outer:
+                # A7 (G6B Slice B): record the degradation in the trace
+                # BEFORE the existing logger call.
+                try:
+                    _probe(trace, 'error', 'lane=explicit: ' + str(_am_kw_outer)[:200])
+                except Exception:
+                    pass
                 logger.debug(
                     "active-memory keyword seam failed: %s",
                     _safe_err(_am_kw_outer)[:200],
                 )
+                _am_kw_ids_for_probe = []
             _kw_topics = []
             _qa_hits_raw = []  # 2026-08-09: QA 原文命中 (PG 分支填充, 兜底空)
             _qa_boost_sig: dict[str, tuple] = {}  # 2026-08-12 A-1: (min_freq, 低频词数) 保送信号
@@ -2341,8 +2462,19 @@ def recall_pool(
                                                 _seen_qa.add(_r[0])
                                                 _qa_hits_raw.append(_r)
                 except PrefetchDeadlineExceeded:
+                    # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+                    try:
+                        _probe(trace, 'lane_finish', 'keyword', timed_out=True, reason='deadline')
+                    except Exception:
+                        pass
                     raise
                 except Exception as _e:
+                    # A7 (G6B Slice B): record the degradation in the
+                    # trace BEFORE the existing logger call.
+                    try:
+                        _probe(trace, 'error', 'lane=keyword: ' + str(_e)[:200])
+                    except Exception:
+                        pass
                     logger.debug("PG keyword search failed: %s", str(_e)[:100])
             elif _terms:
                 # SQLite 兜底
@@ -2382,6 +2514,12 @@ def recall_pool(
                     _t_match = [t for t in _terms if len(t) > 2 and t.lower() in _t_lower]
                     _t_score = 0.5 + 0.15 * len(_t_match)
                 except PrefetchDeadlineExceeded:
+                    # A8 (G6B Slice B): record the lane timeout BEFORE
+                    # the raise.  Inside the topic-keyword scoring block.
+                    try:
+                        _probe(trace, 'lane_finish', 'keyword', timed_out=True, reason='deadline')
+                    except Exception:
+                        pass
                     raise
                 except Exception:
                     pass
@@ -2485,15 +2623,64 @@ def recall_pool(
                         created_at=_ts,
                     )
             except PrefetchDeadlineExceeded:
+                # A8 (G6B Slice B): record the lane timeout BEFORE the
+                # raise.  Inside the QA scoring block.
+                try:
+                    _probe(trace, 'lane_finish', 'qa', timed_out=True, reason='deadline')
+                except Exception:
+                    pass
                 raise
             except Exception:
                 pass
         except PrefetchDeadlineExceeded:
+            # A8 (G6B Slice B): record the lane timeout BEFORE the
+            # raise.  Top-level keyword block handler.
+            try:
+                _probe(trace, 'lane_finish', 'keyword', timed_out=True, reason='deadline')
+            except Exception:
+                pass
             raise
         except Exception as e:
+            # A7 (G6B Slice B): record the degradation in the trace
+            # BEFORE the existing logger call.  This is the keyword
+            # lane's top-level except — covers the PG / SQLite /
+            # scoring seams of the entire keyword block.
+            try:
+                _probe(trace, 'error', 'lane=keyword: ' + str(e)[:200])
+            except Exception:
+                pass
             logger.debug("topic keyword search failed: %s", _safe_err(e)[:100])
 
+    # ── Keyword / QA lane summary (split kw_ids by hit kind) ──
+    # Yields the lists of ids that flowed through the keyword path.
+    try:
+        _kw_kw_ids: list[str] = []
+        _qa_kw_ids: list[str] = []
+        for _sid in kw_ids:
+            try:
+                _h = hits.get(_sid)
+                if _h is None:
+                    continue
+                _k = str(getattr(_h, "kind", "") or "")
+            except Exception:
+                _k = ""
+            if _k == "qa":
+                _qa_kw_ids.append(_sid)
+            else:
+                _kw_kw_ids.append(_sid)
+    except Exception:
+        _kw_kw_ids, _qa_kw_ids = [], []
+    _probe(trace, 'lane_candidates', 'keyword', _kw_kw_ids)
+    _probe(trace, 'lane_candidates', 'qa', _qa_kw_ids)
+    if include_keyword:
+        _probe(trace, 'lane_finish', 'keyword', candidate_count=len(_kw_kw_ids))
+        _probe(trace, 'lane_finish', 'qa', candidate_count=len(_qa_kw_ids))
+    else:
+        _probe(trace, 'lane_finish', 'keyword', skipped=True, reason='include_keyword=False')
+        _probe(trace, 'lane_finish', 'qa', skipped=True, reason='include_keyword=False')
+
     # Vector topic path — TopicRecall 向量搜索（替代旧 card_vector）
+    _probe(trace, 'lane_start', 'vector')
     if include_card_vector:
         if deadline is not None:
             deadline.check(context="topic vector path")
@@ -2506,21 +2693,43 @@ def recall_pool(
             try:
                 if deadline is not None:
                     deadline.check(context="active memory vector path")
+                _am_vec_reader_seen = True
+                _am_vec_reader_present = bool(q_emb)
                 if q_emb:
                     _am_reader_v = _active_memory_reader_for(pg, deadline)
                     if _am_reader_v is not None:
+                        _am_vec_reader_present = True
                         try:
                             _am_vec_rows = _am_reader_v.search_vector(
                                 q_emb, limit=max(rerank_top_n or 0, limit * 3)
                             )
                         except PrefetchDeadlineExceeded:
+                            # A8 (G6B Slice B): record the lane timeout
+                            # BEFORE the raise.
+                            try:
+                                _probe(trace, 'lane_finish', 'explicit', timed_out=True, reason='deadline')
+                            except Exception:
+                                pass
                             raise
                         except Exception as _am_vec_exc:
+                            # A7 (G6B Slice B): record the degradation
+                            # in the trace BEFORE the existing logger.
+                            try:
+                                _probe(trace, 'error', 'lane=explicit: ' + str(_am_vec_exc)[:200])
+                            except Exception:
+                                pass
                             logger.debug(
                                 "active-memory vector search failed: %s",
                                 _safe_err(_am_vec_exc)[:200],
                             )
                             _am_vec_rows = []
+                        for _row in (_am_vec_rows or []):
+                            try:
+                                _mid = _row.get("memory_id") or _row.get("source_id")
+                            except Exception:
+                                _mid = None
+                            if isinstance(_mid, str) and _mid:
+                                _am_vec_ids_for_probe.append(_mid)
                         _add_active_memory_to_hits(
                             _am_vec_rows,
                             hits=hits,
@@ -2528,12 +2737,26 @@ def recall_pool(
                             with_cosine=True,
                         )
             except PrefetchDeadlineExceeded:
+                # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+                try:
+                    _probe(trace, 'lane_finish', 'explicit', timed_out=True, reason='deadline')
+                except Exception:
+                    pass
                 raise
             except Exception as _am_vec_outer:
+                # A7 (G6B Slice B): record the degradation in the trace
+                # BEFORE the existing logger call.
+                try:
+                    _probe(trace, 'error', 'lane=explicit: ' + str(_am_vec_outer)[:200])
+                except Exception:
+                    pass
                 logger.debug(
                     "active-memory vector seam failed: %s",
                     _safe_err(_am_vec_outer)[:200],
                 )
+                _am_vec_ids_for_probe = []
+            # G6B Slice D (D2): the explicit lane now always finishes below,
+            # outside the ``if include_card_vector:`` branch.
             _emb_cfg = _extract_embed(config) if config is not None else None
             # Runtime cache when a real runtime-backed Core is passed; legacy
             # core._topic_recall and core=None temporary fallback unchanged.
@@ -2601,6 +2824,13 @@ def recall_pool(
                                             continue
                                         _qsid = f"qa_{_qid}"
                                         vec_ids.add(_qsid)
+                                        # G6B Slice H: also record this id in
+                                        # the qa-lane probe list so the trace
+                                        # captures QA-vector-only hits.  The
+                                        # existing vec_ids.add(...) call above
+                                        # is unchanged - this id still flows
+                                        # through qa_vec_rank as before.
+                                        _qa_vec_ids_for_probe.append(_qsid)
                                         _qfull = f"[{str(_qts or '')}] Q: {_qq}\nA: {_qa}"
                                         if _qsid in hits:
                                             if _sim > hits[_qsid].cosine:
@@ -2619,19 +2849,77 @@ def recall_pool(
                                                 created_at=str(_qts or ''),
                                             )
                             except PrefetchDeadlineExceeded:
+                                # A8 (G6B Slice B): record the lane
+                                # timeout BEFORE the raise.  Inside the
+                                # QA vector cursor block.
+                                try:
+                                    _probe(trace, 'lane_finish', 'qa', timed_out=True, reason='deadline')
+                                except Exception:
+                                    pass
                                 raise
                             except Exception:
                                 pass
                 except PrefetchDeadlineExceeded:
+                    # A8 (G6B Slice B): record the lane timeout BEFORE
+                    # the raise.  QA collection outer handler.
+                    try:
+                        _probe(trace, 'lane_finish', 'qa', timed_out=True, reason='deadline')
+                    except Exception:
+                        pass
                     raise
                 except Exception as _qe:
+                    # A7 (G6B Slice B): record the degradation in the
+                    # trace BEFORE the existing logger call.  This is
+                    # the QA-collection block embedded in the vector
+                    # topic path.
+                    try:
+                        _probe(trace, 'error', 'lane=qa: ' + str(_qe)[:200])
+                    except Exception:
+                        pass
                     logger.debug("QA vector recall failed: %s", str(_qe)[:100])
         except ValueError:
             raise
         except PrefetchDeadlineExceeded:
+            # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+            # Vector topic path top-level handler.
+            try:
+                _probe(trace, 'lane_finish', 'vector', timed_out=True, reason='deadline')
+            except Exception:
+                pass
             raise
         except Exception as e:
+            # A7 (G6B Slice B): record the degradation in the trace
+            # BEFORE the existing logger call.  This is the vector
+            # topic path's top-level except.
+            try:
+                _probe(trace, 'error', 'lane=vector: ' + str(e)[:200])
+            except Exception:
+                pass
             logger.debug("vector topic recall failed: %s", _safe_err(e)[:200])
+
+    # G6B Slice D (D2): always finish the explicit lane, regardless of
+    # ``include_card_vector``.  The lane_finish ALWAYS lands: with the real
+    # active-memory candidate count when at least one seam ran, or with
+    # skipped=True + a precise reason otherwise.
+    try:
+        _explicit_ids = list(
+            dict.fromkeys(_am_kw_ids_for_probe + _am_vec_ids_for_probe)
+        )
+    except Exception:
+        _explicit_ids = []
+    _probe(trace, 'lane_candidates', 'explicit', _explicit_ids)
+    if not (_am_kw_reader_seen or _am_vec_reader_seen):
+        # Neither kw nor vec seam ran at all (e.g. include_keyword=False AND
+        # include_card_vector=False).
+        _probe(trace, 'lane_finish', 'explicit',
+               skipped=True, reason='active_memory_paths_disabled')
+    elif (not _am_kw_reader_present) and (not _am_vec_reader_present):
+        # At least one seam's reader resolver ran but resolved to None.
+        _probe(trace, 'lane_finish', 'explicit',
+               skipped=True, reason='no_active_memory_reader')
+    else:
+        _probe(trace, 'lane_finish', 'explicit',
+               candidate_count=len(_explicit_ids))
 
     # Vector message path (j/) + noise filter
     if include_message_vector and pg and q_emb:
@@ -2660,8 +2948,21 @@ def recall_pool(
                         created_at=vh.get("created_at", ""),
                     )
         except PrefetchDeadlineExceeded:
+            # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+            # Vector message path handler.
+            try:
+                _probe(trace, 'lane_finish', 'vector', timed_out=True, reason='deadline')
+            except Exception:
+                pass
             raise
         except Exception as e:
+            # A7 (G6B Slice B): record the degradation in the trace
+            # BEFORE the existing logger call.  This is the vector
+            # message path's except — part of the vector lane family.
+            try:
+                _probe(trace, 'error', 'lane=vector: ' + str(e)[:200])
+            except Exception:
+                pass
             logger.warning("message vector recall failed: %s", _safe_err(e)[:200])
 
     # Effective pool path
@@ -2693,11 +2994,25 @@ def recall_pool(
         except ValueError:
             raise
         except PrefetchDeadlineExceeded:
+            # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+            # Effective pool path handler.
+            try:
+                _probe(trace, 'lane_finish', 'vector', timed_out=True, reason='deadline')
+            except Exception:
+                pass
             raise
         except Exception as e:
+            # A7 (G6B Slice B): record the degradation in the trace
+            # BEFORE the existing logger call.  This is the effective
+            # pool path's except — part of the vector lane family.
+            try:
+                _probe(trace, 'error', 'lane=vector: ' + str(e)[:200])
+            except Exception:
+                pass
             logger.debug("effective recall failed: %s", _safe_err(e)[:100])
 
     # Topic recall path (5th RRF path) — 层次化主题召回, 权重最高
+    _probe(trace, 'lane_start', 'topic')
     if include_topic:
         if deadline is not None:
             deadline.check(context="topic path")
@@ -2746,9 +3061,33 @@ def recall_pool(
         except ValueError:
             raise
         except PrefetchDeadlineExceeded:
+            # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+            # Topic lane top-level handler.
+            try:
+                _probe(trace, 'lane_finish', 'topic', timed_out=True, reason='deadline')
+            except Exception:
+                pass
             raise
         except Exception as e:
+            # A7 (G6B Slice B): record the degradation in the trace
+            # BEFORE the existing logger call.  This is the topic
+            # lane's top-level except.
+            try:
+                _probe(trace, 'error', 'lane=topic: ' + str(e)[:200])
+            except Exception:
+                pass
             logger.debug("topic recall failed: %s", _safe_err(e)[:200])
+
+    # ── Topic lane summary (sorted, mirrors topic_ids set semantics) ──
+    try:
+        _topic_sorted = sorted(topic_ids)
+    except Exception:
+        _topic_sorted = list(topic_ids)
+    _probe(trace, 'lane_candidates', 'topic', _topic_sorted)
+    if include_topic:
+        _probe(trace, 'lane_finish', 'topic', candidate_count=len(_topic_sorted))
+    else:
+        _probe(trace, 'lane_finish', 'topic', skipped=True, reason='include_topic=False')
 
     # ── 2026-08-06 Step 3c: 印段落召回 (yin_paragraphs — E1 印切段入库) ──
     if include_yin and pg is not None:
@@ -2805,8 +3144,21 @@ def recall_pool(
         except ValueError:
             raise
         except PrefetchDeadlineExceeded:
+            # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+            # Yin recall handler — part of the vector lane family.
+            try:
+                _probe(trace, 'lane_finish', 'vector', timed_out=True, reason='deadline')
+            except Exception:
+                pass
             raise
         except Exception as e:
+            # A7 (G6B Slice B): record the degradation in the trace
+            # BEFORE the existing logger call.  This is the yin
+            # recall block's except — part of the vector lane family.
+            try:
+                _probe(trace, 'error', 'lane=vector: ' + str(e)[:200])
+            except Exception:
+                pass
             logger.debug("yin recall failed: %s", _safe_err(e)[:200])
 
     # ── 2026-08-06: 观察者印召回 (observation_notes — 滚动叙事, 比主题卡更细) ──
@@ -2848,9 +3200,108 @@ def recall_pool(
                                     created_at="",
                                 )
         except PrefetchDeadlineExceeded:
+            # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
+            # observation_notes handler — part of the vector lane family.
+            try:
+                _probe(trace, 'lane_finish', 'vector', timed_out=True, reason='deadline')
+            except Exception:
+                pass
             raise
         except Exception as e:
+            # A7 (G6B Slice B): record the degradation in the trace
+            # BEFORE the existing logger call.  This is the
+            # observation_notes block's except — part of the vector
+            # lane family.
+            try:
+                _probe(trace, 'error', 'lane=vector: ' + str(e)[:200])
+            except Exception:
+                pass
             logger.debug("observation_notes recall failed: %s", _safe_err(e)[:200])
+
+    # ── Vector lane summary (union of vec_ids + msg_ids + eff_ids + yin_ids + notes_ids) ──
+    # Yin and notes are vector-family retrieval but land in the 'vector' lane
+    # by documented mapping (recall_v2 has a fixed 5-lane API; we map real
+    # retrieval onto those five lanes rather than fabricating new ones).
+    try:
+        _vec_union_ids: list[str] = []
+        for _sid in (vec_ids | msg_ids | eff_ids | yin_ids | notes_ids):
+            try:
+                _h = hits.get(_sid)
+                if _h is None:
+                    continue
+                _k = str(getattr(_h, "kind", "") or "")
+            except Exception:
+                _k = ""
+                # G6B Slice H: deliberately skip qa-kind ids here - QA-vector
+                # hits are ranked through qa_vec_rank (not vec_rank; see the
+                # vec_rank / qa_vec_rank computation further below), so
+                # attributing them to the vector lane would double-credit
+                # the trace without changing the retrieval math.  The qa
+                # lane captures these ids via the additional probe after
+                # the vector lane summary (see _qa_ids_for_probe below).
+            if _k == "qa":
+                continue
+            _vec_union_ids.append(_sid)
+    except Exception:
+        _vec_union_ids = []
+    _probe(trace, 'lane_candidates', 'vector', _vec_union_ids)
+    if (
+        include_card_vector
+        or include_message_vector
+        or include_effective
+        or include_yin
+        or include_notes
+    ):
+        _probe(trace, 'lane_finish', 'vector', candidate_count=len(_vec_union_ids))
+    else:
+        _probe(
+            trace,
+            'lane_finish',
+            'vector',
+            skipped=True,
+            reason='all_vector_paths_disabled',
+        )
+
+    # ── G6B Slice H: qa lane provenance for QA-vector retrieval ──
+    # The earlier keyword/QA summary block emitted lane_candidates('qa', _qa_kw_ids)
+    # and lane_finish('qa', candidate_count=len(_qa_kw_ids)).  Those reflect the
+    # keyword-path QA hits only - QA-vector hits land in vec_ids (and are
+    # ranked through qa_vec_rank, NOT vec_rank; see the qa_vec_rank block
+    # further below), so the trace had no qa-lane attribution for them.
+    #
+    # We fix that here, after the vector-family region has run.  Combine
+    # kw-found and vec-found QA ids into one de-duplicated collection,
+    # use it for BOTH the new lane_candidates probe (source_type='qa'
+    # so the sink records (qa, qa, id) provenance for vec-found ids) AND
+    # the final lane_finish candidate_count (overriding the earlier
+    # kw-only count so the lane summary reflects QA-vector hits too).
+    #
+    # The earlier kw-only lane_candidates probe is intentionally kept -
+    # the sink de-duplicates per (lane, source_type, source_id), so an id
+    # found by both paths keeps its (qa, '', id) from the kw probe AND
+    # gains exactly one (qa, qa, id) from this new probe.  Keyword-found
+    # QA ids do NOT gain a vector or keyword attribution from this change
+    # - only an additional source_type='qa' tag within the qa lane.
+    try:
+        _qa_ids_for_probe: list[str] = list(
+            dict.fromkeys(
+                list(_qa_kw_ids or []) + list(_qa_vec_ids_for_probe or [])
+            )
+        )
+    except Exception:
+        # Defensive: never let a probe-prep failure escape into retrieval.
+        _qa_ids_for_probe = []
+    _probe(trace, 'lane_candidates', 'qa', _qa_ids_for_probe, source_type='qa')
+    # Overwrite the earlier kw-only qa lane_finish candidate_count so the
+    # lane summary's final value reflects QA-vector hits as well.  The
+    # sink's finish_lane stores the last value seen per lane, so the
+    # final qa-lane candidate_count = len(combined_dedup).
+    _probe(
+        trace,
+        'lane_finish',
+        'qa',
+        candidate_count=len(_qa_ids_for_probe),
+    )
 
     # PG fail detection
     if deadline is not None:
@@ -2858,6 +3309,7 @@ def recall_pool(
     pg_fail = False
     if pg_was_connected and not _pg_is_connected(pg, deadline):
         pg_fail = True
+        _probe(trace, 'warn', 'pg_fail=True')
 
     # RRF — keyword 权重衰减至 0.5, 其他路径 1.0, topic 权重最高 2.0
     # P2: keyword 路径权重降半, 防 ILIKE 海啸淹没向量+有效池的语义信号
@@ -2929,9 +3381,35 @@ def recall_pool(
                 age_days = max(0, (datetime.now() - card_time).days)
                 decay = math.exp(-age_days / half_life)
                 hit.rrf_score = round(hit.rrf_score * max(decay, 0.05), 6)
+                # A2 (G6B Slice B): record the temporal half-life decay
+                # in the trace when a real decay was applied.  Only emits
+                # when the ``try`` succeeded (no ValueError / TypeError).
+                try:
+                    _probe(
+                        trace,
+                        'score',
+                        hit.source_id,
+                        'temporal',
+                        hit.rrf_score,
+                        operation='half_life_decay',
+                        decay=round(decay, 6),
+                        age_days=age_days,
+                    )
+                except Exception:
+                    pass
             except (ValueError, TypeError):
                 pass
         scored.append(hit)
+
+    # A1 (G6B Slice B): emit a fusion (rrf) score record for every scored
+    # hit BEFORE the rare-bonus block.  Guarded so a faulty sink can never
+    # break retrieval — the existing `_probe` helper already swallows
+    # exceptions.
+    try:
+        for _hit in scored:
+            _probe(trace, 'score', _hit.source_id, 'fusion', _hit.rrf_score, operation='rrf')
+    except Exception:
+        pass
 
     # 2026-08-09: 稀有词精确命中后置加分 — _qa_score +2.0 只在关键词路径内排序生效,
     # RRF 排名倒数加权后贡献仅 ~0.016, 精确命中仍会被其他路径压出 top (museum 案例实测 17 名)
@@ -2941,6 +3419,13 @@ def recall_pool(
         for hit in scored:
             if hit.kind == 'qa' and hit.source_id in _rare_bonus:
                 hit.rrf_score = round(hit.rrf_score + min(_rare_bonus[hit.source_id], 0.08), 6)
+                # A3 (G6B Slice B): record that the rare-bonus adjustment
+                # was applied to this hit's rrf_score.  Guarded so a faulty
+                # sink cannot change the score path.
+                try:
+                    _probe(trace, 'event', hit.source_id, 'SCORED', 'rare_bonus')
+                except Exception:
+                    pass
 
     # 2026-08-12 A-1: 精确命中保送 — 极稀有(min_freq≤3) 或 ≥2 低频词共现 (词频≤库量×1%) = 强精确信号
     # 根因: RRF 倒数加权稀释精确命中 (charity race 证据 rrf=0.0169 排 30 名, limit=30 出局;
@@ -2959,6 +3444,12 @@ def recall_pool(
                 for _hit in scored:
                     if _hit.kind == 'qa' and _hit.source_id == _sid:
                         _hit.rrf_score = round(_hit.rrf_score + 0.5, 6)
+                        # A4 (G6B Slice B): record that the exact-QA
+                        # boost (+0.5) was applied to this hit.
+                        try:
+                            _probe(trace, 'event', _hit.source_id, 'SCORED', 'exact_qa_boost')
+                        except Exception:
+                            pass
                         break
     except Exception:
         pass
@@ -2978,8 +3469,46 @@ def recall_pool(
                 rerank_cfg=rerank_cfg,
                 deadline=deadline,
             )
+        # A5 (G6B Slice B): when ``_rerank`` actually runs, emit a
+        # RERANKED event for every hit in the reranked list.  Guarded
+        # so a faulty sink cannot change the reranked order path.
+        try:
+            for _h in ranked:
+                _probe(trace, 'event', _h.source_id, 'RERANKED')
+        except Exception:
+            pass
+    else:
+        # A5 (G6B Slice B): rerank was skipped.  Emit a warn probe with
+        # the SINGLE real reason — derived only from the real condition.
+        # Order of the original conjunct matters: try the most specific
+        # first so the recorded reason matches the boolean the caller saw.
+        try:
+            if not rerank_cfg:
+                _skip_reason = 'no_rerank_cfg'
+            elif not rerank_top_n:
+                _skip_reason = 'rerank_top_n_disabled'
+            else:
+                # len(ranked) <= rerank_top_n
+                _skip_reason = 'len_le_rerank_top_n'
+            _probe(trace, 'warn', 'rerank skipped: ' + _skip_reason)
+        except Exception:
+            pass
 
     final = ranked[:limit]
+    # A6 (G6B Slice B): selection stage — record each hit inside the
+    # final limit as ``select``, and each hit outside the limit as
+    # ``drop / OUTSIDE_LIMIT / selection``.  Guarded so a faulty sink
+    # cannot change the returned hits list.
+    try:
+        for _h in final:
+            _probe(trace, 'select', _h.source_id)
+    except Exception:
+        pass
+    try:
+        for _h in ranked[limit:]:
+            _probe(trace, 'drop', _h.source_id, 'OUTSIDE_LIMIT', stage='selection')
+    except Exception:
+        pass
 
     # TKG: batch-fetch associated facts (card only)
     if pg:
