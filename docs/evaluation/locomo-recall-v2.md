@@ -88,7 +88,9 @@ prefetch_to_context_block
   → RecallV2Engine
   → recall_pool
   → fusion/rerank
-  → LegacySink-bound RecallTrace injection probes
+  → injection / RecallTrace published through the facade's existing `trace_out` channel
+
+The adapter temporarily observes the module-level `prefetch` call only to capture that real internal trace; it does not pass a competing external trace and does not modify production source.
 ```
 
 Use `eval.locomo_recall_v2.adapter.run_case` or `runner.run_cases`. Pass the disposable PG connection and, for an objective vector run, a real BAAI/bge-m3 query embedding. Do not make a keyword-only or zero-vector run look like a full objective run. A zero-vector/no-provider run is allowed only as a structural seam sanity check and must be labeled that way.
