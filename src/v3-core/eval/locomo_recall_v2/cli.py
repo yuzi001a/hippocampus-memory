@@ -106,6 +106,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import dataclasses
 import hashlib
@@ -125,6 +126,33 @@ from . import lab as _lab
 from . import manifest as _manifest
 from . import metrics as _metrics
 from . import runner as _runner
+from .search_protocol import (
+    SEARCH_MODE_ANN,
+    SEARCH_MODE_EXACT,
+    ALLOWED_SEARCH_MODES,
+    PROBE_AVAILABILITY_AVAILABLE,
+    PROBE_AVAILABILITY_UNAVAILABLE,
+    PROBE_LOAD_METHOD_LOAD,
+    PROBE_LOAD_METHOD_NONE,
+    PROBE_LOAD_METHOD_VECTOR_FUNCTION,
+    SearchProtocol,
+    SearchProtocolError,
+    apply_search_protocol,
+    ensure_pgvector_loaded,
+)
+from .session_pool import (
+    EvaluatorPoolClosed,
+    EvaluatorPoolProtocolError,
+    EvaluatorSessionPool,
+    EvaluatorPoolState,
+)
+from .explain_capture import (
+    capture_explain,
+    ExplainCaptureError,
+    ExplainCaptureReport,
+    CLASS_SEQ_SCAN,
+    CLASS_IVFFLAT_INDEX_SCAN,
+)
 
 
 __all__ = [
@@ -140,6 +168,7 @@ __all__ = [
     "redact_secrets_in_payload",
     "run_dry_run",
     "run_semantic",
+    "_run_semantic_sample_isolated",
 ]
 
 
@@ -232,8 +261,89 @@ class StructuralResult:
 
 
 # ---------------------------------------------------------------------
-# Constants
+# G6C-B0 default policy
 # ---------------------------------------------------------------------
+#
+# The CLI defaults are:
+#
+#   * ``--search-mode`` defaults to ``"ann"`` — the historical
+#     G6C-A / alpha production path uses ANN with the planner
+#     default probes. A CLI invocation that does NOT pass
+#     ``--search-mode`` therefore stays backward-compatible with
+#     G6C-A. The B0 deterministic-baseline experiment commands
+#     pass ``--search-mode exact`` explicitly so the runbook
+#     contract is "the explicit value is what we are measuring".
+#
+#   * ``--index-build-phase`` defaults to
+#     ``"bootstrap_before_import"`` — the historical alpha path
+#     builds the IVFFlat indexes inside the bootstrap
+#     transaction. Mode C (deferred) requires an explicit
+#     ``--index-build-phase after_import``.
+#
+#   * ``--ivfflat-probes`` defaults to ``None`` — the planner
+#     default probes are used. The B0 explicit-probe experiment
+#     commands pass ``--search-mode ann --ivfflat-probes N``.
+#
+#   * ``--run-analyze`` defaults to ``False`` — the historical
+#     alpha path does not issue ANALYZE. The B0 experiment
+#     commands pass ``--run-analyze`` so the planner has fresh
+#     statistics before the recall engine runs.
+DEFAULT_SEARCH_MODE = SEARCH_MODE_ANN  # re-exported from search_protocol via import below
+DEFAULT_INDEX_BUILD_PHASE = "bootstrap_before_import"
+
+
+def _resolve_cli_policy_kwargs(
+    *,
+    search_mode: str | None,
+    ivfflat_probes: int | None,
+    index_build_phase: str | None,
+    run_analyze: bool | None,
+) -> dict[str, Any]:
+    """Resolve the G6C-B0 CLI policy kwargs with explicit defaults.
+
+    The CLI never inherits a silent fallback from
+    :func:`SearchProtocol.parse`. The historical alpha behaviour
+    is ``search_mode='ann'``; if the caller does not pass
+    ``--search-mode``, we substitute ``"ann"`` here so the
+    manifest records the actual mode the run used. The
+    manifest then stamps ``requested_search_mode`` so a
+    downstream auditor can confirm the requested value and the
+    planner-verified value agree.
+    """
+
+    resolved_mode = (
+        str(search_mode).strip().lower()
+        if search_mode is not None and str(search_mode).strip() != ""
+        else DEFAULT_SEARCH_MODE
+    )
+    resolved_phase = (
+        str(index_build_phase).strip().lower()
+        if index_build_phase is not None and str(index_build_phase).strip() != ""
+        else DEFAULT_INDEX_BUILD_PHASE
+    )
+    resolved_probes: int | None
+    if ivfflat_probes is None:
+        resolved_probes = None
+    else:
+        try:
+            resolved_probes = int(ivfflat_probes)
+        except (TypeError, ValueError) as exc:
+            raise CLIError(
+                f"cli: --ivfflat-probes must be a positive integer "
+                f"(got {ivfflat_probes!r})"
+            ) from exc
+        if resolved_probes <= 0:
+            raise CLIError(
+                f"cli: --ivfflat-probes must be positive (got {resolved_probes!r})"
+            )
+    resolved_analyze = bool(run_analyze) if run_analyze is not None else False
+
+    return {
+        "search_mode": resolved_mode,
+        "ivfflat_probes": resolved_probes,
+        "index_build_phase": resolved_phase,
+        "run_analyze": resolved_analyze,
+    }
 
 # Keys that NEVER belong in the YAML source config. The list
 # is deliberately conservative: any key that looks
@@ -606,7 +716,9 @@ def _unexpected_base_entries(path: str) -> list[str]:
     return [e for e in entries if e not in _EVALUATOR_OWNED_BASE_FILES]
 
 
-def _make_disposable_base_path(cache_dir: str, dataset_sha: str) -> str:
+def _make_disposable_base_path(
+    cache_dir: str, dataset_sha: str, scope: str | None = None,
+) -> str:
     """Create a real empty disposable experiment directory.
 
     Returns the absolute path. Raises :class:`LabConfigRefused` if a
@@ -614,10 +726,29 @@ def _make_disposable_base_path(cache_dir: str, dataset_sha: str) -> str:
     itself (the facade's own ``v3_cards.db`` may persist between runs,
     so it is explicitly allowed — that keeps reruns possible while
     still refusing to share an unrelated directory).
+
+    The optional ``scope`` keyword lets the sample-isolated
+    orchestrator derive a per-sample directory under the SAME
+    ``cache_dir`` while the legacy default (``scope=None``) keeps
+    today's path byte-identical: ``<cache_dir>/experiment-base-<sha12>``.
+    When ``scope`` is set the path becomes
+    ``<cache_dir>/experiment-base-<sha12>-<slug>`` where ``slug``
+    is sanitised with the same ``[^a-z0-9]+`` rule used for the
+    per-sample database name.
     """
 
     _ensure_dir(cache_dir)
-    base_path = os.path.join(cache_dir, f"experiment-base-{dataset_sha[:12]}")
+    if scope is None or str(scope).strip() == "":
+        dir_name = f"experiment-base-{dataset_sha[:12]}"
+    else:
+        slug = re.sub(r"[^a-z0-9]+", "_", str(scope).strip().lower()).strip("_")
+        if not slug:
+            raise LabConfigRefused(
+                f"disposable base_path scope must produce a non-empty "
+                f"slug after sanitisation (got {scope!r})"
+            )
+        dir_name = f"experiment-base-{dataset_sha[:12]}-{slug}"
+    base_path = os.path.join(cache_dir, dir_name)
     if os.path.isdir(base_path):
         unexpected = _unexpected_base_entries(base_path)
         if unexpected:
@@ -773,10 +904,20 @@ def _resolve_dataset_and_rows(
     expected_sha256: str,
     case_limit: int | None,
     sample_filter: Sequence[str] | None,
+    case_ids: Sequence[str] | None = None,
 ):
-    """Load the dataset and apply case-limit / sample-filter.
+    """Load the dataset and apply case-limit / sample-filter / case-id.
 
     Returns ``(data, eval_rows, sample_ids_filter)``.
+
+    ``case_ids`` is the G6C-B0 case-level diagnostic slice: a
+    list of ``"<sample_id>|<query_idx>"`` ids (the runner's
+    canonical case_id shape) that must match exactly an eval
+    row's ``(sample_id, query_idx)`` pair. Unknown ids raise
+    :class:`CLIError` so a typo in the runbook can never
+    silently re-run an empty slice. Corpus import is unchanged
+    — the import path still receives the FULL corpus for the
+    selected sample scope, only the runner's case list narrows.
     """
 
     data = _dataset.load_locomo(dataset_path, expected_sha256)
@@ -800,6 +941,31 @@ def _resolve_dataset_and_rows(
         if not isinstance(case_limit, int) or case_limit <= 0:
             raise CLIError("case-limit must be a positive integer")
         eval_rows = eval_rows[:case_limit]
+
+    if case_ids:
+        # Build the canonical case_id → eval-row index from the
+        # post-sample-filter / post-case-limit slice. This means a
+        # case_id outside the selected scope is unknown and we
+        # refuse closed rather than silently dropping it.
+        canonical = {f"{er.sample_id}|{er.query_idx}": er for er in eval_rows}
+        unknown = [cid for cid in case_ids if cid not in canonical]
+        if unknown:
+            preview = ", ".join(unknown[:5])
+            raise CLIError(
+                "case-id filter contains unknown case_id(s) outside the "
+                f"selected sample / case-limit scope: {preview!r}; "
+                "refusing to run."
+            )
+        # Preserve the caller's order so the diff tool can replay
+        # an exact slice. We dedupe but keep the FIRST occurrence
+        # of each id.
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for cid in case_ids:
+            if cid not in seen:
+                seen.add(cid)
+                ordered.append(cid)
+        eval_rows = tuple(canonical[cid] for cid in ordered)
     return data, eval_rows, allowed
 
 
@@ -811,6 +977,14 @@ def _build_manifest(
     commit_sha: str,
     allowed_samples: set[str] | None,
     case_limit: int | None,
+    search_mode: str | None = None,
+    ivfflat_probes: int | None = None,
+    index_build_phase: str | None = None,
+    run_analyze: bool | None = None,
+    case_ids: Sequence[str] | None = None,
+    verified_search_mode: str | None = None,
+    verified_enable_indexscan: str | None = None,
+    verified_ivfflat_probes: int | None = None,
 ) -> dict[str, Any]:
     """Build the sanitised manifest via :mod:`manifest`."""
 
@@ -843,6 +1017,28 @@ def _build_manifest(
         manifest_dict["filtered_sample_ids"] = sorted(allowed_samples)
     if case_limit is not None:
         manifest_dict["case_limit"] = int(case_limit)
+    # G6C-B0 determinism contract: the manifest must record the
+    # requested AND the verified protocol so a downstream auditor
+    # can compare the two — a "verified" field that disagrees
+    # with the requested field is a signal the run was started
+    # with one policy and finished with another, and the runbook
+    # marks that as a contract violation.
+    if search_mode is not None:
+        manifest_dict["requested_search_mode"] = str(search_mode)
+    if verified_search_mode is not None:
+        manifest_dict["verified_search_mode"] = str(verified_search_mode)
+    if verified_enable_indexscan is not None:
+        manifest_dict["verified_enable_indexscan"] = str(verified_enable_indexscan)
+    if ivfflat_probes is not None:
+        manifest_dict["requested_ivfflat_probes"] = int(ivfflat_probes)
+    if verified_ivfflat_probes is not None:
+        manifest_dict["verified_ivfflat_probes"] = int(verified_ivfflat_probes)
+    if index_build_phase is not None:
+        manifest_dict["index_build_phase"] = str(index_build_phase)
+    if run_analyze is not None:
+        manifest_dict["run_analyze"] = bool(run_analyze)
+    if case_ids is not None:
+        manifest_dict["requested_case_ids"] = list(case_ids)
     return redact_secrets_in_payload(manifest_dict)
 
 
@@ -885,7 +1081,10 @@ def _coerce_dry_run_kwargs(
             "rerank", "rerank_endpoint_env",
             "write_rows", "commit_sha",
             "case_limit", "sample_filter", "sample_ids",
+            "case_ids",
             "batch_size", "mode",
+            "search_mode", "ivfflat_probes",
+            "index_build_phase", "run_analyze",
         ) if hasattr(args, k)}
         src.update(overrides)
     elif isinstance(args, Mapping):
@@ -958,8 +1157,16 @@ def _coerce_dry_run_kwargs(
         "commit_sha": str(src.get("commit_sha", "") or ""),
         "case_limit": src.get("case_limit"),
         "sample_filter": merged_filter,
+        "case_ids": src.get("case_ids"),
         "batch_size": src.get("batch_size"),
         "mode": str(src.get("mode", "dry-run") or "dry-run"),
+        # G6C-B0 knobs — passed through verbatim; the validator
+        # functions in :mod:`search_protocol` / :mod:`lab` are
+        # the canonical fail-closed gate.
+        "search_mode": src.get("search_mode"),
+        "ivfflat_probes": src.get("ivfflat_probes"),
+        "index_build_phase": src.get("index_build_phase"),
+        "run_analyze": src.get("run_analyze"),
     }
 
 
@@ -986,8 +1193,22 @@ def run_dry_run(
       * ``commit_sha`` (str)
       * ``case_limit`` (int | None)
       * ``sample_filter`` (sequence of str | str | None)
+      * ``case_ids`` (sequence of str | str | None) — G6C-B0
+        case-level diagnostic slice (``"<sample_id>|<query_idx>"``).
       * ``batch_size`` (int | None)
       * ``mode`` (str; informational)
+      * ``search_mode`` (str | None) — ``"exact"`` / ``"ann"``;
+        validated by :mod:`search_protocol`.
+      * ``ivfflat_probes`` (int | None) — explicit ``ivfflat.probes``
+        override for ``search_mode='ann'``. Refused (fail-closed)
+        when ``search_mode != 'ann'``.
+      * ``index_build_phase`` (str | None) —
+        ``"bootstrap_before_import"`` (default) /
+        ``"after_import"`` (G6C-B0 Mode C).
+      * ``run_analyze`` (bool | None) — when truthy, the
+        ``semantic`` stage will issue ``ANALYZE`` on the canonical
+        corpus tables after import (and again after deferred
+        index creation when ``index_build_phase='after_import'``).
 
     Returns a :class:`StructuralResult`.
     """
@@ -997,15 +1218,40 @@ def run_dry_run(
         dataset_path, expected_sha256, source_config_path, dsn,
         output_dir, cache_dir, rerank, rerank_endpoint_env,
         write_rows, commit_sha, case_limit, sample_filter,
-        _batch_size, _mode,
+        case_ids, _batch_size, _mode,
+        search_mode, ivfflat_probes, index_build_phase, run_analyze,
     ) = (
         params["dataset_path"], params["expected_sha256"],
         params["source_config_path"], params["dsn"],
         params["output_dir"], params["cache_dir"], params["rerank"],
         params["rerank_endpoint_env"], params["write_rows"],
         params["commit_sha"], params["case_limit"],
-        params["sample_filter"], params["batch_size"], params["mode"],
+        params["sample_filter"], params["case_ids"],
+        params["batch_size"], params["mode"],
+        params["search_mode"], params["ivfflat_probes"],
+        params["index_build_phase"], params["run_analyze"],
     )
+
+    # Validate the G6C-B0 knobs as early as possible so the
+    # dry-run stage fails closed before the manifest is
+    # written. We delegate to the module validators so the
+    # contracts are single-sourced.
+    from .search_protocol import SearchProtocol, SearchProtocolError as _SPerr
+    from .lab import ALLOWED_INDEX_BUILD_PHASES
+    try:
+        sp_policy = SearchProtocol.parse(mode=search_mode, probes=ivfflat_probes)
+    except _SPerr as exc:
+        raise CLIError(f"cli: invalid search_mode / ivfflat_probes: {exc}") from exc
+    if index_build_phase is not None and str(index_build_phase) not in ALLOWED_INDEX_BUILD_PHASES:
+        raise CLIError(
+            f"cli: invalid --index-build-phase {index_build_phase!r}; "
+            f"expected one of {sorted(ALLOWED_INDEX_BUILD_PHASES)!r}"
+        )
+    if ivfflat_probes is not None and str(sp_policy.mode) != "ann":
+        raise CLIError(
+            "cli: --ivfflat-probes is only valid with --search-mode ann; "
+            f"got search_mode={sp_policy.mode!r}"
+        )
 
     sha = _dataset.verify_source(dataset_path, expected_sha256)
     source_config_sha = _file_sha256(source_config_path)
@@ -1020,11 +1266,24 @@ def run_dry_run(
     else:
         parsed_filter = tuple(str(s).strip() for s in sample_filter if str(s).strip()) or None
 
+    # Normalise case_ids: ``--case-id foo --case-id bar`` arrives
+    # as a list; legacy ``--case-id a,b`` as a single string. We
+    # accept either shape and trim whitespace.
+    if isinstance(case_ids, str):
+        parsed_case_ids = tuple(
+            c.strip() for c in case_ids.split(",") if c.strip()
+        ) or None
+    elif case_ids is None:
+        parsed_case_ids = None
+    else:
+        parsed_case_ids = tuple(str(c).strip() for c in case_ids if str(c).strip()) or None
+
     data, eval_rows, allowed_samples = _resolve_dataset_and_rows(
         dataset_path=dataset_path,
         expected_sha256=str(sha),
         case_limit=case_limit,
         sample_filter=parsed_filter,
+        case_ids=parsed_case_ids,
     )
 
     _dataset.build_evidence_map(data)
@@ -1040,6 +1299,11 @@ def run_dry_run(
         commit_sha=commit_sha,
         allowed_samples=allowed_samples,
         case_limit=case_limit,
+        search_mode=sp_policy.mode,
+        ivfflat_probes=sp_policy.probes,
+        index_build_phase=index_build_phase,
+        run_analyze=bool(run_analyze) if run_analyze is not None else None,
+        case_ids=parsed_case_ids,
     )
 
     base_path = _make_disposable_base_path(
@@ -1105,6 +1369,177 @@ def _connect_lab(dsn: str):
         raise LabConfigRefused(
             f"semantic stage: cannot open DSN: {type(exc).__name__}"
         ) from exc
+
+
+def _preflight_probe_availability(
+    dsn: str,
+    sp_policy: SearchProtocol,
+) -> dict[str, Any]:
+    """Disposable-DSN preflight — ivfflat.probes GUC registration.
+
+    Opens ONE short-lived connection to the disposable lab DSN
+    and asks PostgreSQL whether ``ivfflat.probes`` is registered
+    in ``pg_settings`` AFTER forcing the pgvector shared
+    library into the backend.  A registered GUC means the
+    planner actually reads it; an unregistered one means any
+    ``set_config`` only creates a custom variable the planner
+    ignores — a fake round-trip.
+
+    Load-order matters: the pgvector shared library registers
+    ``ivfflat.probes`` LAZILY, when the library is first loaded
+    into a backend.  A fresh backend that has not executed any
+    pgvector function has NO row in ``pg_settings`` for
+    ``ivfflat.probes`` even on a perfectly healthy pgvector
+    build.  This preflight therefore:
+
+      1. Reads the registration BEFORE the forced load.
+      2. Forces the load via
+         :func:`search_protocol.ensure_pgvector_loaded` (tries
+         ``LOAD 'vector'`` first, then falls back to executing
+         a real pgvector function).
+      3. Reads the registration AGAIN.
+
+    The verdict (``probe_availability``) is the AFTER-load
+    read; the BEFORE-load read and the chosen load method are
+    surfaced alongside as evidence fields so the manifest can
+    carry the load-order truth.
+
+    Behavioural contract:
+
+      * Explicit ``sp_policy.probes`` + ``UNAVAILABLE`` (after
+        load): REFUSED.  Raise :class:`CLIError` so
+        ``bootstrap_schema`` / ``import_rows`` never run.  A run
+        that would only echo a custom variable cannot measure
+        ANN probe count and is a contract violation.  The error
+        message explains the library-load ordering and that a
+        failed load of ``'vector'`` left the GUC unregistered.
+      * Explicit probes + ``AVAILABLE``: no failure; return a
+        verdict dict so the manifest can stamp the available
+        status.
+      * Implicit probes + ``UNAVAILABLE``: no failure (the
+        planner-default path still works); return the verdict
+        so the auditor sees ``probe_availability='UNAVAILABLE'``.
+      * Implicit probes + ``AVAILABLE``: verdict is
+        ``AVAILABLE``; existing semantics unchanged.
+
+    The preflight reuses :func:`_connect_lab` so the disposable
+    DSN guard (lab vs production) is the single source of truth.
+    """
+
+    conn = None
+    registered_before: bool = False
+    registered_after: bool = False
+    load_method: str = PROBE_LOAD_METHOD_NONE
+    try:
+        conn = _connect_lab(dsn)
+        try:
+            cur = conn.cursor()
+        except Exception as exc:
+            raise CLIError(
+                "cli: preflight probe-availability cursor failed: "
+                f"{type(exc).__name__}"
+            ) from exc
+        try:
+            try:
+                # BEFORE the forced load — a fresh backend
+                # typically has NO row in pg_settings for
+                # ivfflat.probes until the shared library is
+                # loaded.
+                cur.execute(
+                    "SELECT 1 FROM pg_settings WHERE name = %s LIMIT 1",
+                    ("ivfflat.probes",),
+                )
+                row_before = cur.fetchone()
+            except Exception as exc:
+                raise CLIError(
+                    "cli: preflight probe-availability pg_settings "
+                    f"lookup (before load) failed: {type(exc).__name__}"
+                ) from exc
+            registered_before = bool(
+                row_before is not None
+                and len(row_before) >= 1
+                and row_before[0] is not None
+            )
+
+            # Force the pgvector shared library into this
+            # backend so a lazy-load lag cannot produce a
+            # false UNAVAILABLE verdict.
+            load_method = ensure_pgvector_loaded(cur)
+
+            try:
+                # AFTER the forced load — this is the verdict
+                # gate.
+                cur.execute(
+                    "SELECT 1 FROM pg_settings WHERE name = %s LIMIT 1",
+                    ("ivfflat.probes",),
+                )
+                row_after = cur.fetchone()
+            except Exception as exc:
+                raise CLIError(
+                    "cli: preflight probe-availability pg_settings "
+                    f"lookup (after load) failed: {type(exc).__name__}"
+                ) from exc
+            registered_after = bool(
+                row_after is not None
+                and len(row_after) >= 1
+                and row_after[0] is not None
+            )
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    availability = (
+        PROBE_AVAILABILITY_AVAILABLE
+        if registered_after
+        else PROBE_AVAILABILITY_UNAVAILABLE
+    )
+
+    # Fail-closed: explicit probes require a registered GUC.
+    if (
+        availability == PROBE_AVAILABILITY_UNAVAILABLE
+        and str(sp_policy.mode).strip().lower() == SEARCH_MODE_ANN
+        and sp_policy.probes is not None
+    ):
+        raise CLIError(
+            "cli: --ivfflat-probes N requires ivfflat.probes to be "
+            "registered in pg_settings on the disposable lab; "
+            "even after forcing the pgvector shared library load "
+            "(via 'LOAD vector' / executing a pgvector function) "
+            "the preflight found NO row. A failed load of 'vector' "
+            "left the GUC unregistered, so a SET would only create "
+            "a custom-GUC echo that the planner never reads. The "
+            "explicit override is refused BEFORE any "
+            "bootstrap_schema / import_rows runs. Use a pgvector "
+            "build whose shared library registers ivfflat.probes "
+            "once loaded, or drop --ivfflat-probes."
+        )
+
+    availability_before = (
+        PROBE_AVAILABILITY_AVAILABLE
+        if registered_before
+        else PROBE_AVAILABILITY_UNAVAILABLE
+    )
+
+    return {
+        "probe_availability": availability,
+        "probe_availability_source": (
+            "pg_settings_after_library_load"
+            if registered_after
+            else "pg_settings_absent_after_library_load"
+        ),
+        "probe_availability_preflight": "disposable_dsn",
+        "probe_availability_before_load": availability_before,
+        "probe_availability_after_load": availability,
+        "pgvector_load_method": load_method,
+    }
 
 
 def _resolve_repo_root() -> str:
@@ -1340,16 +1775,28 @@ def _read_back_provenance(
     return qa_id_index, conv_rows
 
 
-def _make_lab_store(lab_cfg: Mapping[str, Any]) -> Any:
+def _make_lab_store(
+    lab_cfg: Mapping[str, Any],
+    *,
+    pool: Any | None = None,
+) -> Any:
     """Instantiate the canonical PG store against the isolated lab.
 
     The store is given the isolated plain dict (never a production
     ``V3Config``); ``storage.pg`` carries explicit psycopg2 kwargs so
     the store cannot fall back to its built-in production defaults.
+
+    When ``pool`` is supplied (the G6C-B0 wiring path), the store
+    forwards it to ``PgEmbedStore(pool=...)`` so every leased
+    connection goes through the evaluator-only session pool —
+    which means the strict exact/ANN search protocol is applied
+    and verified on every lease, not just the first one.
     """
 
     from v3core.pg_store import PgEmbedStore  # lazy: keep import cheap
 
+    if pool is not None:
+        return PgEmbedStore(config=dict(lab_cfg), pool=pool)
     return PgEmbedStore(config=dict(lab_cfg))
 
 
@@ -1648,26 +2095,96 @@ def _compare_repeatability(
     }
 
 
-def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
+def run_semantic(
+    args: argparse.Namespace,
+    *,
+    _records_out: list | None = None,
+) -> dict[str, Any]:
     """Execute the semantic stage.
 
     Thin orchestrator over the existing modules:
 
-      1. Load dataset + apply filters.
-      2. Open the disposable lab connection + bootstrap +
-         import_rows.
-      5. Build the provenance map from the freshly-imported
-         rows (deterministic ordinal mapping).
-      6. Read ``storage.embed`` from the YAML source config
-         and call :func:`embeddings.prepare_query_embeddings` /
-         :func:`embeddings.prepare_corpus_embeddings`.
-      7. Build ``q_emb_by_case`` and run
-         :func:`runner.run_case` sequentially.
-      8. Map candidate IDs through the provenance map.
-      9. Compute metrics + coverage; write the artifacts.
-      10. ``--repeatability`` runs a second cached pass and
+      1. Load dataset + apply filters (including ``--case-id``).
+      2. Resolve the G6C-B0 policy (search mode / probes /
+         index-build phase / analyze) with explicit defaults.
+      3. Open the disposable lab connection, bootstrap with the
+         requested ``index_build_phase``, import_rows, then
+         (Mode C / ``--run-analyze``) defer ``create_vector_indexes``
+         and ``analyze_tables`` to AFTER import.
+      4. Build the canonical ``EvaluatorSessionPool`` whose
+         every leased connection runs through
+         :func:`apply_search_protocol` (session-scope
+         ``set_config`` + ``current_setting`` round-trip).
+      5. Build ``q_emb_by_case`` and run :func:`runner.run_case`
+         sequentially through the pool-backed store.
+      6. Run ``EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`` once
+         against a representative query and stamp the
+         sanitised classification in the manifest.
+      7. Map candidate IDs through the provenance map.
+      8. Compute metrics + coverage; write the artifacts.
+      9. ``--repeatability`` runs a second cached pass and
          writes ``repeatability.json``.
+
+    The private ``_records_out`` keyword lets the sample-isolated
+    orchestrator re-use this function without reconstructing
+    records from JSONL: when a list is supplied, the in-memory
+    ``CaseRecord`` objects that are also serialised into
+    ``full-objective-results.jsonl`` are appended to it just
+    before the function returns. ``main()`` never passes this
+    kwarg — the regular CLI path keeps today's return shape.
     """
+
+    # ----- G6C-B0 policy resolution -----
+    resolved_policy = _resolve_cli_policy_kwargs(
+        search_mode=getattr(args, "search_mode", None),
+        ivfflat_probes=getattr(args, "ivfflat_probes", None),
+        index_build_phase=getattr(args, "index_build_phase", None),
+        run_analyze=getattr(args, "run_analyze", None),
+    )
+    search_mode = resolved_policy["search_mode"]
+    ivfflat_probes = resolved_policy["ivfflat_probes"]
+    index_build_phase = resolved_policy["index_build_phase"]
+    run_analyze = resolved_policy["run_analyze"]
+
+    sp_policy = SearchProtocol.parse(mode=search_mode, probes=ivfflat_probes)
+    if index_build_phase not in _lab.ALLOWED_INDEX_BUILD_PHASES:
+        raise CLIError(
+            f"cli: invalid --index-build-phase {index_build_phase!r}; "
+            f"expected one of {sorted(_lab.ALLOWED_INDEX_BUILD_PHASES)!r}"
+        )
+
+    # Fail closed: ``search_mode='exact'`` + an explicit
+    # ``--ivfflat-probes`` is a contradictory contract — exact
+    # mode MUST NOT pin planner probe decisions. The seam
+    # closes here (BEFORE any DB bootstrap / import_rows /
+    # corpus-vector prep) so the lab never sees a half-applied
+    # ``ivfflat.probes`` against an exact-mode run. Without
+    # this guard the contradiction would only surface at
+    # ``apply_search_protocol`` lease-verify time, AFTER the
+    # lab has already been touched — corrupting the disposable
+    # tree before the run aborts.
+    if (
+        str(sp_policy.mode).strip().lower() == SEARCH_MODE_EXACT
+        and ivfflat_probes is not None
+    ):
+        raise CLIError(
+            "cli: --ivfflat-probes is not valid with "
+            "--search-mode 'exact' (exact mode must NOT pin "
+            "planner probe decisions); pass --ivfflat-probes "
+            "with --search-mode 'ann' or omit --ivfflat-probes"
+        )
+
+    # GUC-registration preflight — runs against the disposable
+    # DSN BEFORE bootstrap_schema / import_rows / corpus
+    # vectors so an explicit --ivfflat-probes against an
+    # unregistered GUC fails BEFORE the lab is touched.  For
+    # implicit probes an unregistered GUC is recorded as
+    # UNAVAILABLE rather than refused, so exact-mode runs and
+    # no-override ANN runs are not broken by a pgvector build
+    # that omits the GUC.
+    probe_preflight = _preflight_probe_availability(
+        str(args.dsn), sp_policy
+    )
 
     sha = _dataset.verify_source(args.dataset, args.expected_sha256)
     embed_section = load_source_config_embed_section(args.source_config)
@@ -1692,11 +2209,27 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
         if sample_filter_str.strip()
         else None
     )
+
+    # Normalise ``--case-id`` (repeatable) into a tuple. The CLI
+    # accepts both a comma-separated string and repeated ``--case-id``
+    # flags; the normaliser turns either shape into the canonical
+    # ``tuple[str, ...]``.
+    raw_case_ids = getattr(args, "case_ids", None)
+    if isinstance(raw_case_ids, str):
+        case_ids = tuple(
+            c.strip() for c in raw_case_ids.split(",") if c.strip()
+        ) or None
+    elif raw_case_ids is None:
+        case_ids = None
+    else:
+        case_ids = tuple(str(c).strip() for c in raw_case_ids if str(c).strip()) or None
+
     data, eval_rows, allowed_samples = _resolve_dataset_and_rows(
         dataset_path=str(args.dataset),
         expected_sha256=str(sha),
         case_limit=args.case_limit,
         sample_filter=sample_filter,
+        case_ids=case_ids,
     )
 
     # Isolated lab config + a real empty disposable experiment
@@ -1704,7 +2237,11 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
     # sees: ``storage.pg`` points at the disposable loopback lab and
     # ``storage.embed`` carries the borrowed ephemeral provider
     # credential (process memory only).
-    base_path = _make_disposable_base_path(str(args.cache_dir), str(sha))
+    base_path = _make_disposable_base_path(
+        str(args.cache_dir),
+        str(sha),
+        scope=getattr(args, "sample_isolated_base_scope", None),
+    )
     lab_cfg = build_isolated_lab_config(
         base_path=base_path,
         dsn=str(args.dsn),
@@ -1743,11 +2280,32 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
         batch_size=int(args.batch_size),
     )
 
+    # Bootstrap + import. The bootstrap honours the requested
+    # ``index_build_phase``: ``bootstrap_before_import`` builds
+    # the IVFFlat indexes inside the bootstrap transaction;
+    # ``after_import`` strips them and the helper below
+    # re-creates them after ``import_rows`` returns.
     conn = _connect_lab(str(args.dsn))
+    vector_indexes_applied: dict[str, str] = {}
+    analyze_records: dict[str, str] = {}
     try:
-        _lab.bootstrap_schema(conn, _resolve_repo_root())
+        _lab.bootstrap_schema(
+            conn,
+            _resolve_repo_root(),
+            index_build_phase=index_build_phase,
+        )
         _lab.import_rows(conn, rows_dict)
         qa_id_index, conv_prov_rows = _read_back_provenance(conn)
+        if index_build_phase == _lab.INDEX_BUILD_PHASE_AFTER_IMPORT:
+            # Defer IVFFlat rebuild until after import (Mode C).
+            vector_indexes_applied = _lab.create_vector_indexes(conn)
+        if run_analyze:
+            analyze_records = _lab.analyze_tables(conn)
+            if index_build_phase == _lab.INDEX_BUILD_PHASE_AFTER_IMPORT:
+                # Mode C: ANALYZE again after the deferred rebuild
+                # so the planner sees fresh stats for the new
+                # index lists.
+                analyze_records = _lab.analyze_tables(conn)
     finally:
         try:
             conn.close()
@@ -1773,34 +2331,161 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
         query_results=query_results,
     )
 
-    pg_store = _make_lab_store(lab_cfg)
-    cases = _build_runner_cases(data=data, eval_rows=eval_rows)
-    records = _run_facade_pass(
-        cases=cases,
-        q_emb_by_case=q_emb_by_case,
-        config=lab_cfg,
-        pg=pg_store,
-        expected_dim=DEFAULT_EMBEDDING_DIM,
+    # ----- G6C-B0 evaluator-only session pool -----
+    # Wrap the disposable DSN's connection factory in an
+    # :class:`EvaluatorSessionPool` so every lease re-applies the
+    # search protocol. ``PgEmbedStore(pool=...)`` then forwards
+    # every lease through the pool — ``TopicRecall`` constructed
+    # in production paths by ``PgEmbedStore`` via its pool reads
+    # vectors through the SAME pool, never a production-direct
+    # fallback.
+    pool_factory = _make_pool_factory(str(args.dsn))
+    eval_pool = EvaluatorSessionPool(
+        factory=pool_factory,
+        policy=sp_policy,
+        max_connections=2,
+        min_connections=0,
     )
-    records, id_mapping_audit = _map_record_rankings(records, provenance_map)
 
-    # Fail closed: an objective run whose cases did not pass the facade
-    # seam (missing/invalid query vector, trace_missing, engine error,
-    # …) must NOT be written out as if it had measured retrieval
-    # quality. The statuses are reported instead of being averaged away.
-    bad_records = [
-        rec for rec in records
-        if str(getattr(rec, "status", "") or "") != "ok"
-    ]
-    if bad_records:
-        first = bad_records[0]
+    pg_store = _make_lab_store(lab_cfg, pool=eval_pool)
+
+    # Verify-once: lease the pool to confirm the protocol
+    # round-trips BEFORE we hand it to the recall engine. The
+    # verified ``enable_indexscan`` + ``probes`` are stamped in
+    # the manifest so the auditor can confirm the requested and
+    # verified values agree.
+    verified_report_dict: dict[str, Any] = {}
+    try:
+        with_lease = eval_pool.lease()
+        try:
+            verified_report = apply_search_protocol(
+                with_lease.connection, sp_policy
+            )
+            verified_report_dict = verified_report.observed_value
+        finally:
+            try:
+                with_lease.close()
+            except Exception:
+                pass
+    except EvaluatorPoolProtocolError as exc:
+        eval_pool.close()
         raise CLIError(
-            f"semantic run aborted: {len(bad_records)}/{len(records)} case(s) "
-            f"did not pass the facade seam; first case_id="
-            f"{getattr(first, 'case_id', '?')!r} status="
-            f"{getattr(first, 'status', '')!r} error="
-            f"{str(getattr(first, 'error', '') or '')[:200]!r}"
+            f"semantic: session-pool protocol verification failed: {exc}"
+        ) from exc
+
+    cases = _build_runner_cases(data=data, eval_rows=eval_rows)
+
+    # The facade / repeatability window runs inside the
+    # topic-recall data-dir guard so any ``TopicRecall``
+    # constructed lazily by the recall engine reads /
+    # writes only inside the disposable ``base_path`` —
+    # never the production ``~/.v3-core/profiles/default``
+    # tree. The guard restores the production resolver in
+    # ``finally`` so a crash never leaves the patch dangling.
+    explain_reports: dict[str, dict[str, Any]] = {}
+    planner_evidence_failed: list[str] = []
+    with _topic_recall_lab_data_dir_guard(base_path):
+        records = _run_facade_pass(
+            cases=cases,
+            q_emb_by_case=q_emb_by_case,
+            config=lab_cfg,
+            pg=pg_store,
+            expected_dim=DEFAULT_EMBEDDING_DIM,
         )
+        records, id_mapping_audit = _map_record_rankings(records, provenance_map)
+
+        # Fail closed: an objective run whose cases did not
+        # pass the facade seam (missing/invalid query vector,
+        # trace_missing, engine error, …) must NOT be written
+        # out as if it had measured retrieval quality. The
+        # statuses are reported instead of being averaged
+        # away.
+        bad_records = [
+            rec for rec in records
+            if str(getattr(rec, "status", "") or "") != "ok"
+        ]
+        if bad_records:
+            first = bad_records[0]
+            raise CLIError(
+                f"semantic run aborted: {len(bad_records)}/{len(records)} case(s) "
+                "did not pass the facade seam; first case_id="
+                f"{getattr(first, 'case_id', '?')!r} status="
+                f"{getattr(first, 'status', '')!r} error="
+                f"{str(getattr(first, 'error', '') or '')[:200]!r}"
+            )
+
+        # ----- Planner evidence — fail-closed -----
+        # We MUST capture BOTH ``qa_pairs`` and
+        # ``conversation_stream`` vector plans with the
+        # ``WHERE embedding IS NOT NULL`` guard so an empty
+        # lab (a real failure mode of a fresh schema) cannot
+        # silently masquerade as a healthy index-scan. Each
+        # capture is tree-walk classified by ``capture_explain``.
+        # If EITHER required plan cannot be captured, the
+        # entire run fails closed — a "best-effort swallow"
+        # here would let the manifest record "planner was
+        # consulted" while the planner evidence was actually
+        # absent.
+        first_q = next(iter(q_emb_by_case.values()), None)
+        if eval_rows and first_q is not None:
+            explain_targets: tuple[tuple[str, str], ...] = (
+                (
+                    "semantic/qa_pairs/ann_top5",
+                    "SELECT id FROM public.qa_pairs "
+                    "WHERE embedding IS NOT NULL "
+                    "ORDER BY embedding <=> %s::vector LIMIT 5",
+                ),
+                (
+                    "semantic/conversation_stream/ann_top5",
+                    "SELECT id FROM public.conversation_stream "
+                    "WHERE embedding IS NOT NULL "
+                    "ORDER BY embedding <=> %s::vector LIMIT 5",
+                ),
+            )
+            for label, explain_sql in explain_targets:
+                try:
+                    lease = eval_pool.lease()
+                except (
+                    EvaluatorPoolClosed, EvaluatorPoolProtocolError
+                ) as exc:
+                    planner_evidence_failed.append(
+                        f"{label}: lease failed ({exc})"
+                    )
+                    continue
+                try:
+                    report = capture_explain(
+                        lease.connection,
+                        sql=explain_sql,
+                        query_label=label,
+                        query_vector=first_q,
+                    )
+                    explain_reports[label] = report.to_dict()
+                except ExplainCaptureError as exc:
+                    planner_evidence_failed.append(
+                        f"{label}: capture_explain failed ({exc})"
+                    )
+                finally:
+                    try:
+                        lease.close()
+                    except Exception:
+                        pass
+
+            if planner_evidence_failed:
+                # Fail-closed: a missing required plan record
+                # is a contract violation. We do NOT best-effort
+                # swallow and we do NOT write a partial manifest.
+                raise CLIError(
+                    "semantic: planner evidence is incomplete — "
+                    f"{len(planner_evidence_failed)} of "
+                    f"{len(explain_targets)} required plan captures failed: "
+                    f"{planner_evidence_failed!r}"
+                )
+
+    # Below this point we are OUTSIDE the data-dir guard so
+    # any subsequent file writes cannot accidentally touch
+    # the production resolver snapshot. The guard was active
+    # for the full facade / repeatability window, then
+    # restored.
 
     snap = _metrics.compute_metrics(
         records,
@@ -1853,6 +2538,105 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
     fingerprint_path = os.path.join(args.output_dir, "fingerprint.json")
     _write_json_atomic(fingerprint_path, fingerprint_payload)
 
+    # ----- G6C-B0 manifest augmentation -----
+    # Stamp the requested AND verified search protocol,
+    # index-build phase, analyze + EXPLAIN records. The
+    # ``requested_*`` fields are what the operator asked for;
+    # the ``verified_*`` fields are what the planner actually
+    # saw after the session-pool round-trip. A mismatch is a
+    # contract violation.
+    #
+    # ``verified_ivfflat_probes`` is the manifest-truth
+    # field — it carries the OBSERVED current
+    # ``ivfflat.probes`` GUC value when no explicit override
+    # was set, and the requested int when an explicit override
+    # was set + verified. The field is never silently
+    # rewritten to ``None`` for an absent override.
+    observed_probes_str = (
+        verified_report_dict.get("ivfflat_probes")
+        or verified_report_dict.get("observed_probes")
+    )
+    verified_probes_int = verified_report_dict.get("verified_probes")
+    if verified_probes_int is not None:
+        # Explicit override — verified int wins (it must
+        # equal the requested value).
+        verified_ivfflat_probes_out = int(verified_probes_int)
+    elif observed_probes_str is not None and str(observed_probes_str).strip():
+        # No override — observed GUC string is recorded
+        # verbatim (manifest truth).
+        verified_ivfflat_probes_out = str(observed_probes_str).strip()
+    else:
+        verified_ivfflat_probes_out = None
+
+    # Exact-mode proof — auditor can confirm the planner
+    # truly refused to use the index in exact mode.
+    exact_mode_proof: dict[str, Any] = {
+        "requested_mode": str(sp_policy.mode),
+        "verified_enable_indexscan": str(
+            verified_report_dict.get("enable_indexscan", "") or ""
+        ) or None,
+        "verified_ivfflat_probes": verified_ivfflat_probes_out,
+    }
+    if str(sp_policy.mode) == SEARCH_MODE_EXACT:
+        exact_mode_proof["contract"] = (
+            "exact mode requires enable_indexscan='off' AND probes must be "
+            "None; failure on either invariant fails closed in "
+            "apply_search_protocol."
+        )
+
+    g6c_b0_manifest = {
+        "requested_search_mode": str(sp_policy.mode),
+        "requested_ivfflat_probes": (
+            int(sp_policy.probes) if sp_policy.probes is not None else None
+        ),
+        "verified_search_mode": str(verified_report_dict.get("mode", "")) or None,
+        "verified_enable_indexscan": str(
+            verified_report_dict.get("enable_indexscan", "")
+        ) or None,
+        "verified_ivfflat_probes": verified_ivfflat_probes_out,
+        # Disposable-DSN preflight verdict — surfaces the
+        # GUC-registration truth separately from the
+        # round-trip value so an UNAVAILABLE GUC is never
+        # silently reported as a registered probe count.
+        "probe_availability": probe_preflight.get("probe_availability"),
+        "probe_availability_source": probe_preflight.get(
+            "probe_availability_source"
+        ),
+        "probe_availability_preflight": probe_preflight.get(
+            "probe_availability_preflight"
+        ),
+        # Load-ordering evidence — the pgvector shared
+        # library registers ``ivfflat.probes`` LAZILY, so the
+        # BEFORE / AFTER pg_settings reads and the chosen
+        # load method are part of the manifest.
+        "probe_availability_before_load": probe_preflight.get(
+            "probe_availability_before_load"
+        ),
+        "probe_availability_after_load": probe_preflight.get(
+            "probe_availability_after_load"
+        ),
+        "pgvector_load_method": probe_preflight.get(
+            "pgvector_load_method"
+        ),
+        "index_build_phase": str(index_build_phase),
+        "vector_indexes_applied_after_import": vector_indexes_applied or None,
+        "analyze_applied": analyze_records or None,
+        # Two-table planner evidence — ``qa_pairs`` AND
+        # ``conversation_stream``.  Either missing is a
+        # contract violation (fail-closed).
+        "planner_explain": explain_reports or None,
+        "planner_explain_required": (
+            "semantic/qa_pairs/ann_top5",
+            "semantic/conversation_stream/ann_top5",
+        ),
+        "exact_mode_proof": exact_mode_proof,
+        "session_pool_state": eval_pool.state().to_dict(),
+    }
+    g6c_b0_manifest_path = os.path.join(
+        args.output_dir, "g6c-b0-protocol.json"
+    )
+    _write_json_atomic(g6c_b0_manifest_path, g6c_b0_manifest)
+
     summary: dict[str, Any] = {
         "ok": True,
         "stage": "semantic",
@@ -1869,6 +2653,14 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
             f"{lab_cfg['storage']['pg'].get('port')}/"
             f"{lab_cfg['storage']['pg'].get('database')}"
         ),
+        "search_mode": str(sp_policy.mode),
+        "ivfflat_probes": (
+            int(sp_policy.probes) if sp_policy.probes is not None else None
+        ),
+        "index_build_phase": str(index_build_phase),
+        "run_analyze": bool(run_analyze),
+        "case_ids": list(case_ids) if case_ids else None,
+        "protocol_manifest": g6c_b0_manifest_path,
         "corpus": {
             "qa_pairs": {
                 "rows": len(rows_dict["qa_pairs"]),
@@ -1909,14 +2701,23 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
         # Second cached pass — no provider calls. The
         # embedding-preparation module hits the cache; the
         # facade is re-exercised once per case with the same
-        # ``q_emb_by_case``.
-        records_repeat = _run_facade_pass(
-            cases=cases,
-            q_emb_by_case=q_emb_by_case,
-            config=lab_cfg,
-            pg=pg_store,
-            expected_dim=DEFAULT_EMBEDDING_DIM,
-        )
+        # ``q_emb_by_case``. The facade pass MUST also run
+        # inside the topic-recall data-dir guard: the recall
+        # engine lazily constructs ``TopicRecall`` during this
+        # pass too, and without the guard the constructor
+        # would resolve ``_cache_dir`` against the production
+        # ``~/.v3-core/profiles/default`` tree — silently
+        # picking up the host machine's cached SQLite /
+        # ``topic_matrix.npz`` even though the FIRST facade
+        # pass was correctly isolated.
+        with _topic_recall_lab_data_dir_guard(base_path):
+            records_repeat = _run_facade_pass(
+                cases=cases,
+                q_emb_by_case=q_emb_by_case,
+                config=lab_cfg,
+                pg=pg_store,
+                expected_dim=DEFAULT_EMBEDDING_DIM,
+            )
         _map_ok_records, _ = _map_record_rankings(records_repeat, provenance_map)
         records_repeat = _map_ok_records
         snap_repeat = _metrics.compute_metrics(
@@ -1953,7 +2754,1021 @@ def run_semantic(args: argparse.Namespace) -> dict[str, Any]:
         _write_json_atomic(repeatability_path, repeat_payload)
         summary["repeatability"] = repeatability_path
 
+    # The pool is owned by this function — close it on every
+    # return path so the disposable lab connection is fully
+    # released. Errors raised ABOVE this point must NOT leak
+    # the pool alive.
+    try:
+        eval_pool.close()
+    except Exception:
+        pass
+
+    # Append the in-memory record objects to the optional sink
+    # (sample-isolated orchestrator only — ``main()`` never
+    # passes the kwarg). The records here are the SAME objects
+    # already serialised into ``full-objective-results.jsonl`` /
+    # ``semantic-canary-results.jsonl`` above, so no JSONL
+    # round-trip is needed for aggregation.
+    if _records_out is not None:
+        _records_out.extend(records)
+
     return summary
+
+
+def _make_pool_factory(dsn: str) -> Any:
+    """Build the zero-argument connection factory used by
+    :class:`EvaluatorSessionPool`.
+
+    The factory must NOT take arguments so the wrapper can
+    call it once per physical connection. Tests can substitute
+    a fake factory by monkey-patching this helper.
+    """
+
+    def _factory() -> Any:
+        try:
+            import psycopg2  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise EvaluatorPoolClosed(
+                "evaluator session pool: psycopg2 is required to open the "
+                "disposable lab connection"
+            ) from exc
+        return psycopg2.connect(dsn)
+
+    return _factory
+
+
+@contextlib.contextmanager
+def _topic_recall_lab_data_dir_guard(lab_base_path: str):
+    """Evaluator-only context guard — patches the data-dir
+    resolver used by :mod:`v3core.topic_recall` (and the
+    shared :mod:`v3core.config._resolve_data_dir`) so the
+    disposable lab ``basePath`` is the ONLY place the topic
+    cache / SQLite fallback looks during the facade /
+    repeatability window.
+
+    Why this lives here (evaluator-only):
+
+      * ``TopicRecall`` is constructed lazily inside the
+        recall engine from the disposable lab config; its
+        ``_cache_dir`` is computed at ``__init__`` time from
+        ``_resolve_data_dir``.  Without this guard, the
+        constructor would point at ``~/.v3-core/profiles/default``
+        (the production profile) and silently fall back to
+        ``v3_topic_full.db`` / ``topic_matrix.npz`` from the
+        host machine — corrupting the determinism contract
+        even though every other lab DSN / vector path is
+        correct.
+      * The patch is in-process only and is restored in
+        ``finally``.  It does NOT mutate the product module
+        on disk, so the next evaluator run starts from a
+        clean slate even if a previous run crashed.
+      * The ``lab_base_path`` is the same
+        ``_make_disposable_base_path`` directory the lab
+        config was built against, so any topic-cache file
+        written here lives under the same disposable tree
+        the lab config validator already verified is empty.
+
+    Parameters
+    ----------
+    lab_base_path:
+        Absolute path to the disposable experiment directory
+        (``lab_cfg['basePath']``).  The resolver is replaced
+        with a function returning ``Path(lab_base_path)``.
+    """
+
+    if not lab_base_path or not isinstance(lab_base_path, str):
+        raise CLIError(
+            "topic-recall data-dir guard: lab_base_path must be a "
+            "non-empty string (got "
+            f"{type(lab_base_path).__name__})"
+        )
+
+    from pathlib import Path as _Path
+
+    # Import lazily so the package stays importable without
+    # the production v3core tree on the path.  The CLI is the
+    # only caller that wires the pool-backed store, so the
+    # import cost lives here.
+    try:
+        import v3core.topic_recall as _topic_recall
+        import v3core.config as _v3config
+    except Exception as exc:
+        raise CLIError(
+            "topic-recall data-dir guard: failed to import "
+            f"v3core modules ({type(exc).__name__}); refusing "
+            "to continue without an isolated cache directory"
+        ) from exc
+
+    original_resolve = getattr(_v3config, "_resolve_data_dir", None)
+    if not callable(original_resolve):
+        raise CLIError(
+            "topic-recall data-dir guard: v3core.config._resolve_data_dir "
+            "missing or not callable; the production module shape has "
+            "changed — refusing to patch blindly"
+        )
+
+    def _lab_resolver(config: Any = None) -> _Path:
+        """Lab-only resolver — always returns the disposable path.
+
+        The ``config`` argument is intentionally ignored: the
+        lab is built around the disposable ``base_path`` that
+        the caller passed in, NOT the production config object
+        a caller may also pass.  This guarantees the topic
+        cache / SQLite fallback cannot escape the lab tree
+        even if a caller hands in a production-shaped
+        ``V3Config``.
+        """
+
+        return _Path(lab_base_path)
+
+    # Patch BOTH the module attribute and the bound symbol
+    # inside ``v3core.topic_recall`` — ``topic_recall``
+    # imports ``_resolve_data_dir`` as a name, so the symbol
+    # rebind is required to redirect calls that go through
+    # the local binding (e.g. ``_cache_dir`` assignment at
+    # construction time, ``DB_PATH`` lambda).
+    snapshot: dict[str, Any] = {
+        "config_module": original_resolve,
+        "topic_module": getattr(
+            _topic_recall, "_resolve_data_dir", original_resolve
+        ),
+    }
+    try:
+        _v3config._resolve_data_dir = _lab_resolver
+        _topic_recall._resolve_data_dir = _lab_resolver
+        try:
+            yield
+        finally:
+            # Restore in reverse order — must succeed even if
+            # the caller's code raised.  ``snapshot`` keeps
+            # the original callable for both module-level
+            # attribute and ``topic_recall``-module symbol.
+            _v3config._resolve_data_dir = snapshot["config_module"]
+            _topic_recall._resolve_data_dir = snapshot["topic_module"]
+    except Exception:
+            # Belt-and-braces: re-raise after restore so the
+            # caller sees the original exception and the patch is
+            # never left dangling on a half-completed run.
+            _v3config._resolve_data_dir = snapshot["config_module"]
+            _topic_recall._resolve_data_dir = snapshot["topic_module"]
+            raise
+
+
+# ---------------------------------------------------------------------
+# G6C-B0.1 sample-isolated orchestrator
+# ---------------------------------------------------------------------
+
+
+# Reserved-db collision guard (mirrors ``lab._RESERVED_DBS``).  We
+# import the constant instead of duplicating it so a future edit to
+# the production-side guard is picked up here automatically.
+def _sample_isolated_reserved_dbs() -> set[str]:
+    return set(getattr(_lab, "_RESERVED_DBS", set()))
+
+
+def _sample_isolated_slug(sample_id: str) -> str:
+    """Deterministic per-sample slug.
+
+    The same slug is used for the per-sample database name AND the
+    per-sample ``basePath`` scope so a debugger can correlate them.
+    ``[^a-z0-9]+`` collapses any non-alphanumeric run (including
+    ``-``, ``.``) into a single ``_``; leading / trailing underscores
+    are stripped so the final name is clean.
+    """
+
+    base = re.sub(r"[^a-z0-9]+", "_", str(sample_id).strip().lower()).strip("_")
+    if not base:
+        raise CLIError(
+            f"sample id must produce a non-empty slug after "
+            f"sanitisation (got {sample_id!r})"
+        )
+    return base
+
+
+def _sample_isolated_db_name(
+    base_dbname: str, sample_id: str,
+) -> str:
+    """Derive a per-sample database name from the base DSN dbname.
+
+    Refused when:
+      * it collides with ``lab._RESERVED_DBS``;
+      * it equals the base ``dbname`` (a separate DB must carry a
+        distinct name, otherwise the orchestrator would touch the
+        base database).
+
+    Returns ``"<base_dbname>_iso_<slug>"``.
+    """
+
+    base = str(base_dbname).strip()
+    slug = _sample_isolated_slug(sample_id)
+    candidate = f"{base}_iso_{slug}"
+    if candidate == base:
+        raise CLIError(
+            f"sample-isolated db name {candidate!r} equals the base "
+            f"dbname; refusing to alias"
+        )
+    reserved = _sample_isolated_reserved_dbs()
+    if candidate.lower() in {n.lower() for n in reserved}:
+        raise CLIError(
+            f"sample-isolated db name {candidate!r} collides with a "
+            f"reserved production/eval database name; refusing"
+        )
+    return candidate
+
+
+def _replace_dbname_in_dsn(dsn: str, new_dbname: str) -> str:
+    """Return ``dsn`` with the ``dbname=`` key replaced by ``new_dbname``.
+
+    Preserves every other key (host, port, user, password) and their
+    quoting verbatim so the per-sample DSN is byte-identical to the
+    base DSN except for the database name.  Raises :class:`CLIError`
+    when the base DSN carries no ``dbname=`` key (the upstream
+    lab guard already requires it, but we double-check here so an
+    unsafe orchestrator cannot silently fall back).
+    """
+
+    if not re.search(r"(?i)\bdbname\s*=", dsn):
+        raise CLIError(
+            "sample-isolated orchestrator: base DSN has no dbname= "
+            "key; refusing to derive a per-sample DSN"
+        )
+    return re.sub(
+        r"(?i)\bdbname\s*=\s*('(?:[^']|'')*'|\S+)",
+        f"dbname={new_dbname}",
+        dsn,
+        count=1,
+    )
+
+
+def _drop_database(
+    *, server_dsn: str, dbname: str, log: list[dict[str, Any]],
+) -> None:
+    """Drop ``dbname`` on the disposable server, never touching the
+    base database.
+
+    Opens a maintenance connection (``dbname=postgres`` /
+    ``dbname=template1`` / … — anything that parses) with
+    autocommit so ``CREATE DATABASE`` / ``DROP DATABASE`` run
+    outside a transaction. The ``dbname`` is dropped with
+    ``DROP DATABASE IF EXISTS`` so a previous failure that left
+    the database lying around does not poison this run.
+
+    The caller-supplied ``log`` list is appended to so a failure
+    here is surfaced to the aggregate summary rather than
+    swallowed silently.
+    """
+
+    if not dbname:
+        raise CLIError(
+            "_drop_database: empty dbname refused"
+        )
+    try:
+        import psycopg2  # type: ignore[import-not-found]
+    except ImportError as exc:
+        log.append({
+            "database": str(dbname),
+            "dropped": False,
+            "error": f"psycopg2 unavailable: {exc}",
+        })
+        raise
+    # Maintenance DSN — same server, but ``dbname=postgres`` (or
+    # whatever the user's original base DSN already carries; we
+    # fall back to ``postgres`` only as a last resort and refuse
+    # the call if BOTH the base dbname and ``postgres`` collide
+    # with a reserved name).
+    maintenance_dsn = _replace_dbname_in_dsn(server_dsn, "postgres")
+    conn = None
+    try:
+        conn = psycopg2.connect(maintenance_dsn)
+        conn.autocommit = True
+        # Identifier-quote via SQL-standard ``"`` so the literal
+        # never reaches the wire as raw SQL.  The DSN guard has
+        # already restricted us to a known-clean loopback server
+        # so this is sufficient.
+        safe = dbname.replace('"', '""')
+        with conn.cursor() as cur:
+            cur.execute(f'DROP DATABASE IF EXISTS "{safe}"')
+        log.append({"database": str(dbname), "dropped": True, "error": None})
+    except Exception as exc:
+        log.append({
+            "database": str(dbname),
+            "dropped": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        raise
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _create_database(
+    *, server_dsn: str, dbname: str,
+) -> None:
+    """Create ``dbname`` freshly on the disposable server.
+
+    Uses the same maintenance connection pattern as
+    :func:`_drop_database`.  The database is created only when it
+    does NOT already exist, so a leftover from a previous crashed
+    run does not silently overwrite real evidence; if it DOES
+    exist (a different process is racing us, or a prior run left
+    it lying around), we DROP-then-CREATE so every per-sample pass
+    starts from a guaranteed-empty schema.  Any failure raises
+    :class:`CLIError` so the orchestrator's ``finally`` path
+    tears down the database the caller asked for.
+    """
+
+    try:
+        import psycopg2  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise CLIError(
+            f"_create_database: psycopg2 unavailable: {exc}"
+        ) from exc
+    maintenance_dsn = _replace_dbname_in_dsn(server_dsn, "postgres")
+    conn = None
+    try:
+        conn = psycopg2.connect(maintenance_dsn)
+        conn.autocommit = True
+        safe = dbname.replace('"', '""')
+        with conn.cursor() as cur:
+            # Best-effort drop first so a leftover does not corrupt
+            # the new pass.  ``DROP DATABASE IF EXISTS`` is silent
+            # when the database is missing, so this is also a no-op
+            # on the common path.
+            cur.execute(f'DROP DATABASE IF EXISTS "{safe}"')
+            cur.execute(f'CREATE DATABASE "{safe}"')
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _copy_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Return a shallow copy of ``args`` safe for in-place mutation.
+
+    Each top-level attribute that this orchestrator rewrites gets
+    a fresh value; everything else is copied verbatim so the
+    downstream ``run_semantic`` sees the same dataset / source
+    config / search mode / probes / etc. that the caller chose.
+    """
+
+    return argparse.Namespace(**vars(args))
+
+
+def _resolve_sample_iter(
+    *, dataset_path: str, expected_sha256: str,
+    sample_filter: tuple[str, ...] | None,
+) -> tuple[Any, list[str]]:
+    """Return ``(data, ordered_sample_ids)``.
+
+    Order is the loader's stable iteration order (sorted by
+    ``sample_id``).  ``sample_filter`` is honoured exactly the way
+    ``_resolve_dataset_and_rows`` honours it — a sample id that
+    is not in the dataset is silently dropped so a caller that
+    passes ``--sample-filter s1,s2`` never sees ``s1`` repeated
+    in the orchestrator output.
+    """
+
+    data = _dataset.load_locomo(dataset_path, expected_sha256)
+    all_sids = [str(sid) for sid, _ in data.samples]
+    if sample_filter:
+        allowed = set(sample_filter)
+        ordered = [sid for sid in all_sids if sid in allowed]
+        if not ordered:
+            raise CLIError(
+                f"sample-isolated orchestrator: --sample-filter "
+                f"{list(sample_filter)!r} resolved to zero samples; "
+                f"refusing to run"
+            )
+    else:
+        ordered = all_sids
+    return data, ordered
+
+
+def _recompute_metrics(records: Sequence[Any]) -> dict[str, Any]:
+    """Recompute metrics over ``records`` with the production limits.
+
+    This is the orchestrator's independent recomputation: every
+    per-sample metric in the aggregate artifact is also re-derived
+    here so a test can confirm ``compute_metrics(records)`` agrees
+    with the per-sample ``run_semantic`` snapshot.
+    """
+
+    snap = _metrics.compute_metrics(
+        list(records),
+        hit_at_k_limit=5,
+        ranking_limit=5,
+        engine_invocations=len(records),
+    )
+    return snap.to_dict()
+
+
+def _per_sample_metric_summary(
+    records: Sequence[Any],
+) -> dict[str, Any]:
+    """Per-sample metric block for the ``per-sample-metrics.json``
+    aggregate artifact.
+    """
+
+    snap_dict = _recompute_metrics(records)
+    candidate_total = 0
+    for rec in records:
+        try:
+            candidate_total += len(
+                list(getattr(rec, "candidate_source_ids", ()) or ())
+            )
+        except Exception:
+            continue
+    return {
+        "sample_id": str(getattr(records[0], "sample_id", "")
+                        if records else ""),
+        "question_count": int(snap_dict.get("questions_total", 0)),
+        "hit_at_1": snap_dict.get("hit_at_1"),
+        "hit_at_5": snap_dict.get("hit_at_5"),
+        "mrr": snap_dict.get("mrr"),
+        "mean_relevant_rank": snap_dict.get("mean_relevant_rank"),
+        "status": str(snap_dict.get("status", "")),
+        "mapped_gold_count": int(snap_dict.get("mapped_gold_count", 0)),
+        "unmapped_gold_count": int(
+            snap_dict.get("unmapped_gold_count", 0)
+        ),
+        "unresolved_gold_count": int(
+            snap_dict.get("unresolved_gold_count", 0)
+        ),
+        "candidate_total": int(candidate_total),
+    }
+
+
+def _run_semantic_sample_isolated(args: argparse.Namespace) -> dict[str, Any]:
+    """Sample-isolated orchestrator.
+
+    For every sample in the selected scope (dataset order):
+
+      1. derive a per-sample disposable database name;
+      2. DROP-then-CREATE that database freshly on the same
+         disposable server as ``args.dsn``;
+      3. run **one full lab pass** whose corpus is that sample's
+         rows only (``build_import_rows(data, sample_ids={sid})``)
+         and whose eval cases are all of that sample's questions;
+      4. DROP that sample's database in a ``finally`` block;
+      5. collect the per-sample records.
+
+    The aggregate artifact set is then assembled in canonical
+    dataset order: ``full-objective-results.jsonl`` /
+    ``semantic-canary-results.jsonl`` carry the concatenated
+    ``records``; ``metrics.json`` / ``coverage-audit.json`` /
+    ``latency.csv`` carry the aggregated metrics; the per-sample
+    metrics land in ``per-sample-metrics.json``; the corpus-
+    isolation evidence lands in ``corpus-isolation.json``;
+    ``g6c-b0-protocol.json`` gains a ``corpus_isolation`` block.
+
+    ``run_semantic`` is re-used end-to-end — this orchestrator
+    does NOT re-implement bootstrap, import, recall, or metrics.
+    """
+
+    sample_filter = _coerce_sample_filter(getattr(args, "sample_filter", ""))
+    ordered = _resolve_sample_iter(
+        dataset_path=str(args.dataset),
+        expected_sha256=str(args.expected_sha256),
+        sample_filter=sample_filter,
+    )
+    data, sample_ids = ordered
+    if not sample_ids:
+        raise CLIError(
+            "sample-isolated orchestrator: no samples to process; "
+            "refusing to run"
+        )
+
+    # Validate the base DSN BEFORE we touch anything else so a bad
+    # DSN never creates an empty per-sample database.
+    base_parts = _lab.validate_disposable_dsn(str(args.dsn))
+    base_dbname = str(base_parts.get("dbname") or "").strip()
+    if not base_dbname:
+        raise CLIError(
+            "sample-isolated orchestrator: base DSN has no dbname; "
+            "refusing to derive per-sample databases"
+        )
+
+    # Resolve the per-sample database names up-front so a refusal
+    # happens BEFORE we touch the server.  This also surfaces
+    # duplicate-slug collisions (which the loader cannot produce,
+    # but a caller passing a hand-crafted dataset could).
+    plan: list[dict[str, Any]] = []
+    for sid in sample_ids:
+        slug = _sample_isolated_slug(sid)
+        dbname = _sample_isolated_db_name(base_dbname, sid)
+        plan.append({
+            "sample_id": str(sid),
+            "slug": slug,
+            "database": dbname,
+        })
+
+    # Resolve the per-sample case-id slice ONCE up-front so the
+    # inner per-sample ``run_semantic`` calls can copy the slice
+    # cheaply.  Empty / unknown ``--case-id`` values still go
+    # through ``_resolve_dataset_and_rows`` per-sample so the
+    # ``CLIError`` "unknown case_id" guard fires.
+    raw_case_ids = getattr(args, "case_ids", None)
+    if isinstance(raw_case_ids, str):
+        global_case_ids = tuple(
+            c.strip() for c in raw_case_ids.split(",") if c.strip()
+        ) or None
+    elif raw_case_ids is None:
+        global_case_ids = None
+    else:
+        global_case_ids = tuple(
+            str(c).strip() for c in raw_case_ids if str(c).strip()
+        ) or None
+
+    # Decide which per-sample directories we use.  ``scope=<slug>``
+    # keeps each sample's ``basePath`` distinct (the test suite
+    # asserts on this) while staying under the same ``cache_dir``.
+    _ensure_dir(str(args.output_dir))
+
+    aggregate_records: list[Any] = []
+    per_sample_metrics: list[dict[str, Any]] = []
+    per_sample_lab: dict[str, dict[str, Any]] = {}
+    drop_log: list[dict[str, Any]] = []
+
+    overall_status = "ok"
+    overall_error: str | None = None
+
+    for step in plan:
+        sid = step["sample_id"]
+        slug = step["slug"]
+        dbname = step["database"]
+        sample_dsn = _replace_dbname_in_dsn(str(args.dsn), dbname)
+        sample_output_dir = os.path.join(
+            str(args.output_dir), "per-sample", slug,
+        )
+        sample_base_path = _make_disposable_base_path(
+            str(args.cache_dir),
+            str(getattr(data, "source_sha256", "") or args.expected_sha256),
+            scope=slug,
+        )
+        per_sample_case_ids: tuple[str, ...] | None
+        if global_case_ids:
+            per_sample_case_ids = tuple(
+                cid for cid in global_case_ids
+                if cid.startswith(f"{sid}|")
+            )
+            # An explicit case-id set that survives the per-sample
+            # filter must NOT be empty (the inner resolver would
+            # silently narrow the corpus to a zero-row slice); we
+            # raise the same ``CLIError`` it would raise, here in
+            # the orchestrator so the per-sample DB is never
+            # created for an empty case list.
+            if not per_sample_case_ids:
+                raise CLIError(
+                    f"sample-isolated orchestrator: --case-id slice "
+                    f"{list(global_case_ids)!r} contains no ids for "
+                    f"sample {sid!r}; refusing to run an empty pass"
+                )
+        else:
+            per_sample_case_ids = None
+
+        sub_args = _copy_args(args)
+        sub_args.dsn = sample_dsn
+        sub_args.output_dir = sample_output_dir
+        sub_args.sample_ids = [sid]
+        sub_args.sample_filter = ""
+        sub_args.case_ids = per_sample_case_ids
+        sub_args.repeatability = False
+        sub_args.sample_isolated = False
+        sub_args.case_limit = None
+        # Per-sample inner ``run_semantic`` MUST derive its
+        # disposable base path under a per-sample scope so the
+        # ten per-sample passes do NOT share one directory under
+        # the same ``cache_dir`` — sharing the same base_path
+        # would route TopicRecall / card-store state through one
+        # shared directory while the PG corpora are isolated,
+        # which is a real cross-sample contamination channel.
+        sub_args.sample_isolated_base_scope = slug
+
+        # CREATE-then-run-then-DROP.  The drop lives in ``finally``
+        # so a sample that fails still has its DB destroyed.  A
+        # failed drop is recorded in ``drop_log`` and surfaced in
+        # the aggregate summary (never swallowed), but it must
+        # NOT mask the original error — we re-raise the original
+        # when the drop itself raises.
+        sample_records: list[Any] = []
+        try:
+            try:
+                _create_database(
+                    server_dsn=str(args.dsn), dbname=dbname,
+                )
+            except Exception:
+                # If CREATE fails, the database may still exist as a
+                # half-built leftover; try a best-effort drop so the
+                # next per-sample pass is not poisoned.  The drop's
+                # own failure (if any) is reported in ``drop_log``
+                # but never raised here — the original CREATE error
+                # is the one the caller sees.
+                try:
+                    _drop_database(
+                        server_dsn=str(args.dsn),
+                        dbname=dbname,
+                        log=drop_log,
+                    )
+                except Exception:
+                    pass
+                raise
+
+            sample_summary = run_semantic(
+                sub_args, _records_out=sample_records,
+            )
+        finally:
+            try:
+                _drop_database(
+                    server_dsn=str(args.dsn),
+                    dbname=dbname,
+                    log=drop_log,
+                )
+            except Exception:
+                # The per-sample teardown failure is logged but
+                # never replaces the original error.  ``drop_log``
+                # is surfaced verbatim in the aggregate summary.
+                pass
+
+        aggregate_records.extend(sample_records)
+
+        # Per-sample corpus rows are read from the per-sample
+        # ``run_semantic`` summary so the corpus-isolation
+        # evidence reports the imported row counts, not the eval-
+        # case JSONL line count.  The JSONL line count is kept
+        # under a correctly-named field so an auditor can still
+        # see how many eval cases produced the JSONL.
+        per_sample_jsonl = os.path.join(
+            sample_output_dir, "full-objective-results.jsonl",
+        )
+        qa_pairs_rows = _resolve_per_sample_corpus_rows(
+            sample_summary, "qa_pairs",
+        )
+        conversation_stream_rows = _resolve_per_sample_corpus_rows(
+            sample_summary, "conversation_stream",
+        )
+        per_sample_lab[sid] = {
+            "database": str(dbname),
+            "slug": str(slug),
+            "base_path": str(sample_base_path),
+            "qa_pairs_rows": int(qa_pairs_rows),
+            "conversation_stream_rows": int(conversation_stream_rows),
+            "evidence_written_case_count": _count_corpus_rows(
+                per_sample_jsonl
+            ),
+            "session_count": _count_per_sample_sessions(
+                data, expected_sample_id=sid,
+            ),
+            "case_count": int(len(sample_records)),
+            "output_dir": str(sample_output_dir),
+            "summary": {
+                k: v for k, v in sample_summary.items()
+                if k in {"case_count", "status", "hit_at_5", "mrr"}
+            },
+            "drop_log": [
+                e for e in drop_log if e.get("database") == dbname
+            ],
+        }
+
+        per_sample_metrics.append(
+            _per_sample_metric_summary(sample_records)
+        )
+
+    # ---------- Aggregate artifacts ----------
+
+    _ensure_dir(str(args.output_dir))
+
+    # Aggregate records stay in canonical dataset order.
+    aggregate_records_sorted = list(aggregate_records)
+
+    aggregate_jsonl = os.path.join(
+        str(args.output_dir), "full-objective-results.jsonl",
+    )
+    aggregate_canary_jsonl = os.path.join(
+        str(args.output_dir), "semantic-canary-results.jsonl",
+    )
+    _write_jsonl_atomic(
+        aggregate_jsonl,
+        [rec.to_dict() for rec in aggregate_records_sorted],
+    )
+    _write_jsonl_atomic(
+        aggregate_canary_jsonl,
+        [rec.to_dict() for rec in aggregate_records_sorted],
+    )
+
+    aggregate_snap = _metrics.compute_metrics(
+        aggregate_records_sorted,
+        hit_at_k_limit=5,
+        ranking_limit=5,
+        engine_invocations=len(aggregate_records_sorted),
+    )
+    aggregate_snap_dict = aggregate_snap.to_dict()
+    metrics_path = os.path.join(str(args.output_dir), "metrics.json")
+    _write_json_atomic(metrics_path, aggregate_snap_dict)
+
+    coverage_path = os.path.join(
+        str(args.output_dir), "coverage-audit.json",
+    )
+    _write_json_atomic(coverage_path, {
+        "coverage": aggregate_snap_dict.get("coverage", {}),
+        "snapshot_status": str(aggregate_snap_dict.get("status", "")),
+        "questions_total": int(
+            aggregate_snap_dict.get("questions_total", 0)
+        ),
+        "engine_invocations": int(
+            aggregate_snap_dict.get("questions_total", 0)
+        ),
+        "ranking_limit": int(
+            aggregate_snap_dict.get("ranking_limit", 5)
+        ),
+        "mapped_gold_count": int(
+            aggregate_snap_dict.get("mapped_gold_count", 0)
+        ),
+        "unmapped_gold_count": int(
+            aggregate_snap_dict.get("unmapped_gold_count", 0)
+        ),
+        "unresolved_gold_count": int(
+            aggregate_snap_dict.get("unresolved_gold_count", 0)
+        ),
+    })
+
+    latency_header, latency_rows = _latency_rows(aggregate_records_sorted)
+    latency_csv = os.path.join(str(args.output_dir), "latency.csv")
+    _write_csv_atomic(latency_csv, latency_header, latency_rows)
+
+    # Embedding-cache manifest: the per-sample passes reused the
+    # SAME cache directory, so the manifest is the union of the
+    # per-sample manifests (the test asserts this stays stable
+    # across the orchestrator).  We re-derive it from the aggregate
+    # so the JSON shape is identical to the single-lab case.
+    cache_manifest_path = os.path.join(
+        str(args.output_dir), "embedding-cache-manifest.json",
+    )
+    _write_json_atomic(cache_manifest_path, {
+        "cache_root": str(args.cache_dir),
+        "dataset_sha256": str(
+            getattr(data, "source_sha256", "") or args.expected_sha256
+        ),
+        "batch_size": int(args.batch_size),
+        "scope": "sample_isolated",
+        "per_sample": sorted(per_sample_lab.keys()),
+    })
+
+    # Fingerprint: the source-config is the same as in the
+    # single-lab path, so we re-derive it once.
+    embed_section = load_source_config_embed_section(
+        str(args.source_config)
+    )
+    fingerprint_payload = _resolve_fingerprint(embed_section)
+    fingerprint_path = os.path.join(
+        str(args.output_dir), "fingerprint.json",
+    )
+    _write_json_atomic(fingerprint_path, fingerprint_payload)
+
+    # Per-sample metrics artifact.
+    per_sample_metrics_path = os.path.join(
+        str(args.output_dir), "per-sample-metrics.json",
+    )
+    _write_json_atomic(per_sample_metrics_path, {
+        "mode": "sample_isolated",
+        "samples": [p["sample_id"] for p in per_sample_metrics],
+        "per_sample": {
+            p["sample_id"]: p for p in per_sample_metrics
+        },
+    })
+
+    # Corpus-isolation evidence.
+    corpus_isolation_path = os.path.join(
+        str(args.output_dir), "corpus-isolation.json",
+    )
+    _write_json_atomic(corpus_isolation_path, {
+        "mode": "sample_isolated",
+        "samples": [p["sample_id"] for p in plan],
+        "per_sample": {
+            p["sample_id"]: {
+                "database": p["database"],
+                "slug": p["slug"],
+                "base_path": str(per_sample_lab[p["sample_id"]]["base_path"]),
+                "qa_pairs_rows": int(
+                    per_sample_lab[p["sample_id"]]["qa_pairs_rows"]
+                ),
+                "conversation_stream_rows": int(
+                    per_sample_lab[p["sample_id"]]["conversation_stream_rows"]
+                ),
+                "evidence_written_case_count": int(
+                    per_sample_lab[p["sample_id"]][
+                        "evidence_written_case_count"
+                    ]
+                ),
+                "session_count": int(
+                    per_sample_lab[p["sample_id"]]["session_count"]
+                ),
+                "case_count": int(
+                    per_sample_lab[p["sample_id"]]["case_count"]
+                ),
+            } for p in plan
+        },
+    })
+
+    # Aggregate ``g6c-b0-protocol.json``: the orchestrator does
+    # NOT re-run the search protocol (the per-sample passes do);
+    # this block stamps the corpus_isolation evidence so the run
+    # auditor can confirm what each per-sample DB contained.
+    g6c_b0_manifest_path = os.path.join(
+        str(args.output_dir), "g6c-b0-protocol.json",
+    )
+    g6c_b0_manifest = {
+        "corpus_isolation": {
+            "mode": "sample_isolated",
+            "samples": [p["sample_id"] for p in plan],
+            "per_sample_lab": {
+                sid: {
+                    "database": per_sample_lab[sid]["database"],
+                    "qa_pairs_rows": int(
+                        per_sample_lab[sid]["qa_pairs_rows"]
+                    ),
+                    "conversation_stream_rows": int(
+                        per_sample_lab[sid]["conversation_stream_rows"]
+                    ),
+                    "evidence_written_case_count": int(
+                        per_sample_lab[sid]["evidence_written_case_count"]
+                    ),
+                    "case_count": int(per_sample_lab[sid]["case_count"]),
+                } for sid in (p["sample_id"] for p in plan)
+            },
+        },
+        "drop_log": drop_log,
+    }
+    _write_json_atomic(g6c_b0_manifest_path, g6c_b0_manifest)
+
+    # Aggregate case_count MUST equal the sum of per-sample case
+    # counts AND the line count of the aggregate JSONL — the
+    # orchestrator enforces this as a structural invariant so the
+    # test suite can rely on it without re-reading either side.
+    per_sample_total = sum(
+        int(per_sample_lab[p["sample_id"]]["case_count"]) for p in plan
+    )
+    if per_sample_total != len(aggregate_records_sorted):
+        raise CLIError(
+            "sample-isolated orchestrator: aggregate case_count "
+            f"({len(aggregate_records_sorted)}) does not equal the "
+            f"sum of per-sample case counts ({per_sample_total}); "
+            "refusing to write inconsistent artifacts"
+        )
+
+    return {
+        "ok": True,
+        "stage": "semantic",
+        "mode": "sample_isolated",
+        "dataset_sha256": str(
+            getattr(data, "source_sha256", "") or args.expected_sha256
+        ),
+        "source_config_sha256": _file_sha256(str(args.source_config)),
+        "case_count": int(len(aggregate_records_sorted)),
+        "per_sample_total_case_count": int(per_sample_total),
+        "sample_count": int(len(plan)),
+        "status": str(aggregate_snap_dict.get("status", "")),
+        "hit_at_5": aggregate_snap_dict.get("hit_at_5"),
+        "mrr": aggregate_snap_dict.get("mrr"),
+        "ranking_limit": int(aggregate_snap_dict.get("ranking_limit", 5)),
+        "samples": [p["sample_id"] for p in plan],
+        "per_sample": per_sample_metrics,
+        "per_sample_lab": per_sample_lab,
+        "drop_log": drop_log,
+        "metrics": metrics_path,
+        "coverage_audit": coverage_path,
+        "latency_csv": latency_csv,
+        "cache_manifest": cache_manifest_path,
+        "fingerprint": fingerprint_path,
+        "jsonl_baseline": aggregate_jsonl,
+        "jsonl_canary": aggregate_canary_jsonl,
+        "per_sample_metrics": per_sample_metrics_path,
+        "corpus_isolation": corpus_isolation_path,
+        "protocol_manifest": g6c_b0_manifest_path,
+        "overall_status": overall_status,
+        "overall_error": overall_error,
+    }
+
+
+def _coerce_sample_filter(raw: Any) -> tuple[str, ...] | None:
+    """Return ``raw`` as a tuple of trimmed sample ids, or ``None``.
+
+    Accepts the same shapes the single-lab CLI accepts (None / str /
+    iterable of str) so the sample-isolated orchestrator does not
+    duplicate the normaliser.
+    """
+
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return tuple(
+            s.strip() for s in raw.split(",") if s.strip()
+        ) or None
+    return tuple(str(s).strip() for s in raw if str(s).strip()) or None
+
+
+def _resolve_per_sample_corpus_rows(
+    sample_summary: Mapping[str, Any], kind: str,
+) -> int:
+    """Read the imported corpus row count for ``kind`` from ``sample_summary``.
+
+    ``sample_summary`` is the dict returned by a per-sample
+    :func:`run_semantic` call.  The corpus row count for one
+    family lives at ``sample_summary["corpus"][kind]["rows"]``.
+    The orchestrator reads this as the TRUE imported row count —
+    NOT the eval-case JSONL line count, which is reported
+    separately under ``evidence_written_case_count``.
+
+    A missing nested key (e.g. an older ``run_semantic``
+    implementation that did not surface ``corpus``) fails closed
+    with :class:`CLIError` rather than silently writing ``0`` or
+    a fallback; a fabricated zero would mislead the run auditor
+    into believing the per-sample DB was empty when it was in
+    fact unmeasured.
+    """
+
+    if not isinstance(sample_summary, Mapping):
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            "summary is missing or not a mapping; refusing to "
+            "fabricate a corpus row count for "
+            f"{kind!r}"
+        )
+    corpus_block = sample_summary.get("corpus")
+    if not isinstance(corpus_block, Mapping):
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            f"summary is missing 'corpus' (for kind={kind!r}); "
+            "refusing to fabricate a corpus row count"
+        )
+    kind_block = corpus_block.get(kind)
+    if not isinstance(kind_block, Mapping):
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            f"summary is missing 'corpus.{kind}'; refusing to "
+            "fabricate a corpus row count"
+        )
+    rows = kind_block.get("rows")
+    if not isinstance(rows, int) or isinstance(rows, bool):
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            f"summary 'corpus.{kind}.rows' must be an int "
+            f"(got {rows!r}); refusing to fabricate a corpus row "
+            "count"
+        )
+    if rows < 0:
+        raise CLIError(
+            "sample-isolated orchestrator: per-sample run_semantic "
+            f"summary 'corpus.{kind}.rows' must be non-negative "
+            f"(got {rows!r})"
+        )
+    return rows
+
+
+def _count_corpus_rows(jsonl_path: str) -> int:
+    """Return the line count of ``jsonl_path`` if it exists, else 0.
+
+    A 0-line result is the truth for a per-sample pass that crashed
+    before ``run_semantic`` finished writing the JSONL; the
+    aggregate ``corpus-isolation.json`` therefore records this
+    value under the correctly-named ``evidence_written_case_count``
+    field — it is NOT a corpus row count and is NOT exposed under
+    ``qa_pairs_rows`` / ``conversation_stream_rows``.  Tests
+    that want to assert the per-sample case count must use the
+    ``case_count`` field, not this row count.
+    """
+
+    if not jsonl_path or not os.path.isfile(jsonl_path):
+        return 0
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            return sum(1 for _ in f if _.strip())
+    except OSError:
+        return 0
+
+
+def _count_per_sample_sessions(
+    data: Any, expected_sample_id: str,
+) -> int:
+    """Distinct session count for ``expected_sample_id`` in ``data``.
+
+    The recall engine does not surface the per-case session set on
+    ``CaseRecord`` (only ranked / selected / candidate / injected
+    source ids), so we read the canonical LoCoMo dataset for this
+    sample and count its ``sessions`` tuple.  ``0`` means the
+    dataset did not contain the requested sample — the orchestrator
+    surfaces that honestly rather than fabricating a number.
+    """
+
+    for sid, sample in data.samples:
+        if str(sid) != str(expected_sample_id):
+            continue
+        return int(len(sample.sessions))
+    return 0
 
 
 # ---------------------------------------------------------------------
@@ -2017,8 +3832,66 @@ def make_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Repeatable sample-id filter; merged into --sample-filter.",
     )
+    run.add_argument(
+        "--case-id", dest="case_ids", action="append",
+        default=None,
+        help=(
+            "Repeatable case-level filter; one or more "
+            "<sample_id>|<query_idx> ids. Unknown ids fail closed. "
+            "Corpus import stays at the selected sample scope."
+        ),
+    )
+    run.add_argument(
+        "--search-mode", dest="search_mode",
+        choices=tuple(sorted(ALLOWED_SEARCH_MODES)),
+        default=None,
+        help=(
+            "Exact or ANN session policy. Default when omitted: "
+            "'ann' (the historical G6C-A / alpha behaviour). "
+            "B0 deterministic-baseline experiments pass 'exact' "
+            "explicitly so the manifest records the requested "
+            "value."
+        ),
+    )
+    run.add_argument(
+        "--ivfflat-probes", dest="ivfflat_probes", type=int, default=None,
+        help=(
+            "Optional explicit ivfflat.probes override. Valid only "
+            "with --search-mode ann. Verified on every lease."
+        ),
+    )
+    run.add_argument(
+        "--index-build-phase", dest="index_build_phase",
+        choices=("bootstrap_before_import", "after_import"),
+        default=None,
+        help=(
+            "When IVFFlat CREATE INDEX statements are issued. "
+            "Default: bootstrap_before_import. Mode C (deferred) "
+            "requires --index-build-phase after_import."
+        ),
+    )
+    run.add_argument(
+        "--run-analyze", dest="run_analyze", action="store_true",
+        help=(
+            "Issue ANALYZE on the canonical corpus tables after "
+            "import (Mode B) and again after deferred index "
+            "creation (Mode C)."
+        ),
+    )
     run.add_argument("--repeatability", action="store_true",
                      help="Run a second cached pass and write repeatability.json.")
+    run.add_argument(
+        "--sample-isolated", dest="sample_isolated",
+        action="store_true", default=False,
+        help=(
+            "G6C-B0.1 sample-isolated orchestrator: for every sample "
+            "in scope, DROP+CREATE a fresh disposable database whose "
+            "corpus is that sample's rows only (all sessions retained) "
+            "and aggregate the per-sample passes into the canonical "
+            "artifact set. Incompatible with --case-limit and "
+            "--repeatability."
+        ),
+    )
     run.add_argument("--commit-sha", default="",
                      help="40-char git SHA to stamp the manifest with.")
     run.add_argument("--write-rows", action="store_true",
@@ -2060,6 +3933,33 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_INPUT_ERROR
 
+    # ----- G6C-B0.1 sample-isolated guards (fail closed) -----
+    # The orchestrator cannot honor a global --case-limit because
+    # the per-sample passes see only their own cases — re-applying
+    # the cap silently would change the meaning of every slice.
+    if bool(getattr(args, "sample_isolated", False)) and (
+        getattr(args, "case_limit", None) is not None
+    ):
+        print(
+            "cli: --case-limit and --sample-isolated are incompatible; "
+            "a global cap has no unambiguous per-sample meaning. "
+            "Drop --case-limit or --sample-isolated.",
+            file=sys.stderr,
+        )
+        return EXIT_INPUT_ERROR
+    # The B0.1 gate is two independent full runs, not an in-run
+    # second pass — repeatability + sample-isolated is refused.
+    if bool(getattr(args, "sample_isolated", False)) and bool(
+        getattr(args, "repeatability", False)
+    ):
+        print(
+            "cli: --repeatability and --sample-isolated are "
+            "incompatible; the B0.1 gate is two independent full "
+            "runs. Drop --repeatability or --sample-isolated.",
+            file=sys.stderr,
+        )
+        return EXIT_INPUT_ERROR
+
     # Stage 1: dry-run — always runs.
     try:
         dry_summary = run_dry_run(args)
@@ -2092,7 +3992,10 @@ def main(argv: list[str] | None = None) -> int:
     # Stage 2: semantic. Touches the disposable lab PG and
     # the provider (via the embedding-preparation module).
     try:
-        result = run_semantic(args)
+        if bool(getattr(args, "sample_isolated", False)):
+            result = _run_semantic_sample_isolated(args)
+        else:
+            result = run_semantic(args)
     except SourceConfigRefused as exc:
         print(f"cli: semantic failed — source-config: {exc}", file=sys.stderr)
         return EXIT_INPUT_ERROR

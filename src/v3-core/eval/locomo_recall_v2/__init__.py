@@ -30,4 +30,7 @@ __all__ = [
     "manifest",
     "lab",
     "compare",
+    "search_protocol",
+    "session_pool",
+    "explain_capture",
 ]

@@ -17,6 +17,37 @@ Use the historical `locomo10.json` source externally, not a new dataset and not 
 
 Always verify the file hash before parsing. Source variants with another hash are a different benchmark and must not be compared silently.
 
+## Corpus scope — ONE LOCOMO SAMPLE = ONE INDEPENDENT MEMORY CORPUS
+
+A LoCoMo sample is one conversation. The public loader defines
+`LoCoMoSample = one sample / one conversation`, and this runbook therefore
+requires:
+
+- **ALL SESSIONS OF THAT SAMPLE REMAIN TOGETHER.** The memory system is supposed
+  to recall across the whole long conversation, so narrowing the corpus to the
+  question's own session is forbidden.
+- **NO ROWS FROM ANOTHER SAMPLE MAY BE VISIBLE.** Cross-sample contamination is
+  forbidden.
+
+Run the full benchmark with `--sample-isolated`. The evaluator then gives every
+sample its own freshly created disposable database, imports only that sample's
+rows, runs only that sample's questions, destroys that database, and finally
+aggregates every case by canonical `case_id` (still exactly `1,986` questions),
+writing `per-sample-metrics.json` and `corpus-isolation.json` alongside the usual
+artifacts.
+
+Importing all 10 samples into one corpus is a **different experiment**. The
+mature 2026-08-11 LoCoMo work (`load_locomo_all.py`, "10 个 conv 混合入库") and the
+G6C-A / G6C-B0 / G6C-B1 runs — whose manifests record `sample_count: 10` — all
+used that shared-corpus shape, so they are classified as `*_MIXED_*` diagnostic
+history. They are **not** the canonical LoCoMo quality baseline.
+
+Measured difference (canary, exact search, 12 cases over 3 samples): only `4/12`
+ranked lists and `4/12` candidate sets agreed between MIXED and ISOLATED, and the
+gold source id appeared in the candidate set for `1/12` MIXED cases versus `4/12`
+ISOLATED cases. For `conv-30|0` the MIXED candidate set was 100% `conv-26` rows
+with the gold absent, while ISOLATED produced 15 `conv-30` candidates.
+
 ## Environment and safety
 
 Run from the repository root with the current checkout explicitly first:
