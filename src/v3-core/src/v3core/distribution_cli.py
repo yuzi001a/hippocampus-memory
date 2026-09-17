@@ -1141,7 +1141,19 @@ def _rebuild(args) -> int:
         print(json.dumps({"command": "rebuild", "status": "failed", "detail": str(exc)}, ensure_ascii=False))
         return 1
     print(json.dumps({"command": "rebuild", "mode": "run", **res}, ensure_ascii=False, indent=2))
-    return 0 if res.get("status") == "completed" else 1
+    # Exit codes carry the outcome's meaning, because stopping on the budget the
+    # user asked for is a SUCCESS, not a failure: `rebuild --budget 5 && next`
+    # must not be reported as a broken run. The JSON `status` still distinguishes
+    # them for anything that needs the detail.
+    #   0   completed | budget_stopped   (intended outcomes)
+    #   1   failed
+    #   130 interrupted                 (conventional Ctrl-C)
+    status = str(res.get("status") or "")
+    if status in ("completed", "budget_stopped"):
+        return 0
+    if status == "interrupted":
+        return 130
+    return 1
 
 
 def _doctor_full(args) -> int:
