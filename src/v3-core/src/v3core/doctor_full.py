@@ -759,9 +759,27 @@ def _check_migration_state(parsed_dsn: dict[str, Any] | None,
 
 
 def _check_auth_llm(cfg_view: dict[str, Any], timeout: float) -> dict[str, Any]:
+    llm = cfg_view.get("llm", {}) or {}
+    # Probe the endpoint the profile actually configured. Hardcoding MiniMax's
+    # /models meant a SiliconFlow install was probed at the wrong vendor and
+    # reported a 404 warning.
+    base = (llm.get("base_url") or "").rstrip("/")
+    endpoint = f"{base}/chat/completions" if base else "https://api.minimaxi.com/v1/models"
+    body = None
+    if base:
+        body = {
+            "model": llm.get("model") or llm.get("model_name") or "",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
+    # `_do_auth_check` prefers section["endpoint"]/["base_url"]; give it the full
+    # chat route, otherwise it POSTs to the bare base_url and gets a 404.
+    section = dict(llm)
+    section.pop("base_url", None)
+    section["endpoint"] = endpoint
     return _do_auth_check(
-        "memory_llm_auth", cfg_view.get("llm", {}), timeout,
-        default_endpoint="https://api.minimaxi.com/v1/models",
+        "memory_llm_auth", section, timeout,
+        default_endpoint=endpoint, probe_body=body,
     )
 
 
@@ -770,6 +788,7 @@ def _check_auth_embedding(cfg_view: dict[str, Any], timeout: float) -> dict[str,
     return _do_auth_check(
         "embedding_auth", embed, timeout,
         default_endpoint=embed.get("endpoint") or "",
+        probe_body={"model": embed.get("model") or "", "input": "ping"},
     )
 
 
@@ -778,6 +797,8 @@ def _check_auth_rerank(cfg_view: dict[str, Any], timeout: float) -> dict[str, An
     return _do_auth_check(
         "rerank_auth", rr, timeout,
         default_endpoint=rr.get("endpoint") or "",
+        probe_body={"model": rr.get("model") or "", "query": "ping",
+                    "documents": ["ping"]},
     )
 
 
@@ -787,14 +808,18 @@ def _do_auth_check(
     timeout: float,
     *,
     default_endpoint: str,
+    probe_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generic auth check.
 
     Policy:
       * No key configured → status='skip' with a 'no key' detail.
       * Key configured but no resolvable endpoint → status='warn'.
-      * Key + endpoint → perform a minimal HEAD/GET, classify the
-        status code into the canonical vocabulary, never echo the key.
+      * Key + endpoint → perform a minimal request (a tiny POST when the
+        caller supplies `probe_body`, since embedding/rerank/chat routes are
+        POST-only and answered a bare GET with 404 — which read to a user as
+        "auth is broken" on a perfectly working install), classify the status
+        code into the canonical vocabulary, never echo the key.
     """
     api_key = section.get("api_key") or section.get("apiKey") or ""
     if not api_key:
@@ -818,10 +843,14 @@ def _do_auth_check(
         }
     # The request is best-effort. Network failures must not crash doctor.
     try:
-        resp = requests.get(
-            endpoint, headers={"Authorization": f"Bearer {api_key}"},
-            timeout=max(1.0, float(timeout)),
-        )
+        headers = {"Authorization": f"Bearer {api_key}"}
+        if probe_body is not None:
+            resp = requests.post(
+                endpoint, headers=headers, json=probe_body,
+                timeout=max(1.0, float(timeout)),
+            )
+        else:
+            resp = requests.get(endpoint, headers=headers, timeout=max(1.0, float(timeout)))
     except requests.RequestException as e:
         return {
             "id": check_id,
