@@ -1,0 +1,2 @@
+{"role":"user","content":"Alice: please also book a 30min sync.","session_id":"sess-alice-001","timestamp":"2026-08-02T09:15:00Z"}
+{"role":"assistant","content":"Booked for tomorrow at 10am.","session_id":"sess-alice-001","timestamp":"2026-08-02T09:15:05Z"}

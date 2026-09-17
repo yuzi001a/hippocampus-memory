@@ -928,16 +928,211 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--database", default=None)
     bootstrap.add_argument("--user", default=None)
 
+    # --- v0.2 First User Release surface ------------------------------------
+    # These subcommands delegate to dedicated modules; each is imported lazily
+    # inside its handler so a partially-updated install still gives a clear
+    # message instead of an import error at CLI start-up.
+    install = sub.add_parser(
+        "install",
+        help=(
+            "First-user install: environment check, pgvector container, "
+            "profile config, Hermes wiring, bootstrap, doctor, write+recall smoke."
+        ),
+    )
+    install.add_argument(
+        "--preset",
+        default="siliconflow",
+        choices=("siliconflow", "custom"),
+        help="siliconflow = lowest-friction preset (one embed/rerank key + one LLM key).",
+    )
+    install.add_argument("--pg-port", type=int, default=55432)
+    install.add_argument("--profile-dir", default=None)
+    install.add_argument("--hermes-home", default=None)
+    install.add_argument("--embed-key", default=None, help="Embedding/rerank API key (never echoed).")
+    install.add_argument("--llm-key", default=None, help="Memory-LLM API key (never echoed).")
+    install.add_argument("--llm-base-url", default=None)
+    install.add_argument("--llm-model", default=None)
+    install.add_argument("--skip-smoke", action="store_true")
+    install.add_argument("--plugin-wheel", default=None,
+                         help="Path to the v3-hermes-plugin wheel (or source directory) so the"
+                              " installer can put the provider into the Hermes environment.")
+
+    imp = sub.add_parser(
+        "import",
+        help="Import existing memory (raw history / user-curated notes / other systems).",
+    )
+    imp.add_argument(
+        "source",
+        choices=("list", "hermes", "memory-md", "openclaw", "hindsight"),
+        help="'list' shows every registered importer and its honest capability level.",
+    )
+    imp.add_argument("--root", default=None, help="Directory or file to import from.")
+    imp.add_argument("--profile-dir", default=None)
+    imp.add_argument("--dry-run", action="store_true", help="Parse and report only; write nothing.")
+    imp.add_argument("--limit", type=int, default=None, help="Import at most N items (smoke).")
+
+    rb = sub.add_parser(
+        "rebuild",
+        help="Rebuild derived memory (QA / notes / topics) from imported source, with budget + resume.",
+    )
+    rb.add_argument("--estimate", action="store_true", help="Estimate tokens and cost only.")
+    rb.add_argument("--budget", type=float, default=None, help="Budget cap in CNY.")
+    rb.add_argument("--batch-size", type=int, default=20)
+    rb.add_argument("--no-resume", action="store_true")
+    rb.add_argument("--profile-dir", default=None)
+
+    doctor.add_argument(
+        "--full",
+        action="store_true",
+        help="Run the 16 extended first-user checks (DB / auth / write / read / recall).",
+    )
+    doctor.add_argument(
+        "--writes",
+        action="store_true",
+        help="With --full: allow the write probe (writes one row into the target DB).",
+    )
+
     return parser
+
+
+def _resolve_profile_dir(explicit: str | None):
+    """Resolve the profile directory the same way the engine does."""
+    from pathlib import Path as _Path
+
+    if explicit:
+        return _Path(explicit).expanduser().resolve()
+    try:
+        from v3core import config as _cfg
+
+        cfg = _cfg.resolve_config()
+        return _Path(_cfg._resolve_data_dir(cfg))
+    except Exception:
+        return _Path.home() / ".v3-core" / "profiles" / "default"
+
+
+def _install(args) -> int:
+    try:
+        from v3core import first_run
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "install", "status": "error",
+                          "detail": f"first_run module unavailable: {exc}"}, ensure_ascii=False))
+        return 2
+    return first_run.run_install(
+        preset=args.preset,
+        pg_port=args.pg_port,
+        profile_dir=args.profile_dir,
+        hermes_home=args.hermes_home,
+        embed_key=args.embed_key,
+        llm_key=args.llm_key,
+        llm_base_url=args.llm_base_url,
+        llm_model=args.llm_model,
+        skip_smoke=args.skip_smoke,
+        plugin_wheel=args.plugin_wheel,
+    )
+
+
+def _import(args) -> int:
+    try:
+        from v3core import importers
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "import", "status": "error",
+                          "detail": f"importers module unavailable: {exc}"}, ensure_ascii=False))
+        return 2
+    if args.source == "list":
+        rows = [
+            {"name": cls.name, "capability": cls.capability, "description": cls.description}
+            for cls in importers.IMPORTERS.values()
+        ]
+        print(json.dumps({"command": "import", "status": "ok", "importers": rows}, ensure_ascii=False, indent=2))
+        return 0
+    if not args.root:
+        print(json.dumps({"command": "import", "status": "error",
+                          "detail": "--root is required for a real import (a directory or a file)."},
+                         ensure_ascii=False))
+        return 2
+    from pathlib import Path as _Path
+
+    profile_dir = _resolve_profile_dir(args.profile_dir)
+    try:
+        stats = importers.import_source(
+            source=args.source,
+            root=_Path(args.root).expanduser().resolve(),
+            profile_dir=profile_dir,
+            dry_run=args.dry_run,
+            limit=args.limit,
+        )
+    except NotImplementedError as exc:
+        print(json.dumps({"command": "import", "status": "not_implemented", "detail": str(exc)},
+                         ensure_ascii=False))
+        return 3
+    except Exception as exc:
+        print(json.dumps({"command": "import", "status": "error", "detail": str(exc)}, ensure_ascii=False))
+        return 1
+    print(json.dumps({"command": "import", "status": "ok", "dry_run": stats.dry_run, "stats": stats.as_dict()},
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
+def _rebuild(args) -> int:
+    try:
+        from v3core import rebuild
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "rebuild", "status": "error",
+                          "detail": f"rebuild module unavailable: {exc}"}, ensure_ascii=False))
+        return 2
+    profile_dir = _resolve_profile_dir(args.profile_dir)
+    try:
+        if args.estimate:
+            est = rebuild.estimate(profile_dir=profile_dir, batch_size=args.batch_size)
+            print(json.dumps({"command": "rebuild", "mode": "estimate", **est}, ensure_ascii=False, indent=2))
+            return 0
+        res = rebuild.run_rebuild(
+            profile_dir=profile_dir,
+            batch_size=args.batch_size,
+            budget_yuan=args.budget,
+            resume=not args.no_resume,
+        )
+    except Exception as exc:
+        print(json.dumps({"command": "rebuild", "status": "failed", "detail": str(exc)}, ensure_ascii=False))
+        return 1
+    print(json.dumps({"command": "rebuild", "mode": "run", **res}, ensure_ascii=False, indent=2))
+    return 0 if res.get("status") == "completed" else 1
+
+
+def _doctor_full(args) -> int:
+    try:
+        from v3core import doctor_full
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "doctor", "status": "error",
+                          "detail": f"doctor_full module unavailable: {exc}"}, ensure_ascii=False))
+        return 2
+    profile_dir = _resolve_profile_dir(None)
+    result = doctor_full.run_full_checks(
+        profile_dir=profile_dir,
+        dsn=args.dsn,
+        allow_write=getattr(args, "writes", False),
+    )
+    summary = result.get("summary", {})
+    payload = {"command": "doctor", "full": True, "profile_dir": str(profile_dir), **result}
+    print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    return 0 if summary.get("fail", 0) == 0 else 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "doctor":
+        if getattr(args, "full", False):
+            return _doctor_full(args)
         return _doctor(args)
     if args.command == "bootstrap":
         return _bootstrap(args)
+    if args.command == "install":
+        return _install(args)
+    if args.command == "import":
+        return _import(args)
+    if args.command == "rebuild":
+        return _rebuild(args)
     parser.print_help()
     return 2
 

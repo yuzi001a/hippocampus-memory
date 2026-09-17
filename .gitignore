@@ -22,6 +22,9 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+# setuptools/uv build output produced by `uv build` (wheels are attached to releases)
+build/
+dist/
 
 # Local state / runtime databases
 *.db

@@ -27,6 +27,38 @@ logger = logging.getLogger("v3core.llm")
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = [1, 4, 10]  # 秒: 1st→2nd→3rd
 
+# ──────────────────────────────────────────────────────────────────────────────
+# HTTP status classification
+#   requests.Response.__bool__ returns False for ANY 4xx/5xx response —
+#   so `if resp:` is a trap. The old line 202 used `_http_err.response if
+#   _http_err.response else 0`, which silently masked a real 401/500 as
+#   status=0 and broke the 5xx-retry branch. The helpers below are the
+#   explicit `is not None` form plus a stable status→class mapping used in
+#   the log line.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_STATUS_CLASS_MAP: dict[int, str] = {
+    401: "auth_failed",
+    402: "quota_or_plan_limit",
+    429: "rate_limited",
+    500: "upstream_error",
+    503: "upstream_unavailable",
+}
+
+
+def classify_status(status_code: int | None) -> str:
+    """Map an HTTP status code to a stable human-readable class.
+
+    Returns ``"http_{status}"`` for recognised codes, ``"unknown"`` for
+    anything else, and ``"none"`` when the response was missing entirely
+    (so the log line still makes sense in a ConnectionError-style case).
+    """
+    if status_code is None:
+        return "none"
+    if status_code in _STATUS_CLASS_MAP:
+        return _STATUS_CLASS_MAP[status_code]
+    return f"http_{status_code}"
+
 class LLMClient:
     """统一 LLM 客户端"""
 
@@ -199,17 +231,27 @@ class LLMClient:
 
             except requests.exceptions.HTTPError as _http_err:
                 last_err = _http_err
-                status = _http_err.response.status_code if _http_err.response else 0
-                body_text = _http_err.response.text[:300] if _http_err.response else ""
+                # BUGFIX (truthiness trap): requests.Response.__bool__ returns
+                # False for any 4xx/5xx, so `if _http_err.response:` masks
+                # a real 401/500 as status=0 and silently breaks the 5xx
+                # retry branch. Use an explicit `is not None` test instead.
+                _resp = _http_err.response
+                if _resp is not None:
+                    status = _resp.status_code
+                    body_text = (_resp.text or "")[:300]
+                else:
+                    status = 0
+                    body_text = ""
+                status_class = classify_status(status if status else None)
                 # 5xx 重试, 4xx 不重试（429 已在上面处理）
                 if 500 <= status < 600 and attempt < _MAX_RETRIES - 1:
                     wait = _RETRY_BACKOFF[attempt]
-                    logger.warning("LLM 5xx (attempt %d/%d): status=%d — retry in %ds",
-                                   attempt + 1, _MAX_RETRIES, status, wait)
+                    logger.warning("LLM 5xx (attempt %d/%d): status=%d class=%s — retry in %ds",
+                                   attempt + 1, _MAX_RETRIES, status, status_class, wait)
                     time.sleep(wait)
                 else:
-                    logger.error("LLM HTTP failed: status=%d body=%s",
-                                 status, body_text[:2000])
+                    logger.error("LLM HTTP failed: status=%d class=%s body=%s",
+                                 status, status_class, body_text[:2000])
                     raise
 
         logger.error("LLM failed after %d attempts: %s", _MAX_RETRIES, str(last_err)[:200])
