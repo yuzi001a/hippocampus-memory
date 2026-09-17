@@ -85,8 +85,12 @@ EMBED_TOKENS_PER_QA: float = 0.0  # embedding 计 token 量, 不计字符费用
 #:   MINIMAX_CN_PRICE_INPUT  (¥/1k tokens, input)
 #:   MINIMAX_CN_PRICE_OUTPUT (¥/1k tokens, output)
 #: When unset, cost is reported as None and basis records "price unknown".
-ENV_PRICE_INPUT = "MINIMAX_CN_PRICE_INPUT"
-ENV_PRICE_OUTPUT = "MINIMAX_CN_PRICE_OUTPUT"
+# Provider-agnostic names are the contract; the MiniMax-specific names stay as
+# a backwards-compatible alias so existing deployments keep pricing correctly.
+ENV_PRICE_INPUT = "V3CORE_PRICE_INPUT_PER_1K"
+ENV_PRICE_OUTPUT = "V3CORE_PRICE_OUTPUT_PER_1K"
+_ENV_PRICE_ALIASES_IN = ("V3CORE_PRICE_INPUT_PER_1K", "MINIMAX_CN_PRICE_INPUT")
+_ENV_PRICE_ALIASES_OUT = ("V3CORE_PRICE_OUTPUT_PER_1K", "MINIMAX_CN_PRICE_OUTPUT")
 
 #: Where a profile import report may live. estimate() reads it when the
 #: profile SQLite database is not reachable.
@@ -164,6 +168,42 @@ def estimate(
                     count_source = f"sqlite count at {sqlite_path}"
             except Exception as e:  # noqa: BLE001
                 basis.append(f"sqlite probe failed: {type(e).__name__}: {e!s}")
+
+    # ── Source 2b: profile PostgreSQL ────────────────────────────────────
+    # The first-user path keeps everything in PostgreSQL (the SQLite file only
+    # exists for the file-mode engine), so an estimate that cannot count PG rows
+    # refuses on a perfectly populated install.
+    if msg_count is None:
+        try:
+            import psycopg2  # type: ignore
+
+            from .config import resolve_config  # type: ignore
+
+            _cfg = resolve_config()
+            _pg = getattr(_cfg, "pg", None) or getattr(getattr(_cfg, "storage", None), "pg", None)
+            if _pg is not None and getattr(_pg, "host", ""):
+                _pw = (os.environ.get("V3CORE_PG_PASSWORD")
+                       or os.environ.get("PGPASSWORD") or "")
+                _conn = psycopg2.connect(
+                    host=_pg.host, port=int(_pg.port), dbname=_pg.database,
+                    user=_pg.user, password=_pw, connect_timeout=5,
+                )
+                try:
+                    with _conn.cursor() as _cur:
+                        _cur.execute("SELECT count(*) FROM public.conversation_stream "
+                                     "WHERE role IN ('user', 'assistant')")
+                        msg_count = int(_cur.fetchone()[0])
+                        count_source = (f"postgres {_pg.host}:{_pg.port}/{_pg.database} "
+                                        f"conversation_stream (user+assistant turns only)")
+                        _cur.execute("SELECT count(*) FROM public.qa_pairs")
+                        basis.append(f"qa_pairs={int(_cur.fetchone()[0])} (postgres)")
+                finally:
+                    try:
+                        _conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as e:  # noqa: BLE001
+            basis.append(f"postgres probe failed: {type(e).__name__}: {e!s}")
 
     # ── Source 3: import report file ─────────────────────────────────────
     if msg_count is None and profile_dir.exists():
@@ -243,11 +283,11 @@ def estimate(
     out["est_output_tokens_range"] = [out_lo, out_hi]
 
     # ── Cost math ────────────────────────────────────────────────────────
-    price_in = _read_env_float(ENV_PRICE_INPUT, None)
-    price_out = _read_env_float(ENV_PRICE_OUTPUT, None)
+    price_in = _resolve_price(_ENV_PRICE_ALIASES_IN)
+    price_out = _resolve_price(_ENV_PRICE_ALIASES_OUT)
     if price_in is None or price_out is None:
-        basis.append("price unknown (set MINIMAX_CN_PRICE_INPUT and "
-                     "MINIMAX_CN_PRICE_OUTPUT to enable cost math)")
+        basis.append("price unknown (set V3CORE_PRICE_INPUT_PER_1K and "
+                     "V3CORE_PRICE_OUTPUT_PER_1K, ¥ per 1k tokens, to enable cost math)")
         out["est_cost_yuan"] = None
         out["est_cost_yuan_range"] = None
         out["price_input_per_1k"] = price_in
@@ -361,8 +401,8 @@ def run_rebuild(
             print(f"checkpoint load failed (ignoring): {e}", file=out)
 
     # ── Price table for cost math (same env as estimate) ────────────────
-    price_in = _read_env_float(ENV_PRICE_INPUT, 0.0) or 0.0
-    price_out = _read_env_float(ENV_PRICE_OUTPUT, 0.0) or 0.0
+    price_in = _resolve_price(_ENV_PRICE_ALIASES_IN) or 0.0
+    price_out = _resolve_price(_ENV_PRICE_ALIASES_OUT) or 0.0
 
     # ── Message source ───────────────────────────────────────────────────
     source_iter = _default_message_source(profile_dir)
@@ -402,6 +442,15 @@ def run_rebuild(
                 "session. Read the prior note (if any) and the new QA "
                 "batch, and produce the updated note as plain text."
             )
+            # Guard: a custom source may hand us tool/system rows; strict
+            # providers reject those roles, and one bad role would kill the
+            # whole batch.
+            batch = [
+                {**m, "role": "assistant"}
+                if str(m.get("role", "")).lower() not in ("user", "assistant", "system")
+                else m
+                for m in batch
+            ]
             try:
                 content = llm_fn(system, batch)
             except KeyboardInterrupt:
@@ -567,6 +616,15 @@ def _read_env_float(name: str, default: float | None) -> float | None:
         return default
 
 
+def _resolve_price(names: tuple[str, ...]) -> float | None:
+    """First set env var among `names`, as ¥ per 1k tokens (None = unpriced)."""
+    for name in names:
+        value = _read_env_float(name, None)
+        if value is not None:
+            return value
+    return None
+
+
 def _read_env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -601,6 +659,15 @@ def _count_tokens_from_content(
     return in_tokens, out_tokens
 
 
+#: Rows the default source skipped because they are not conversational turns.
+_SKIPPED_SOURCE_ROLES: list[int] = []
+
+
+def skipped_source_roles() -> int:
+    """How many non-conversational rows the source skipped in this process."""
+    return sum(_SKIPPED_SOURCE_ROLES)
+
+
 def _default_message_source(profile_dir: Path) -> Iterable[Any]:
     """Default message source for the rebuild runner.
 
@@ -615,6 +682,69 @@ def _default_message_source(profile_dir: Path) -> Iterable[Any]:
     The production wiring overrides this by passing a custom source
     via the ``llm_fn`` indirection; that is the documented path.
     """
+    # ── PostgreSQL (the path a first user actually has) ──────────────────
+    # Without this the runner processed 0 messages on a populated install and
+    # still reported "completed" — a silently empty rebuild.
+    try:
+        import psycopg2  # type: ignore
+
+        from .config import resolve_config  # type: ignore
+
+        _cfg = resolve_config()
+        _pg = getattr(_cfg, "pg", None) or getattr(getattr(_cfg, "storage", None), "pg", None)
+        if _pg is not None and getattr(_pg, "host", ""):
+            _pw = (os.environ.get("V3CORE_PG_PASSWORD")
+                   or os.environ.get("PGPASSWORD") or "")
+            _conn = psycopg2.connect(
+                host=_pg.host, port=int(_pg.port), dbname=_pg.database,
+                user=_pg.user, password=_pw, connect_timeout=5,
+            )
+            try:
+                # Count and stream on SEPARATE cursors: psycopg2 cannot re-execute
+                # a named (server-side) cursor, and a swallowed error there made
+                # the source yield nothing while the runner still said
+                # "completed" — a silently empty rebuild.
+                with _conn.cursor() as _cur_count:
+                    _cur_count.execute(
+                        "SELECT count(*) FROM public.conversation_stream "
+                        "WHERE role NOT IN ('user', 'assistant')"
+                    )
+                    _skipped_rows = int(_cur_count.fetchone()[0])
+                    if _skipped_rows:
+                        _SKIPPED_SOURCE_ROLES.append(_skipped_rows)
+                        logger.info(
+                            "rebuild source: skipping %d non-conversational row(s) "
+                            "(role not in user/assistant)", _skipped_rows,
+                        )
+                with _conn.cursor(name="rebuild_src") as _cur:
+                    _cur.itersize = 500
+                    _cur.execute(
+                        "SELECT session_id, role, content, timestamp "
+                        "FROM public.conversation_stream "
+                        "WHERE role IN ('user', 'assistant') "
+                        "ORDER BY timestamp NULLS LAST, id"
+                    )
+                    for _row in _cur:
+                        yield {
+                            "session_id": _row[0],
+                            "role": _row[1],
+                            "content": _row[2],
+                            "timestamp": str(_row[3]) if _row[3] is not None else None,
+                        }
+            finally:
+                try:
+                    _conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+    except Exception as _pg_err:  # noqa: BLE001
+        # Fall through to the hermetic sources below; a PG-less install (or a
+        # test) must keep working as before. Loud, never silent: a swallowed
+        # error here used to produce a "completed" rebuild with zero messages.
+        logger.warning("rebuild source: PostgreSQL probe failed (%s: %s); "
+                       "falling back to local sources",
+                       type(_pg_err).__name__, _pg_err)
+
     jsonl = profile_dir / "messages.jsonl"
     if jsonl.is_file():
         with jsonl.open("r", encoding="utf-8") as f:

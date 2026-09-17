@@ -1121,11 +1121,21 @@ def _rebuild(args) -> int:
             est = rebuild.estimate(profile_dir=profile_dir, batch_size=args.batch_size)
             print(json.dumps({"command": "rebuild", "mode": "estimate", **est}, ensure_ascii=False, indent=2))
             return 0
+        # The runner takes an injectable llm_fn (one rolling note per batch).
+        # Without wiring it, a real rebuild could only ever fail closed — the
+        # same "CLI never connected the dependency" gap as the import pool.
+        def _llm_fn(system: str, messages: list) -> str:
+            from v3core.config import resolve_config
+            from v3core.llm import LLMClient
+
+            return LLMClient(resolve_config()).chat(system, messages)
+
         res = rebuild.run_rebuild(
             profile_dir=profile_dir,
             batch_size=args.batch_size,
             budget_yuan=args.budget,
             resume=not args.no_resume,
+            llm_fn=_llm_fn,
         )
     except Exception as exc:
         print(json.dumps({"command": "rebuild", "status": "failed", "detail": str(exc)}, ensure_ascii=False))

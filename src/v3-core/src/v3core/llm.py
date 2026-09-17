@@ -59,6 +59,22 @@ def classify_status(status_code: int | None) -> str:
         return _STATUS_CLASS_MAP[status_code]
     return f"http_{status_code}"
 
+def _looks_like_rejected_extra(err: Exception) -> bool:
+    """True when a 4xx looks like the provider choking on an optional field.
+
+    Deliberately narrow: only 400/422-class responses whose text mentions the
+    thinking parameter, an unknown/extra field, or a missing field. Auth,
+    quota and rate-limit errors must NOT trigger the retry.
+    """
+    text = f"{type(err).__name__}: {err}".lower()
+    if not any(tok in text for tok in ("400", "422", "bad request", "unprocessable")):
+        return False
+    if any(tok in text for tok in ("api key", "unauthorized", "401", "quota", "balance", "rate limit", "429")):
+        return False
+    return any(tok in text for tok in ("thinking", "extra", "unknown field",
+                                       "unexpected", "field required", "invalid_request"))
+
+
 class LLMClient:
     """统一 LLM 客户端"""
 
@@ -69,6 +85,12 @@ class LLMClient:
         self.model = llm_cfg.get("model", "")
         # thinking 开关: config llm.thinking (bool, 默认 True) 或构造参数
         self._thinking = bool(llm_cfg.get("thinking", True))
+        # Output cap. 131072 assumed a 128k-output model; most OpenAI-compatible
+        # providers reject it outright, so it is configurable per profile.
+        try:
+            self._max_tokens = int(llm_cfg.get("max_tokens") or 131072)
+        except (TypeError, ValueError):
+            self._max_tokens = 131072
         self.api_key = (
             llm_cfg.get("api_key", "")
             or os.environ.get("MINIMAX_CN_API_KEY", "")
@@ -89,12 +111,21 @@ class LLMClient:
         """兼容 V3Config / dict / LLMConfig 三种来源."""
         # V3Config / LLMConfig dataclass
         if hasattr(config, "llm") and not isinstance(config, type) and hasattr(config.llm, "provider"):
-            return {
+            out = {
                 "provider": config.llm.provider,
                 "model": config.llm.model,
                 "api_key": config.llm.api_key,
                 "base_url": getattr(config.llm, "base_url", "") or "",
             }
+            # Optional provider-shaped keys must survive, otherwise a profile that
+            # states `thinking: false` / `max_tokens: 8192` silently inherits
+            # defaults meant for another vendor (131072 got rejected with
+            # "exceeded max_seq_len" on SiliconFlow).
+            for opt in ("thinking", "max_tokens", "temperature", "timeout"):
+                value = getattr(config.llm, opt, None)
+                if value is not None:
+                    out[opt] = value
+            return out
         if hasattr(config, "provider") and hasattr(config, "model"):
             return {
                 "provider": config.provider,
@@ -280,13 +311,29 @@ class LLMClient:
                     extra = {"thinking": {"type": "disabled"}}
             except Exception:
                 pass
-            resp = client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "system", "content": system}] + messages,
-                temperature=temperature,
-                max_tokens=131072,
-                extra_body=extra,
-            )
+            call_kwargs = {
+                "model": self.model,
+                "messages": [{"role": "system", "content": system}] + messages,
+                "temperature": temperature,
+                "max_tokens": self._max_tokens,
+            }
+            if extra:
+                call_kwargs["extra_body"] = extra
+            try:
+                resp = client.chat.completions.create(**call_kwargs)
+            except Exception as first_err:
+                # A provider that does not understand the optional thinking
+                # parameter answers 4xx here. Retry exactly once WITHOUT it
+                # instead of failing the memory call for the whole install.
+                if not extra or not _looks_like_rejected_extra(first_err):
+                    raise
+                logger.warning(
+                    "LLM provider rejected the optional thinking parameter; retrying without it "
+                    "(model=%s): %s", self.model, _safe_err(first_err)[:160],
+                )
+                retry_kwargs = dict(call_kwargs)
+                retry_kwargs.pop("extra_body", None)
+                resp = client.chat.completions.create(**retry_kwargs)
             latency = time.time() - t0
             content = resp.choices[0].message.content or ""
             if not content.strip():

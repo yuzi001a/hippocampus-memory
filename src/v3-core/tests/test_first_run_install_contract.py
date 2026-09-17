@@ -64,9 +64,14 @@ def test_presets_siliconflow_shape():
     assert sf["rerank"]["endpoint"] == "https://api.siliconflow.cn/v1/rerank"
     assert sf["rerank"]["model"] == "BAAI/bge-reranker-v2-m3"
     # llm
-    assert sf["llm"]["provider"] == "minimax"
-    assert sf["llm"]["base_url"] == "https://api.minimaxi.com/v1"
-    assert sf["llm"]["model"] == "MiniMax-M3"
+    # One SiliconFlow key covers embed + rerank + the memory LLM, so the preset
+    # must point the LLM at SiliconFlow too (a MiniMax endpoint here produced a
+    # 400/401 on every memory call for a first user holding a SiliconFlow key).
+    assert sf["llm"]["provider"] == "openai"
+    assert sf["llm"]["base_url"] == "https://api.siliconflow.cn/v1"
+    assert sf["llm"]["thinking"] is False
+    assert sf["llm"]["base_url"] == "https://api.siliconflow.cn/v1"
+    assert sf["llm"]["model"] == "Qwen/Qwen2.5-7B-Instruct"
 
 
 def test_presets_custom_is_empty():
@@ -147,7 +152,13 @@ def test_write_profile_config_siliconflow(tmp_path: Path):
     # The endpoint strings are intact
     assert "api.siliconflow.cn/v1/embeddings" in text
     assert "api.siliconflow.cn/v1/rerank" in text
-    assert "api.minimaxi.com/v1" in text
+    # The SiliconFlow preset must NOT ship a foreign provider's endpoint: the
+    # memory LLM rides the same SiliconFlow key, so pairing it with
+    # api.minimaxi.com made every memory call fail with 400/401 on a fresh
+    # install ("your key and your door don't match").
+    assert "api.siliconflow.cn/v1" in text
+    assert "api.minimaxi.com" not in text
+    assert "thinking: false" in text  # SF rejects the DeepSeek/MiniMax thinking param
     # Profile name
     assert "default" in text
 

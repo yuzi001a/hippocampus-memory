@@ -72,10 +72,22 @@ PRESETS: dict[str, dict] = {
             "endpoint": "https://api.siliconflow.cn/v1/rerank",
             "model": "BAAI/bge-reranker-v2-m3",
         },
+        # The memory LLM rides the SAME SiliconFlow key as embed/rerank, so one
+        # key covers the whole install. Writing a MiniMax endpoint here while the
+        # key in .env belongs to SiliconFlow silently produced a 400 on every
+        # memory-formation call — the exact "your key and your door don't match"
+        # failure a first user cannot diagnose. Want MiniMax/DeepSeek for memory
+        # instead: use the `custom` preset and pass --llm-* explicitly.
         "llm": {
-            "provider": "minimax",
-            "base_url": "https://api.minimaxi.com/v1",
-            "model": "MiniMax-M3",
+            "provider": "openai",
+            "base_url": "https://api.siliconflow.cn/v1",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            # SiliconFlow's Qwen models do not accept the `thinking` parameter
+            # (that is a DeepSeek/MiniMax extension) and cap output well below
+            # 128k, so the preset states both instead of inheriting defaults
+            # meant for a different vendor.
+            "thinking": False,
+            "max_tokens": 8192,
         },
     },
     "custom": {},
@@ -811,6 +823,20 @@ def _normalize_pg(pg: dict) -> dict:
     return out
 
 
+def _persistable_key(value: Any) -> str:
+    """What may go into config.yaml for a key field.
+
+    A literal secret must never be written to disk, but an ``${env:NAME}``
+    reference is a pointer, not a secret — and blanking it made every later
+    consumer (doctor auth checks, recall, the engine) see "no api key
+    configured" on a correctly installed system.
+    """
+    text = str(value or "")
+    if text.startswith("${env:") and text.endswith("}"):
+        return text
+    return ""
+
+
 def _normalize_embed(embed: dict) -> dict:
     out: dict[str, Any] = {}
     if "endpoint" in embed:
@@ -819,7 +845,7 @@ def _normalize_embed(embed: dict) -> dict:
         out["model"] = str(embed["model"])
     if "dim" in embed:
         out["dim"] = int(embed["dim"])
-    out["api_key"] = ""  # operator fills via .env or env var; never on disk
+    out["api_key"] = _persistable_key(embed.get("api_key") or embed.get("apiKey"))
     return out
 
 
@@ -829,7 +855,7 @@ def _normalize_rerank(rerank: dict) -> dict:
         out["endpoint"] = str(rerank["endpoint"])
     if "model" in rerank:
         out["model"] = str(rerank["model"])
-    out["api_key"] = ""
+    out["api_key"] = _persistable_key(rerank.get("api_key") or rerank.get("apiKey"))
     return out
 
 
@@ -841,7 +867,13 @@ def _normalize_llm(llm: dict) -> dict:
         out["base_url"] = str(llm["base_url"])
     if "model" in llm:
         out["model"] = str(llm["model"])
-    out["api_key"] = ""
+    # Provider-shaped optional keys must survive the write, otherwise the preset
+    # states `thinking: false` / `max_tokens: 8192` and the profile silently
+    # inherits defaults meant for a different vendor (the 400-on-every-call bug).
+    for opt in ("thinking", "max_tokens", "timeout", "temperature"):
+        if llm.get(opt) is not None:
+            out[opt] = llm[opt]
+    out["api_key"] = _persistable_key(llm.get("api_key") or llm.get("apiKey"))
     return out
 
 

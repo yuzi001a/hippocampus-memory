@@ -108,6 +108,13 @@ class LLMConfig:
     model: str = ""  # 空 = 不显式配置就不发数据（运行时由 config.yaml 覆盖）
     api_key: str = ""
     base_url: str = ""  # 自定义端点；空 = 按 provider 用官方默认
+    # Optional, provider-shaped knobs. None = use the client's default, so an
+    # existing profile behaves exactly as before. Without these fields a profile
+    # could state `thinking: false` / `max_tokens: 8192` and the parser would
+    # drop them silently, sending another vendor's defaults (131072 max_tokens
+    # got rejected by SiliconFlow with "exceeded max_seq_len").
+    thinking: bool | None = None
+    max_tokens: int | None = None
 
     def __repr__(self):
         return f"LLMConfig(provider={self.provider!r}, model={self.model!r}, api_key='***')"
@@ -342,11 +349,18 @@ def from_legacy_dict(src: dict | None) -> V3Config:
     prompts = src.get("prompts") or {}
 
     # -- LLM --
+    _llm_max_tokens = llm_raw.get("max_tokens")
+    try:
+        _llm_max_tokens = int(_llm_max_tokens) if _llm_max_tokens is not None else None
+    except (TypeError, ValueError):
+        _llm_max_tokens = None
     llm = LLMConfig(
         provider=str(llm_raw.get("provider", "")),
         model=str(llm_raw.get("model", "")),
         api_key=str(llm_raw.get("api_key", "") or llm_raw.get("apiKey", "")),
         base_url=str(llm_raw.get("base_url", "") or llm_raw.get("baseUrl", "") or ""),
+        thinking=(bool(llm_raw["thinking"]) if "thinking" in llm_raw else None),
+        max_tokens=_llm_max_tokens,
     )
 
     # -- PG --
