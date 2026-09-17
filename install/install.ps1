@@ -261,15 +261,32 @@ function Install-Hippocampus {
     $coreTarget = $null
     $plugTarget = $null
 
-    # 1) release assets
-    foreach ($pair in @(
-        @{ Name = "v3_core-4.0.0-py3-none-any.whl";         Slot = "core" },
-        @{ Name = "v3_hermes_plugin-4.0.0-py3-none-any.whl"; Slot = "plug" })) {
-        try {
-            $dest = Join-Path $tmp $pair.Name
-            Invoke-WebRequest -UseBasicParsing -Uri "$relBase/$($pair.Name)" -OutFile $dest -ErrorAction Stop
+    # 1) release assets — discovered by NAME PATTERN, never by a pinned version.
+    # Pinning "v3_core-4.0.0-...whl" meant the next version bump silently 404'd
+    # both wheels, and the fallback below then served whatever the default branch
+    # happened to be: a first user would install old code from a command that
+    # looked like it worked. Ask the release API what is actually attached.
+    $coreAsset = $null
+    $plugAsset = $null
+    try {
+        $apiHeaders = @{ "User-Agent" = "hippocampus-installer" }
+        $rel = Invoke-RestMethod -UseBasicParsing -Headers $apiHeaders `
+            -Uri "https://api.github.com/repos/$repo/releases/latest" -ErrorAction Stop
+        foreach ($asset in @($rel.assets)) {
+            if ($asset.name -like "v3_core-*.whl") { $coreAsset = $asset }
+            if ($asset.name -like "v3_hermes_plugin-*.whl") { $plugAsset = $asset }
+        }
+        foreach ($pair in @(
+            @{ Asset = $coreAsset; Slot = "core" },
+            @{ Asset = $plugAsset; Slot = "plug" })) {
+            if (-not $pair.Asset) { continue }
+            $dest = Join-Path $tmp $pair.Asset.name
+            Invoke-WebRequest -UseBasicParsing -Headers $apiHeaders `
+                -Uri $pair.Asset.browser_download_url -OutFile $dest -ErrorAction Stop
             if ($pair.Slot -eq "core") { $coreTarget = $dest } else { $plugTarget = $dest }
-        } catch { }
+        }
+    } catch {
+        Write-Host "[installer] release lookup failed ($($_.Exception.Message)) — trying the source tarball." -ForegroundColor Yellow
     }
 
     # 2) source tarball fallback

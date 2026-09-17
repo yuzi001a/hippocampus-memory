@@ -1,0 +1,79 @@
+name: release
+
+# Publishes the two installable wheels as release assets.
+#
+# Why this exists: `install/install.ps1` acquires the package itself — first from
+# the latest release's assets, then from the default branch's source tarball. With
+# no release assets for the current version, a first user's one-command install
+# silently falls through to whatever the default branch happens to be. Tagging a
+# version and attaching its wheels is the step that makes the documented
+# `irm <url> | iex` line mean what it says.
+#
+# Constraints: contents: write is required to attach assets to the release, and is
+# used only on tag pushes (never on pull requests). No credentials are interpolated
+# into any command; the token is only used by the release step's own action.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach wheels for"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: build wheels and attach to the release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv (which brings Python 3.11)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build the two wheels
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          uv build --wheel --out-dir dist src/v3-core
+          uv build --wheel --out-dir dist src/v3-hermes-plugin
+          Get-ChildItem dist | Select-Object Name, Length
+
+      - name: Verify the wheels install into a clean venv
+        shell: pwsh
+        run: |
+          uv venv --python 3.11 .release-venv
+          $py = Join-Path $PWD ".release-venv/Scripts/python.exe"
+          $wheels = Get-ChildItem dist -Filter *.whl | ForEach-Object { $_.FullName }
+          if ($wheels.Count -lt 2) { throw "expected two wheels, found $($wheels.Count)" }
+          uv pip install --python $py @wheels
+          & $py -c "import v3core, v3hermes; print('import ok', v3core.__version__ if hasattr(v3core, '__version__') else '')"
+          uv pip check --python $py
+
+      - name: Create the release if it does not exist, then attach the wheels
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $tag = "${{ inputs.tag }}" }
+          gh release view $tag --repo "${{ github.repository }}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo "${{ github.repository }}" --title "Hippocampus $tag" --generate-notes
+          }
+          $wheels = Get-ChildItem dist -Filter *.whl | ForEach-Object { $_.FullName }
+          foreach ($w in $wheels) {
+            gh release upload $tag $w --repo "${{ github.repository }}" --clobber
+          }
+          gh release view $tag --repo "${{ github.repository }}" --json assets,tagName
