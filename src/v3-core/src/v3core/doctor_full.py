@@ -313,7 +313,7 @@ def _build_config_view() -> dict[str, Any]:
     except Exception:
         return view
     try:
-        llm = cfg.llm  # type: ignore[attr-defined]
+        llm = getattr(cfg, "llm", None) or getattr(getattr(cfg, "storage", None), "llm", None)  # type: ignore[attr-defined]
         view["llm"]["provider"] = getattr(llm, "provider", None) or None
         view["llm"]["model"] = getattr(llm, "model", None) or None
         view["llm"]["api_key"] = getattr(llm, "api_key", None) or None
@@ -321,7 +321,7 @@ def _build_config_view() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        se = cfg.storage.embed  # type: ignore[attr-defined]
+        se = getattr(cfg, "embed", None) or getattr(getattr(cfg, "storage", None), "embed", None)
         view["embed"]["endpoint"] = getattr(se, "endpoint", None) or None
         view["embed"]["apiKey"] = getattr(se, "api_key", None) or getattr(
             se, "apiKey", None
@@ -332,7 +332,7 @@ def _build_config_view() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        sr = cfg.storage.rerank  # type: ignore[attr-defined]
+        sr = getattr(cfg, "rerank", None) or getattr(getattr(cfg, "storage", None), "rerank", None)
         view["rerank"]["endpoint"] = getattr(sr, "endpoint", None) or None
         view["rerank"]["apiKey"] = getattr(sr, "api_key", None) or getattr(
             sr, "apiKey", None
@@ -378,7 +378,7 @@ def _build_config_view() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        pg = cfg.storage.pg  # type: ignore[attr-defined]
+        pg = getattr(cfg, "pg", None) or getattr(getattr(cfg, "storage", None), "pg", None)
         view["pg"]["host"] = getattr(pg, "host", None)
         view["pg"]["port"] = getattr(pg, "port", None)
         view["pg"]["database"] = getattr(pg, "database", None)

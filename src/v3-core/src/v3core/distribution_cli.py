@@ -1053,6 +1053,41 @@ def _import(args) -> int:
     from pathlib import Path as _Path
 
     profile_dir = _resolve_profile_dir(args.profile_dir)
+
+    # Live imports need a real connection pool: the importer deliberately refuses
+    # to write without one (no silent no-op). Construct it from the resolved
+    # profile config, exactly as the engine does for its own writes.
+    if not args.dry_run:
+        try:
+            import psycopg2
+
+            from v3core.config import resolve_config
+            from v3core.pg_pool import PgPool
+
+            cfg = resolve_config()
+            # V3Config exposes flat attributes (pg / embed / rerank / llm); the
+            # nested `storage` shape kept silently evaluating to None.
+            pg = getattr(cfg, "pg", None) or getattr(getattr(cfg, "storage", None), "pg", None)
+            if pg is None:
+                raise RuntimeError("no storage.pg block in the resolved profile config")
+            password = (os.environ.get("V3CORE_PG_PASSWORD")
+                        or os.environ.get("PGPASSWORD") or "")
+
+            def _connect():
+                return psycopg2.connect(
+                    host=pg.host, port=int(pg.port), dbname=pg.database,
+                    user=pg.user, password=password, connect_timeout=10,
+                )
+
+            importers.install_pool(PgPool(connect=_connect, max_connections=4))
+        except Exception as exc:  # noqa: BLE001
+            print(json.dumps({
+                "command": "import", "status": "error",
+                "detail": f"could not construct a database pool for the import: "
+                          f"{type(exc).__name__}: {exc}. Check the profile config and "
+                          f"V3CORE_PG_PASSWORD, or run with --dry-run.",
+            }, ensure_ascii=False))
+            return 1
     try:
         stats = importers.import_source(
             source=args.source,
