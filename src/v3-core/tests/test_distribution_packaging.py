@@ -200,6 +200,12 @@ def test_bootstrap_accepts_explicit_target_without_network(monkeypatch):
 
         def execute(self, sql, params=None):
             self.sql = sql
+            # Fresh bootstrap runs TWO statements: the expanded alpha payload,
+            # then the v0.2 upgrade payload (schema_versions + column guards).
+            # Keep every statement so the marker/expansion assertions can target
+            # the one they actually mean instead of "whatever ran last".
+            self.statements = getattr(self, "statements", [])
+            self.statements.append(sql)
 
     cursor = FakeCursor()
 
@@ -235,8 +241,14 @@ def test_bootstrap_accepts_explicit_target_without_network(monkeypatch):
     assert payload["target"]["password"] == "***"
     assert payload["result"]["applied"] is True
     assert connection.committed is True
-    assert "ALPHA_BOOTSTRAP_INCLUDE" not in cursor.sql
-    assert "explicit_memories" in cursor.sql
+    alpha_payload = cursor.statements[0]
+    assert "ALPHA_BOOTSTRAP_INCLUDE" not in alpha_payload
+    assert "explicit_memories" in alpha_payload
+    # the fresh install must also reach the current schema level
+    assert len(cursor.statements) == 2, (
+        "fresh bootstrap applies the alpha payload AND the v0.2 upgrade payload"
+    )
+    assert "schema_versions" in cursor.statements[1]
     assert "pw" not in out
 
 

@@ -817,6 +817,30 @@ def _bootstrap_apply_sql(parsed: dict[str, Any]) -> dict[str, Any]:
                 cur.execute(sql_text)
             conn.commit()
             report["applied"] = True
+            # v0.2 closing round: a FRESH install must end up at the current
+            # schema level, not just at the alpha baseline. `upgrade_v0_2.sql`
+            # creates `public.schema_versions` (the migration ledger the doctor
+            # keys off) plus the idempotent ADD COLUMN IF NOT EXISTS guards, and
+            # it carries its own BEGIN/COMMIT, so it cannot be spliced through
+            # the include marker — it is applied as a second, separate step.
+            # Without this, every brand-new install failed `doctor --full`
+            # (`schema_version: fail`, "v0.2 upgrade targets missing").
+            try:
+                upgrade_text = _package_sql("upgrade_v0_2.sql")
+            except FileNotFoundError as e:
+                upgrade_text = ""
+                report["upgrade_applied"] = False
+                report["upgrade_error"] = _safe_repr(e)
+            if upgrade_text:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(upgrade_text)
+                    conn.commit()
+                    report["upgrade_applied"] = True
+                except Exception as e:  # noqa: BLE001
+                    conn.rollback()
+                    report["upgrade_applied"] = False
+                    report["upgrade_error"] = _safe_repr(e)
         finally:
             try:
                 conn.close()

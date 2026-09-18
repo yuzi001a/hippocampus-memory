@@ -60,3 +60,29 @@ def test_river_size_guard_is_single_sourced_and_not_silent():
     guard = src.split("len(content) > RIVER_MAX_MESSAGE_CHARS", 1)[1]
     branch = guard.split("continue", 1)[0]
     assert "logger.warning" in branch, "oversized-message drop must not be silent"
+
+
+def test_fresh_bootstrap_reaches_the_current_schema_level():
+    """A brand-new install must not fail its own doctor.
+
+    `upgrade_v0_2.sql` creates `public.schema_versions` (the ledger
+    `doctor --full` keys off) and carries its own BEGIN/COMMIT, so it cannot ride
+    the ALPHA_BOOTSTRAP_INCLUDE marker. If the fresh bootstrap path stops applying
+    it, every new user fails `doctor --full` with `schema_version: fail`.
+
+    Real evidence for the fixed behaviour: `hippocampus bootstrap` then
+    `doctor --full` against a brand-new database returns
+    `ok=12 fail=0 skip=3 warn=1` with `schema_version: ok (v0.2 row present)`.
+    """
+    from pathlib import Path
+
+    import v3core
+
+    src = Path(v3core.__file__).parent.joinpath("distribution_cli.py").read_text(
+        encoding="utf-8")
+    body = src.split("def _bootstrap_apply_sql", 1)[1].split("\ndef ", 1)[0]
+    assert '_package_sql("upgrade_v0_2.sql")' in body, (
+        "fresh bootstrap must apply upgrade_v0_2.sql, otherwise schema_versions "
+        "never exists and doctor --full fails on a clean install"
+    )
+    assert 'report["upgrade_applied"]' in body
