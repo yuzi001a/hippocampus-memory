@@ -1237,7 +1237,6 @@ def smoke_write_recall(
     # Resolve the live profile config through the engine's loader.
     try:
         from v3core.config import resolve_config, _find_config
-        from v3core.config_model import from_legacy_dict
     except Exception as e:
         result["error"] = f"v3core.config import failed: {e}"
         _print(f"FAIL: {result['error']}", out)
@@ -1265,14 +1264,13 @@ def smoke_write_recall(
         return result
 
     try:
-        import yaml  # type: ignore
-        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        # Reuse the canonical loader so profile-scoped .env and ${env:...}
+        # references are resolved exactly as normal runtime code resolves them.
+        cfg = resolve_config()
     except Exception as e:
-        result["error"] = f"config parse failed: {e}"
+        result["error"] = f"config resolve failed: {e}"
         _print(f"FAIL: {result['error']}", out)
         return result
-
-    cfg = from_legacy_dict(raw)
     if cfg.pg is None or not cfg.pg.host:
         result["error"] = "config has no storage.pg block; smoke aborted"
         _print(f"FAIL: {result['error']}", out)
