@@ -174,6 +174,15 @@ def test_cli_health_json():
     assert isinstance(payload["checks"], list)
     assert payload["checks"], "health report must contain at least one check"
 
+    # Regression (production canary 2026-09-19): the CLI must actually
+    # connect to the configured PG target. The earlier build_service bug
+    # (missing pg_connect wiring + password pre-redaction) surfaced as
+    # storage reachable=false with error "no_connection".
+    storage = payload.get("storage", {})
+    assert storage.get("reachable") is True, (
+        f"CLI health could not reach the configured PG target: {storage!r}"
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────
 # 2) diagnose --json

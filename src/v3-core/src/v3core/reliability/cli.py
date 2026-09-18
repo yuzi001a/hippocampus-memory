@@ -77,13 +77,39 @@ def _resolve_base_path(profile_dir: str | None) -> Path:
 
 
 def _resolve_pg_dict(profile_dir: str | None) -> dict[str, Any]:
-    """Build the ``pg`` dict for ``HealthService`` from the resolved config.
+    """Build the internal ``pg`` dict for ``HealthService`` from the resolved config.
 
-    Reads ``v3core.config.resolve_config()`` (legacy dict shape) and
-    pulls the ``pg`` block. Returns an empty dict when the resolver
-    raises — the service treats that as "no connection configured"
-    (the storage/memory_write sections will skip cleanly).
+    Preferred source: the typed config object's ``pg`` block (``PGConfig``
+    with host/port/database/user/password). Fallback: the legacy dict
+    shape, where the block lives at ``storage.pg`` (NOT top-level ``pg`` —
+    a wrong assumption here previously produced an empty dict and the
+    misleading "no_connection" storage failure; found by the production
+    canary).
+
+    Password handling: the *real* value is kept here because the dict is
+    only ever handed to the connection factory. Output safety is provided
+    downstream (the report never embeds the pg dict; ``sanitize_text``
+    scrubs any error string that might echo credentials). Redacting at
+    this layer — the previous behaviour — broke the connection and is a
+    contract bug (found by the production canary).
     """
+    # 1) Typed config object — PGConfig.
+    try:
+        from v3core import config as _cfg
+        cfg_obj = _cfg.resolve_config()
+        pg_obj = getattr(cfg_obj, "pg", None)
+        out: dict[str, Any] = {}
+        if pg_obj is not None:
+            for key in ("host", "port", "database", "user", "password"):
+                val = getattr(pg_obj, key, None)
+                if val is not None:
+                    out[key] = val
+        if out.get("host") and out.get("database"):
+            return out
+    except Exception:
+        pass
+
+    # 2) Legacy dict fallback — pg lives under storage.pg (or pg).
     try:
         from v3core import config as _cfg
         try:
@@ -100,21 +126,30 @@ def _resolve_pg_dict(profile_dir: str | None) -> dict[str, Any]:
             cfg = cfg.to_legacy_dict()  # type: ignore[union-attr]
         except Exception:
             cfg = {}
+    if not isinstance(cfg, dict):
+        return {}
 
-    pg = cfg.get("pg", {}) if isinstance(cfg, dict) else {}
+    pg = cfg.get("pg")
     if not isinstance(pg, dict):
-        pg = {}
+        storage = cfg.get("storage")
+        pg = storage.get("pg") if isinstance(storage, dict) else None
+    if not isinstance(pg, dict):
+        return {}
+    return {k: v for k, v in pg.items() if v is not None}
 
-    # Hard-redact any password leaking into the dict: we keep the key
-    # but the *value* is replaced with a constant sentinel so that
-    # even an accidental ``pg["password"]`` echo shows up as ``<redacted>``.
-    out: dict[str, Any] = {}
-    for k, v in pg.items():
-        if k in ("password", "passwd", "pwd"):
-            out[k] = "<redacted>"
-        else:
-            out[k] = v
-    return out
+
+def _load_pg_connect() -> Any:
+    """Resolve ``psycopg2.connect`` lazily.
+
+    Returns ``None`` when psycopg2 is unavailable; ``HealthService`` then
+    reports ST01 as failed with ``pg_driver_unavailable`` rather than
+    pretending the database is reachable.
+    """
+    try:
+        import psycopg2  # noqa: WPS433 - intentional lazy import
+        return psycopg2.connect
+    except Exception:
+        return None
 
 
 def _build_service(args: argparse.Namespace) -> Any:
@@ -135,6 +170,7 @@ def _build_service(args: argparse.Namespace) -> Any:
         profile_dir=base_path,
         base_path=base_path,
         pg=pg,
+        pg_connect=_load_pg_connect(),
         marker_dir=marker_dir,
         window_hours=int(getattr(args, "window_hours", 24) or 24),
         allow_production_read=bool(getattr(args, "allow_production_read", False)),

@@ -147,6 +147,49 @@ def _default_deep_auth_runner(cfg_view: dict[str, Any], *, timeout: float) -> di
 # ── HealthService ──
 
 
+class _RollbackSafeCursor:
+    """Cursor proxy that rolls back the connection when execute() raises.
+
+    Without this, the first failing query (e.g. a wrong column name on an
+    older schema) leaves psycopg2's transaction in the aborted state and
+    every later query on the same connection fails with
+    InFailedSqlTransaction — silently degrading whole sections (the
+    dead-fallback family; found by the production canary).
+    """
+
+    def __init__(self, cursor: Any, conn: Any):
+        self._cursor = cursor
+        self._conn = conn
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._cursor.execute(*args, **kwargs)
+        except Exception:
+            rollback = getattr(self._conn, "rollback", None)
+            if callable(rollback):
+                try:
+                    rollback()
+                except Exception:
+                    pass
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+
+class _RollbackSafeConn:
+    """Connection proxy whose cursors roll back on failed execute()."""
+
+    def __init__(self, conn: Any):
+        self._conn = conn
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        return _RollbackSafeCursor(self._conn.cursor(*args, **kwargs), self._conn)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
 class HealthService:
     """Read-only collector. Inject ``pg_connect`` to keep tests offline."""
 
@@ -198,9 +241,13 @@ class HealthService:
 
         conn = None
         conn_err: str | None = None
-        if self.pg_connect is not None and self.pg:
+        if self.pg:
             if not allow_pg:
                 conn = None
+            elif self.pg_connect is None:
+                # Configured target but no connection factory injected.
+                conn = None
+                conn_err = "pg_driver_unavailable"
             else:
                 try:
                     kwargs = dict(self.pg)
@@ -209,6 +256,10 @@ class HealthService:
                 except Exception as exc:
                     conn = None
                     conn_err = sanitize_text(str(exc))
+                if conn is not None:
+                    # One failing query must never poison later queries on
+                    # the same connection (aborted-transaction cascade).
+                    conn = _RollbackSafeConn(conn)
 
         try:
             checks: list[CheckResult] = []
@@ -282,7 +333,7 @@ class HealthService:
         kind = _classify_module_file(self.module_file)
         if kind == "editable":
             rt01_status = STATUS_FAIL
-            rt01_summary = "v3core imported from editable install (path contains 'v3-memory-plugin')"
+            rt01_summary = "v3core imported from a developer tree / editable install (not site-packages)"
         elif kind == "unknown":
             rt01_status = STATUS_WARN
             rt01_summary = "v3core import path not recognized as site-packages or editable"
@@ -1081,12 +1132,30 @@ class HealthService:
             cfg = self.config_loader() or {}
         except Exception as exc:
             cfg = {"_load_error": sanitize_text(str(exc))}
-        embed_cfg = cfg.get("embed", {}) if isinstance(cfg, dict) else {}
-        rerank_cfg = cfg.get("rerank", {}) if isinstance(cfg, dict) else {}
-        llm_cfg = cfg.get("llm", {}) if isinstance(cfg, dict) else {}
-        embed_ok = bool(embed_cfg.get("endpoint") or embed_cfg.get("api_key") or embed_cfg.get("model"))
-        rerank_ok = bool(rerank_cfg.get("endpoint") or rerank_cfg.get("api_key") or rerank_cfg.get("model"))
-        llm_ok = bool(llm_cfg.get("endpoint") or llm_cfg.get("api_key") or llm_cfg.get("model"))
+        # The legacy config dict nests provider blocks under storage.*;
+        # accept both that and a flat shape (canary finding: a flat-only
+        # read reported "embedding provider not configured" on production).
+        storage = cfg.get("storage") if isinstance(cfg, dict) else None
+        storage = storage if isinstance(storage, dict) else {}
+        embed_cfg = storage.get("embed") or cfg.get("embed") or {}
+        rerank_cfg = storage.get("rerank") or cfg.get("rerank") or {}
+        llm_cfg = cfg.get("llm") or {}
+        embed_cfg = embed_cfg if isinstance(embed_cfg, dict) else {}
+        rerank_cfg = rerank_cfg if isinstance(rerank_cfg, dict) else {}
+        llm_cfg = llm_cfg if isinstance(llm_cfg, dict) else {}
+
+        def _configured(block: dict) -> bool:
+            # apiKey / api_key are both in the wild.
+            return bool(
+                block.get("endpoint")
+                or block.get("api_key")
+                or block.get("apiKey")
+                or block.get("model")
+            )
+
+        embed_ok = _configured(embed_cfg)
+        rerank_ok = _configured(rerank_cfg)
+        llm_ok = _configured(llm_cfg)
 
         if not embed_ok:
             pr01_status = STATUS_FAIL
@@ -1537,13 +1606,16 @@ def _longqa_child_stats(conn: Any) -> tuple[int, int, int, int, int, int]:
         out[2] = int((row or (0,))[0] or 0)
 
     # Bad offsets: negative or non-monotonic per qa_id. Cheap approximation:
-    # any row with start_offset < 0 OR end_offset <= start_offset.
+    # any row with source_start < 0 OR source_end <= source_start.
+    # (Column names per the authoritative schema/qa_embedding_chunks.sql —
+    # the previous start_offset/end_offset names poisoned the connection
+    # transaction and cascaded into every later check; canary finding.)
     try:
         cur = conn.cursor()
         try:
             cur.execute(
                 "SELECT COUNT(*) FROM public.qa_embedding_chunks "
-                "WHERE start_offset < 0 OR end_offset <= start_offset"
+                "WHERE source_start < 0 OR source_end <= source_start"
             )
             row = cur.fetchone()
         finally:
@@ -1717,16 +1789,24 @@ def _default_module_file() -> str:
 
 
 def _classify_module_file(path: str) -> str:
-    """Classify the v3core __file__ path per DESIGN §4 RT01."""
+    """Classify the v3core __file__ path per DESIGN §4 RT01.
+
+    Buckets: ``site_packages`` (installed artifact), ``editable``
+    (developer tree or editable install — anything resolving to a v3core
+    package outside site-packages: the private workspace, the public
+    repo's ``src/`` layout, etc.), ``unknown``.
+    """
     if not path:
         return "unknown"
     p = path.replace("\\", "/")
-    # editable installs land under v3-memory-plugin/src/v3core or similar;
-    # detect either substring.
-    if "v3-memory-plugin" in p:
-        return "editable"
     if "site-packages" in p:
         return "site_packages"
+    if (
+        "v3-memory-plugin" in p
+        or "src/v3-core/src" in p
+        or "/src/v3core/" in p
+    ):
+        return "editable"
     return "unknown"
 
 

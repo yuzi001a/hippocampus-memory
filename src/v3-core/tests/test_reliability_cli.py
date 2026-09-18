@@ -609,3 +609,109 @@ def test_handle_diagnose_json_top_level_has_required_keys(monkeypatch):
     assert "issues" in payload
     assert "overall" in payload
     assert "checks_total" in payload
+
+# ── regression: production canary 2026-09-19 ──────────────────────────
+# The CLI previously failed to wire a connection factory and pre-redacted
+# the password into a sentinel, so health reported "no_connection" against
+# a perfectly reachable database. Lock the wiring in offline.
+
+
+def test_build_service_wires_pg_connect_and_keeps_real_password(monkeypatch):
+    import argparse
+
+    from v3core.reliability import cli as cli_mod
+
+    planted = {
+        "host": "localhost",
+        "port": 5433,
+        "database": "v3embeddings",
+        "user": "v3user",
+        "password": "sentinel-pw-not-a-secret",
+    }
+    monkeypatch.setattr(cli_mod, "_resolve_pg_dict", lambda pd: dict(planted))
+
+    args = argparse.Namespace(
+        profile_dir=None,
+        window_hours=24,
+        allow_production_read=False,
+        deep=False,
+        debug_paths=False,
+    )
+    svc = cli_mod._build_service(args)
+
+    # 1) The real password survives to the service (it is only ever
+    #    handed to the connection factory; output safety is downstream).
+    assert svc.pg.get("password") == "sentinel-pw-not-a-secret"
+
+    # 2) A connection factory is wired whenever psycopg2 is importable.
+    try:
+        import psycopg2  # noqa: F401
+
+        assert svc.pg_connect is not None, (
+            "pg_connect not wired — health would report no_connection"
+        )
+    except ImportError:
+        assert svc.pg_connect is None  # graceful without the driver
+
+
+def test_resolve_pg_dict_prefers_typed_config(monkeypatch):
+    """The typed config object's pg block wins when available."""
+    from v3core.reliability import cli as cli_mod
+    import v3core.config as cfgmod
+
+    class _PG:
+        host = "h1"
+        port = 1111
+        database = "d1"
+        user = "u1"
+        password = "p1"
+
+    class _Cfg:
+        pg = _PG()
+
+    monkeypatch.setattr(cfgmod, "resolve_config", lambda *a, **k: _Cfg())
+    out = cli_mod._resolve_pg_dict(None)
+    assert out == {"host": "h1", "port": 1111, "database": "d1",
+                   "user": "u1", "password": "p1"}
+
+
+def test_resolve_pg_dict_reads_storage_pg_from_legacy_shape(monkeypatch):
+    """Regression: the legacy dict keeps pg under ``storage.pg``; a
+    top-level ``pg`` assumption produced an empty dict and the misleading
+    "no_connection" failure (canary bug #2)."""
+    from v3core.reliability import cli as cli_mod
+    import v3core.config as cfgmod
+
+    class _CfgNoPG:
+        pg = None
+
+    def _fake_resolve(*a, **k):
+        if k.get("return_legacy"):
+            return {"storage": {"pg": {"host": "h2", "port": 2222,
+                                       "database": "d2", "user": "u2",
+                                       "password": "p2"}}}
+        return _CfgNoPG()
+
+    monkeypatch.setattr(cfgmod, "resolve_config", _fake_resolve)
+    out = cli_mod._resolve_pg_dict(None)
+    assert out == {"host": "h2", "port": 2222, "database": "d2",
+                   "user": "u2", "password": "p2"}
+
+
+def test_resolve_pg_dict_top_level_pg_still_supported(monkeypatch):
+    """An explicit top-level ``pg`` key keeps working (older shapes)."""
+    from v3core.reliability import cli as cli_mod
+    import v3core.config as cfgmod
+
+    class _CfgNoPG:
+        pg = None
+
+    def _fake_resolve(*a, **k):
+        if k.get("return_legacy"):
+            return {"pg": {"host": "h3", "port": 3333, "database": "d3",
+                           "user": "u3", "password": "p3"}}
+        return _CfgNoPG()
+
+    monkeypatch.setattr(cfgmod, "resolve_config", _fake_resolve)
+    out = cli_mod._resolve_pg_dict(None)
+    assert out["host"] == "h3" and out["port"] == 3333

@@ -338,6 +338,10 @@ def test_world_a_production_state_overall_not_unhealthy(full_pg: FakePg):
         now=1_700_000_000.0,
         window_hours=24,
         config_loader=_stub_config_loader,
+        # World A simulates production: v3core resolves from site-packages.
+        # (Without this the test process's own dev-tree path would classify
+        # as "editable" and add an RT01 fail unrelated to the debt contract.)
+        module_file="C:/python/Lib/site-packages/v3core/__init__.py",
     )
     report = svc.collect()
     by_id = {c.check_id: c for c in report.checks}
