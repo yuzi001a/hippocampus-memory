@@ -699,30 +699,44 @@ def _probe_pgvector(run, docker, container_name, *,
         "CREATE EXTENSION IF NOT EXISTS vector; "
         "SELECT extversion FROM pg_extension WHERE extname='vector';"
     )
-    rc, out_v, err_v = run([
-        docker, "exec",
-        "-e", f"PGPASSWORD={password}",
-        "-e", "V3CORE_PG_PASSWORD",
-        container_name,
-        "psql", "-U", user, "-d", database, "-tA", "-c", sql,
-    ])
-    if rc != 0:
+    last_err = ""
+    last_out = ""
+    for attempt in range(30):
+        rc, out_v, err_v = run([
+            docker, "exec",
+            "-e", f"PGPASSWORD={password}",
+            "-e", "V3CORE_PG_PASSWORD",
+            container_name,
+            "psql", "-U", user, "-d", database, "-tA", "-c", sql,
+        ])
+        if rc == 0:
+            version = (out_v or "").strip()
+            if version:
+                _print(f"PASS: pgvector {version} verified inside {container_name}", out)
+                return version
+            last_err, last_out = err_v or "", out_v or ""
+            break
+        last_err, last_out = err_v or "", out_v or ""
+        transient = ("no such file" in last_err.lower()
+                     or "connection refused" in last_err.lower()
+                     or "starting up" in last_err.lower()
+                     or "system is starting" in last_err.lower())
+        if not transient:
+            break
+        time.sleep(0.5)
+    if last_err or last_out:
         _print(
             f"FAIL: pgvector probe inside {container_name} failed: "
-            f"{_safe_stderr(err_v, out_v)}",
+            f"{_safe_stderr(last_err, last_out)}",
             out,
         )
         return None
-    version = (out_v or "").strip()
-    if not version:
-        _print(
-            f"FAIL: pgvector probe returned no version row; "
-            f"stderr={_safe_stderr(err_v, out_v)}",
-            out,
-        )
-        return None
-    _print(f"PASS: pgvector {version} verified inside {container_name}", out)
-    return version
+    _print(
+        f"FAIL: pgvector probe returned no version row; "
+        f"stderr={_safe_stderr(last_err, last_out)}",
+        out,
+    )
+    return None
 
 
 def _safe_stderr(stderr: str, stdout: str) -> str:
