@@ -274,7 +274,12 @@ def test_packaged_sql_byte_identical_to_repo_schema():
     to the repo-root src/v3-core/schema/* sources.
     """
     from v3core.distribution_cli import _package_sql
-    for name in ("alpha_bootstrap.sql", "explicit_memories.sql"):
+    for name in (
+        "alpha_bootstrap.sql",
+        "explicit_memories.sql",
+        "qa_embedding_chunks.sql",
+        "upgrade_v0_2.sql",
+    ):
         packaged = _package_sql(name)
         repo_copy = (V3CORE_ROOT / "schema" / name).read_text(encoding="utf-8")
         assert packaged == repo_copy, (

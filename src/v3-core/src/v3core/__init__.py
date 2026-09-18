@@ -90,6 +90,21 @@ def _resolve_base_path_for_lock(core: "V3Core") -> str:
 
 logger = logging.getLogger("v3core")
 
+# Upper bound for a single message entering the message river (conversation_stream).
+# v0.2 closing round (2026-09-18): this guard used to drop oversized messages
+# SILENTLY. Two consequences were proven on a disposable DB with the real
+# provider:
+#   1. the raw experience of that message is lost (it never reaches
+#      conversation_stream), and
+#   2. the pending QA keeps an empty `a`, so the flush writes a POISONED row —
+#      question stored, answer empty, and an embedding computed from the
+#      question alone.
+# Production currently carries 452 such answer-empty rows and no
+# conversation_stream row above 23234 chars, i.e. the cliff is real.
+# This round only makes every trip VISIBLE; raising or removing the bound is a
+# product-data decision and is deliberately left to the release owner.
+RIVER_MAX_MESSAGE_CHARS = 24000
+
 
 # -- 日志脱敏 (v3-hermes-plugin 依赖 _safe_err) --
 _PWD_SIG = re.compile(r'(password|passwd|pwd)\s*[=:]\s*\S+', re.IGNORECASE)
@@ -3321,8 +3336,15 @@ class V3Core:
             if content.startswith(_injection_prefixes_fallback):
                 processed_this_call.add(key)
                 continue
-            # 超长消息跳过（>24K chars不进消息河）
-            if len(content) > 24000:
+            # 超长消息跳过（>24K chars不进消息河）— 见 RIVER_MAX_MESSAGE_CHARS。
+            # v0.2 closing round: 这条分支过去是静默的, 现在每次都留下日志。
+            if len(content) > RIVER_MAX_MESSAGE_CHARS:
+                logger.warning(
+                    "sync_turn 丢弃超长消息 (role=%s chars=%d > %d key=%s): "
+                    "该消息不进入消息河, 其内容也不会进入 QA 配对 — "
+                    "若它是 assistant 回答, pending 的 a 将保持为空并写出空答案 QA 行",
+                    role, len(content), RIVER_MAX_MESSAGE_CHARS, key,
+                )
                 processed_this_call.add(key)
                 continue
             # LiveBuffer identity must follow the canonical stable key,
@@ -3633,24 +3655,90 @@ class V3Core:
             parsed_q_ts = datetime.now(timezone.utc)
         timestamp = parsed_q_ts
 
-        # 1. 算 embedding (use q + \"\n\" + a)
+        # 1. 算 embedding — short path unchanged, long path via v3core.embed_chunks
+            # (v0.2 closing round, docs/QA-EMBEDDING-INDEX-DESIGN.md §2, §3).
+        #
+        # Short QA: exact representation (question + "\n" + answer) is byte-
+        # identical to the previous contract. Long QA: token-safe non-
+        # overlapping chunks are persisted in qa_embedding_chunks; the parent
+        # qa_pairs.embedding is the L2-normalized mean of successful child
+        # vectors (aggregate_parent_embedding). A long-QA failure leaves a
+        # retryable marker and never acknowledges fully durable.
         embed_cfg = safe_embed_cfg(self._config) if self._config else None
         emb = None
         embedding_failed = False
         embedding_error: BaseException | None = None
+        # chunks to persist alongside the parent qa_pairs row when the
+        # long path succeeds. Each tuple is (EmbedChunk, embedding_vector).
+        # Empty list on the short path or on long failure.
+        pending_long_chunks: list[tuple] = []
         if embed_cfg is not None:
             # fence before embedding
             if self._is_core_fenced():
                 return
             try:
-                text_for_emb = f"{q}\n{a}" if a else q
-                embeds = embed_batch([text_for_emb], embed_cfg)
-                if embeds and embeds[0] and any(x != 0.0 for x in embeds[0]):
-                    emb = embeds[0]
+                from .embed_chunks import (
+                    build_qa_embedding_representation,
+                    aggregate_parent_embedding,
+                    TokenizerUnavailableError,
+                )
+                short_text_for_emb = f"{q}\n{a}" if a else q
+                representation = build_qa_embedding_representation(
+                    q, a, embed_cfg,
+                    short_text_for_emb=short_text_for_emb,
+                )
+                if representation.is_long:
+                    # Long path: tokenizer-aware split, embed each chunk,
+                    # aggregate the parent. collision_safe_key=True ensures
+                    # distinct long chunks that share a 500-char prefix
+                    # don't collapse (one-chunk-one-vector contract).
+                    chunk_texts = [
+                        c.embed_text for c in representation.chunks
+                    ]
+                    child_vecs = embed_batch(
+                        chunk_texts, embed_cfg, collision_safe_key=True,
+                    )
+                    if len(child_vecs) != len(representation.chunks):
+                        # Defensive: provider returned a partial / mismatched
+                        # result. We refuse to fabricate a parent vector.
+                        raise RuntimeError(
+                            f"long-QA provider returned {len(child_vecs)} "
+                            f"vectors for {len(representation.chunks)} chunks "
+                            f"(model={embed_cfg.get('model')!r})"
+                        )
+                    emb = aggregate_parent_embedding(child_vecs)
+                    pending_long_chunks = list(
+                        zip(representation.chunks, child_vecs)
+                    )
                 else:
-                    embedding_failed = True
-                    embedding_error = RuntimeError("embedding API returned an empty vector")
+                    # Short path: byte-identical to the previous contract
+                    # (legacy t[:500] dedup key is fine because the text is
+                    # short and never collides).
+                    embeds = embed_batch([representation.embed_text], embed_cfg)
+                    if embeds and embeds[0] and any(x != 0.0 for x in embeds[0]):
+                        emb = embeds[0]
+                    else:
+                        embedding_failed = True
+                        embedding_error = RuntimeError(
+                            "embedding API returned an empty vector"
+                        )
+            except TokenizerUnavailableError as e:
+                # Fail-closed: the configured tokenizer cannot be loaded
+                # AND no override was supplied. We MUST NOT send an unsafe
+                # over-limit request. Leave the marker for retry; do not
+                # acknowledge fully durable.
+                logger.warning(
+                    "_flush_pending_qa long-QA tokenizer unavailable: %s",
+                    _safe_err(e),
+                )
+                embedding_failed = True
+                embedding_error = e
+                emb = None
+                pending_long_chunks = []
             except ValueError:
+                # Aggregation / dimension failure (or embed_batch fail-
+                # closed ValueError). Re-raise so the contract holds:
+                # embedding / vector consistency cannot be silently skipped.
                 raise
             except Exception as e:
                 logger.warning("_flush_pending_qa embedding 失败: %s", _safe_err(e))
@@ -3698,6 +3786,41 @@ class V3Core:
                             except Exception as _e_fp:
                                 logger.warning("_flush_pending_qa 解析 fingerprint 失败: %s", _safe_err(_e_fp))
                                 raise
+                    def _persist_long_chunks(parent_id: int) -> None:
+                        """Persist derived spans only after every child vector succeeded."""
+                        if not pending_long_chunks:
+                            return
+                        cur.execute("DELETE FROM qa_embedding_chunks WHERE qa_id=%s", (parent_id,))
+                        for chunk, child_vec in pending_long_chunks:
+                            child_str = "[" + ",".join(str(x) for x in child_vec) + "]"
+                            cur.execute(
+                                """
+                                INSERT INTO qa_embedding_chunks
+                                    (qa_id, chunk_index, source_field, source_start,
+                                     source_end, source_sha256, token_count,
+                                     representation_version, embedding, embed_model,
+                                     content, created_at)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                                        %s::vector, %s, %s, NOW())
+                                ON CONFLICT (qa_id, chunk_index) DO UPDATE SET
+                                    source_field=EXCLUDED.source_field,
+                                    source_start=EXCLUDED.source_start,
+                                    source_end=EXCLUDED.source_end,
+                                    source_sha256=EXCLUDED.source_sha256,
+                                    token_count=EXCLUDED.token_count,
+                                    representation_version=EXCLUDED.representation_version,
+                                    embedding=EXCLUDED.embedding,
+                                    embed_model=EXCLUDED.embed_model,
+                                    content=EXCLUDED.content
+                                """,
+                                (
+                                    parent_id, chunk.chunk_index, chunk.source_field,
+                                    chunk.source_start, chunk.source_end, chunk.source_sha256,
+                                    chunk.token_count, chunk.representation_version,
+                                    child_str, fp, chunk.text,
+                                ),
+                            )
+
                     cur.execute(
                         "SELECT id, (embedding IS NOT NULL) FROM qa_pairs "
                         "WHERE source_id=%s LIMIT 1",
@@ -3722,6 +3845,11 @@ class V3Core:
                         existing_requires_repair = not has_embedding and embed_cfg is not None
                         existing_already_durable = has_embedding or embed_cfg is None
                         if existing_already_durable:
+                            # A legacy long QA may have a parent vector but no sidecar yet.
+                            # Complete the derived index without touching the source row.
+                            if has_embedding and pending_long_chunks and existing_id is not None:
+                                _persist_long_chunks(int(existing_id))
+                                conn.commit()
                             should_ack = existing_already_durable
                             return
                         if existing_requires_repair and emb_str is None:
@@ -3740,6 +3868,7 @@ class V3Core:
                             conn.rollback()
                             should_ack = False
                             return
+                        _persist_long_chunks(existing_id)
                         conn.commit()
                         repair_committed = True
                         should_ack = repair_committed
@@ -3779,6 +3908,12 @@ class V3Core:
                                 timestamp, "live_sync",
                             ),
                         )
+                    if pending_long_chunks:
+                        cur.execute("SELECT id FROM qa_pairs WHERE source_id=%s LIMIT 1", (source_id,))
+                        parent_row = cur.fetchone()
+                        if not parent_row:
+                            raise RuntimeError("qa_pairs parent row missing after INSERT")
+                        _persist_long_chunks(int(parent_row[0]))
                     conn.commit()
                     new_insert_committed = True
                     # A configured embedding is a durability requirement.  A

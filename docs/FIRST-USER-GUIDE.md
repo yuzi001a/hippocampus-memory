@@ -35,7 +35,7 @@ virtualenv, no manual PostgreSQL setup.
 | Python 3.10–3.12, or `uv` | the engine and the CLI are Python | the installer tells you the exact command to install `uv` |
 | Docker Desktop (running) | hosts the PostgreSQL + pgvector database | the installer stops with a clear message; install Docker Desktop and re-run |
 | An embedding/rerank API key (SiliconFlow) | recall needs vectors | the installer marks the embedding step SKIPPED and tells you the re-run command |
-| A memory-LLM API key (MiniMax or any OpenAI-compatible endpoint) | observer / E1 / topic synthesis | same: SKIPPED with a re-run command |
+| A memory-LLM API key (the selected preset/provider) | observer / E1 / topic synthesis | same: SKIPPED with a re-run command |
 | ~5 GB free disk | image + database + venv + your history | — |
 
 ---
@@ -55,31 +55,33 @@ Everything else lives in `v3core/first_run.py`, so it is testable and identical 
 
 ## 3. First 10 minutes
 
-The installer runs these steps in order and prints one line per step:
+The installer runs these steps in order and prints the verdict topics shown below. The end-to-end write/recall smoke is a
+separate sub-step; it is not an eighth verdict topic.
 
 | # | Step | What it does | What "done" looks like |
 |---|---|---|---|
-| 1 | environment | Python / uv / Docker / existing install | `PASS` with versions |
+| 1 | install | Python / uv / Docker / existing install | `PASS` with versions |
 | 2 | database | starts or reuses a `pgvector/pgvector:pg17` container on a local port (default `55432`), verifies `CREATE EXTENSION vector` | `PASS pgvector 0.8.x` or the version your image ships |
 | 3 | config | writes the profile config with an absolute `basePath`, the database block, and the provider blocks | `PASS` + the config path |
-| 4 | bootstrap | applies the packaged SQL (7 tables) — idempotent | `PASS`, and a second run changes nothing |
+| 4 | bootstrap | applies the packaged SQL (canonical tables plus the recall-index sidecar) — idempotent | `PASS`, and a second run changes nothing |
 | 5 | Hermes wiring | installs the provider into the Hermes environment and sets `memory.provider: deep_memory_v3`, with a backup of the old config | `PASS` + backup path |
 | 6 | doctor | read-only checks + real probes | `PASS` (see §7 for the full check list) |
-| 7 | write + recall | writes one real memory, reads it back, recalls it | `PASS recall_hit=true` |
-| 8 | verdict | the block below | — |
+| 7 | end-to-end smoke | writes one real memory, reads it back, and recalls it | `PASS recall_hit=true` (keyword fallback is allowed in this install smoke) |
 
+The install verdict block has seven topics:
 ```
 install              : PASS
 database             : PASS  (127.0.0.1:55432, pgvector 0.8.0)
 embedding            : PASS  (BAAI/bge-m3, dim 1024)
 rerank               : PASS  (BAAI/bge-reranker-v2-m3)
-memory LLM           : PASS  (MiniMax-M3)
+memory LLM           : PASS  (the configured preset/model)
 hermes provider      : PASS  (deep_memory_v3 discovered)
-restart persistence  : run `hippocampus doctor --full` again after restarting your agent
+restart persistence  : advisory — restart the agent yourself, then run the independent restart-recall canary
 ```
 
-Then start your agent normally. Restart it once, and run `hippocampus doctor --full` again — the
-`restart_persistence_hint` and `read` checks confirm the memory survived the restart.
+Then start your agent normally and restart it once. `hippocampus doctor --full` can perform a read-back
+hint, but it does **not** restart the agent and does not prove cross-process recall. The independent
+release Gate 1 canary is the evidence that proves source → derived index → recall after a fresh process.
 
 ### Presets
 
@@ -94,20 +96,29 @@ The `siliconflow` preset pre-fills:
 |---|---|---|---|
 | embedding | `https://api.siliconflow.cn/v1/embeddings` | `BAAI/bge-m3` | 1024 |
 | rerank | `https://api.siliconflow.cn/v1/rerank` | `BAAI/bge-reranker-v2-m3` | — |
-| memory LLM | `https://api.minimaxi.com/v1` | `MiniMax-M3` | — |
+| memory LLM | `https://api.siliconflow.cn/v1` | `Qwen/Qwen2.5-7B-Instruct` | — |
 
-Both SiliconFlow models are on the **free tier** today (see §5).
+The preset uses one SiliconFlow key for embedding, rerank, and the memory LLM. To use MiniMax or another
+provider, choose `custom` and supply that provider's endpoint, model, and key explicitly.
+
+Provider pricing is not hard-coded by the installer; verify the selected provider's current pricing before budgeting. The
+reference cost table in §5 uses the measured custom MiniMax-M3 run documented in `docs/COST.md`, not the
+SiliconFlow Qwen preset automatically selected above.
 
 ### Keys
 
-Keys are never echoed and never written to the repository:
+The installer never echoes a key or commits it to the repository. It writes the values to the active
+profile's `.env` so later Hermes processes can load them; `config.yaml` contains only `${env:...}`
+pointers (and an empty database password field). On Windows the installer applies a best-effort user-only
+ACL to `.env`; treat the profile directory as sensitive, include `.env` in your private backup policy,
+and never upload or share it.
 
 ```powershell
-$env:V3CORE_PG_PASSWORD = "choose-a-local-password"   # database password (local only)
 hippocampus install --embed-key "sk-..." --llm-key "sk-..."
+# The installer writes the profile .env; do not paste the secret into config.yaml.
 ```
 
-or put them in the profile `.env` after install (see §8 for the path).
+If you rotate a key, edit the profile `.env` and rerun `hippocampus doctor --full`.
 
 ---
 
@@ -169,23 +180,21 @@ continues from it.
 
 ## 5. Cost
 
-Measured against real usage, not a guess. The figures below are **memory formation + recall only**
-(observer, E1, topic synthesis, embeddings, rerank). Your agent's own conversation cost is separate
-and usually much larger — Hippocampus does not pay for it and does not add to it per turn beyond
-the numbers below.
+Measured against real usage, not a guess. The figures below are **reference numbers for the custom MiniMax-M3
+memory-LLM configuration used in the cited measurement**, plus the stated embedding/rerank assumptions. They are
+not a price promise for the SiliconFlow Qwen preset above; check the selected provider's current pricing.
 
-| Tier | Turns/day | Memory LLM | Embedding | Rerank | **Total / month** |
+| Tier | Turns/day | Memory LLM (reference) | Embedding | Rerank | **Total / month (reference)** |
 |---|---:|---:|---:|---:|---:|
 | Light | 20 | ¥15 | ¥0 (free tier) | ¥0 (free tier) | **≈ ¥15** |
 | Regular | 100 | ¥76 | ¥0 | ¥0 | **≈ ¥76** |
 | Heavy | 300 | ¥229 | ¥0 | ¥0 | **≈ ¥229** |
 
-Prices used: MiniMax-M3 ≤512k input ¥2.10/M in, ¥8.40/M out; SiliconFlow `BAAI/bge-m3` and
-`BAAI/bge-reranker-v2-m3` free tier, ¥0.07/M on the Pro mirrors. Sources and the full calculation
-(with every constant and its basis) are in [`docs/COST.md`](COST.md).
+The price constants below are historical measurement inputs, not a current-provider guarantee. Verify the provider
+pricing pages linked in [`docs/COST.md`](COST.md) before using them for a budget.
 
-Rules of thumb: if you want the same quality as the reference setup, budget **¥15–¥80/month** for a
-personal assistant's memory — the embeddings and rerank you need are the free ones.
+For the reference workload, the measured memory-only budget was **about ¥15–¥80/month**. Actual cost depends on
+selected providers, model, pricing date, and traffic; verify before deployment.
 
 ---
 
@@ -200,7 +209,7 @@ personal assistant's memory — the embeddings and rerank you need are the free 
 | doctor: `embedding_auth: fail auth_failed (HTTP 401)` | the key is wrong or was rotated | put the new key in the profile `.env` and re-run `hippocampus doctor --full` |
 | doctor: `embedding_auth: fail rate_limited (HTTP 429)` | too many requests right now | wait, then re-run; the engine retries |
 | `dimensions_consistency: fail` | config dim ≠ the vector column dim | re-create the database with the packaged schema, or align `storage.embed.dim` |
-| memory does not come back after a restart | the agent may be using its built-in memory | `hippocampus doctor --full`, check `hermes_provider_discovery` |
+| memory does not come back after a restart | the agent may be using its built-in memory | run the independent restart-recall canary; `doctor --full` only gives an advisory recipe and does not prove cross-process recall |
 | recall returns nothing at all | usually an empty corpus, not a bug | import something (§4), or write one memory and search again |
 
 Every one of these has a machine-readable form: `hippocampus doctor --full` prints JSON with
@@ -222,8 +231,9 @@ Every one of these has a machine-readable form: `hippocampus doctor --full` prin
   `5xx upstream_error/unavailable`) — a wrong key can never look like a healthy install.
 * The write check only runs when you pass `--writes`; without it, it reports `skip` rather than
   pretending.
-* `restart_persistence_hint` cannot restart your machine for you: it verifies that a row written
-  earlier is still readable and prints the exact restart command to run yourself.
+* `restart_persistence_hint` is advisory: it counts recent `qa_pairs` rows and prints a manual restart-persistence
+  recipe. It does not restart Hermes, write a probe row, or prove cross-process recall. The independent release
+  Gate 1 canary is the evidence for that capability; Gate 2 separately proves the CI-built distribution path.
 
 `hippocampus doctor --static` (the CI/packaging path from `docs/INSTALL.md`) still works unchanged.
 
@@ -268,7 +278,7 @@ Everything is local by default: the database, the memory files, the runtime stat
 
 | Data | Leaves the machine? | To whom |
 |---|---|---|
-| Your conversations and memories | **yes, when memory formation is enabled** — the same content the host agent already sends | your configured memory LLM provider (e.g. MiniMax) |
+| Your conversations and memories | **yes, when memory formation is enabled** — the same content the host agent already sends | your configured memory-LLM provider (for the `siliconflow` preset, SiliconFlow; for `custom`, the provider you chose) |
 | Text sent for embedding | yes | your configured embedding provider (e.g. SiliconFlow) |
 | Recall candidates for reranking | yes | your configured rerank provider |
 | Anything at all, if you configure no providers | **no** — keyword recall and durable writes still work | — |

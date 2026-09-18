@@ -565,7 +565,16 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
     """Look up the applied schema version (if any). The alpha bootstrap
     doesn't currently ship a ``schema_versions`` table, so this check
     reports a soft ``warn`` when no version marker is found, and ``ok``
-    when the canonical alpha tables all exist."""
+    when the canonical alpha tables all exist.
+
+    v0.2 additive behavior: when canonical tables are missing (notably
+    ``explicit_memories`` and the optional ``qa_embedding_chunks`` child-A
+    artifact), the detail and evidence point at the exact dry-run /
+    apply upgrade command rather than telling the operator to recreate
+    the database. The existing ``tables_present`` / ``tables_total``
+    count contract is preserved; ``missing_tables`` is an additive
+    evidence field.
+    """
 
     def _do() -> dict[str, Any]:
         if not parsed_dsn:
@@ -604,6 +613,23 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
                 "evidence": {},
             }
         try:
+            # The canonical tables the alpha pipeline reads/writes —
+            # exhaustive list, used by the table-presence fallback below.
+            canonical_alpha_tables = (
+                "qa_pairs", "conversation_stream", "topics",
+                "topic_entries", "observation_notes", "explicit_memories",
+                "yin_paragraphs",
+            )
+            # v0.2 additive set: tables the upgrade tool specifically
+            # brings to an existing install. ``explicit_memories`` is in
+            # both lists (it's a canonical alpha table AND a v0.2 upgrade
+            # target); the child-A sidecar ``qa_embedding_chunks`` is
+            # only in the upgrade set. We track both because the upgrade
+            # command distinguishes them.
+            upgrade_target_tables = (
+                "explicit_memories", "schema_versions",
+                "qa_embedding_chunks",
+            )
             with conn.cursor() as cur:
                 # If a schema_versions table exists, use it.
                 try:
@@ -623,21 +649,78 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
                     except Exception:  # noqa: BLE001
                         pass
                 if row:
+                    required_columns = {
+                        "qa_pairs": (
+                            "source_id", "session_id", "turn_id", "question",
+                            "answer", "tool_calls", "tool_results", "embedding",
+                            "embed_model", "created_at",
+                        ),
+                        "conversation_stream": ("embedding", "tool_calls", "tool_results"),
+                        "topics": ("note_ref", "last_observer_ts", "embed_model"),
+                        "topic_entries": ("source_qa_id", "embed_model"),
+                        "observation_notes": ("embed_model",),
+                        "yin_paragraphs": ("embed_model",),
+                        "explicit_memories": ("memory_id", "embedding", "embed_model"),
+                        "qa_embedding_chunks": (
+                            "qa_id", "chunk_index", "source_field", "source_start",
+                            "source_end", "source_sha256", "token_count",
+                            "representation_version", "content", "embedding",
+                            "embed_model",
+                        ),
+                    }
+                    missing_columns: dict[str, list[str]] = {}
+                    for table, columns in required_columns.items():
+                        cur.execute(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_schema='public' AND table_name=%s",
+                            (table,),
+                        )
+                        present_columns = {r[0] for r in cur.fetchall()}
+                        missing = [c for c in columns if c not in present_columns]
+                        if missing:
+                            missing_columns[table] = missing
+                    cur.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema='public' AND table_name = ANY(%s)",
+                        (list(required_columns),),
+                    )
+                    present_tables = {r[0] for r in cur.fetchall()}
+                    missing_tables = [
+                        table for table in required_columns
+                        if table not in present_tables
+                    ]
+                    evidence = {
+                        "version": row[0],
+                        "applied_at": str(row[1]),
+                        "missing_columns": missing_columns,
+                        "missing_tables": missing_tables,
+                        "upgrade_command": "hippocampus upgrade --target <DSN> --dry-run",
+                    }
+                    if missing_columns or missing_tables:
+                        return {
+                            "id": "schema_version",
+                            "status": "fail",
+                            "detail": (
+                                "schema_versions exists but canonical schema drift is present; "
+                                "run `hippocampus upgrade --target <DSN> --dry-run`, then "
+                                "apply the additive upgrade on a non-production target first"
+                            ),
+                            "evidence": evidence,
+                        }
                     return {
                         "id": "schema_version",
                         "status": "ok",
-                        "detail": f"schema_versions row: {row[0]} @ {row[1]}",
-                        "evidence": {"version": row[0], "applied_at": str(row[1])},
+                        "detail": f"schema_versions row: {row[0]} @ {row[1]}; canonical columns present",
+                        "evidence": evidence,
                     }
-                # Fall back: count canonical alpha tables.
-                present = 0
-                total = 0
-                for tbl in (
-                    "qa_pairs", "conversation_stream", "topics",
-                    "topic_entries", "observation_notes", "explicit_memories",
-                    "yin_paragraphs",
-                ):
-                    total += 1
+                # Fall back: enumerate canonical alpha tables AND the
+                # v0.2 upgrade targets in one pass, then diff against the
+                # two reference sets. The "missing" lists feed the
+                # upgrade-command hint.
+                present_set: set[str] = set()
+                present_alpha = 0
+                total_alpha = len(canonical_alpha_tables)
+                for tbl in canonical_alpha_tables:
                     try:
                         cur.execute(
                             "SELECT 1 FROM information_schema.tables "
@@ -645,30 +728,196 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
                             (tbl,),
                         )
                         if cur.fetchone():
-                            present += 1
+                            present_alpha += 1
+                            present_set.add(tbl)
                     except Exception:  # noqa: BLE001
-                        pass
-            if present == total:
+                        try:
+                            conn.rollback()
+                        except Exception:  # noqa: BLE001
+                            pass
+                missing_alpha = [
+                    t for t in canonical_alpha_tables
+                    if t not in present_set
+                ]
+                # Probe the v0.2 upgrade targets that are NOT already in
+                # the canonical alpha set (qa_embedding_chunks) plus
+                # explicit_memories (which is in both).
+                upgrade_presence: dict[str, bool] = {}
+                for tbl in upgrade_target_tables:
+                    try:
+                        cur.execute(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_schema='public' AND table_name=%s",
+                            (tbl,),
+                        )
+                        upgrade_presence[tbl] = cur.fetchone() is not None
+                    except Exception:  # noqa: BLE001
+                        try:
+                            conn.rollback()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        upgrade_presence[tbl] = False
+                missing_upgrade_targets = [
+                    t for t in upgrade_target_tables
+                    if not upgrade_presence.get(t)
+                ]
+                required_columns = {
+                    "qa_pairs": (
+                        "source_id", "session_id", "turn_id", "question",
+                        "answer", "tool_calls", "tool_results", "embedding",
+                        "embed_model", "created_at",
+                    ),
+                    "conversation_stream": ("embedding", "tool_calls", "tool_results"),
+                    "topics": ("note_ref", "last_observer_ts", "embed_model"),
+                    "topic_entries": ("source_qa_id", "embed_model"),
+                    "observation_notes": ("embed_model",),
+                    "yin_paragraphs": ("embed_model",),
+                    "explicit_memories": ("memory_id", "embedding", "embed_model"),
+                    "qa_embedding_chunks": (
+                        "qa_id", "chunk_index", "source_field", "source_start",
+                        "source_end", "source_sha256", "token_count",
+                        "representation_version", "content", "embedding",
+                        "embed_model",
+                    ),
+                }
+                missing_columns: dict[str, list[str]] = {}
+                for table, columns in required_columns.items():
+                    cur.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema='public' AND table_name=%s",
+                        (table,),
+                    )
+                    present_columns = {r[0] for r in cur.fetchall()}
+                    missing = [c for c in columns if c not in present_columns]
+                    if missing:
+                        missing_columns[table] = missing
+            # Build the exact upgrade command the operator should run.
+            # The DSN components are taken verbatim from the parsed
+            # target so the operator can copy-paste; the password is
+            # never included (PGPASSWORD / V3CORE_PG_PASSWORD is the
+            # documented credential channel).
+            #
+            # When the parsed DSN is on the production boundary
+            # (port 5433 or loopback/v3embeddings), the dry-run copy-
+            # paste MUST include ``--allow-production-read`` or it
+            # is unusable on an existing production install — without
+            # that flag the doctor-issued command itself would be
+            # refused. The apply command is still refused
+            # unconditionally regardless of the flag; we surface a
+            # ``production_apply_blocked`` flag in the evidence so
+            # the operator knows the apply side requires a non-
+            # production target.
+            host = str(parsed_dsn.get("host", "") or "")
+            port = int(parsed_dsn.get("port") or 0)
+            database = str(parsed_dsn.get("database", "") or "")
+            dsn_for_cmd = (
+                f"postgres://{parsed_dsn.get('user','') or ''}@{host}"
+                f":{port}/{database}"
+            )
+            on_production_boundary = (
+                port == 5433
+                or (
+                    host in {"localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1"}
+                    and database == "v3embeddings"
+                )
+            )
+            if on_production_boundary:
+                cmd_dry_run = (
+                    f"hippocampus upgrade --target {dsn_for_cmd} "
+                    "--dry-run --allow-production-read"
+                )
+                cmd_apply = (
+                    "DO NOT RUN ON PRODUCTION. upgrade --apply is "
+                    "unconditionally refused against the production "
+                    f"boundary. Point at a non-production DSN: "
+                    f"hippocampus upgrade --target <non-prod-DSN> --apply"
+                )
+            else:
+                cmd_dry_run = (
+                    f"hippocampus upgrade --target {dsn_for_cmd} --dry-run"
+                )
+                cmd_apply = (
+                    f"hippocampus upgrade --target {dsn_for_cmd} --apply"
+                )
+            evidence: dict[str, Any] = {
+                "tables_present": present_alpha,
+                "tables_total": total_alpha,
+                "missing_tables": missing_alpha,
+                "upgrade_targets_present": upgrade_presence,
+                "missing_upgrade_targets": missing_upgrade_targets,
+                "missing_columns": missing_columns,
+                "upgrade_command_dry_run": cmd_dry_run,
+                "upgrade_command_apply": cmd_apply,
+                "on_production_boundary": on_production_boundary,
+                "production_apply_blocked": on_production_boundary,
+            }
+            if missing_columns:
+                return {
+                    "id": "schema_version",
+                    "status": "fail",
+                    "detail": (
+                        "canonical schema columns are missing; run `hippocampus upgrade "
+                        "--target <DSN> --dry-run`, then apply the additive upgrade "
+                        "on a non-production target first"
+                    ),
+                    "evidence": evidence,
+                }
+            if present_alpha == total_alpha and not missing_upgrade_targets:
+                # Full canonical + upgrade coverage without a
+                # schema_versions ledger — keep the prior "warn" status
+                # so existing checks stay green.
                 return {
                     "id": "schema_version",
                     "status": "warn",
                     "detail": (
-                        f"all {total} canonical alpha tables present but no "
-                        "schema_versions row was found. Consider adopting a "
-                        "schema_versions table so future migrations can be "
-                        "tracked."
+                        f"all {total_alpha} canonical alpha tables present "
+                        "but no schema_versions row was found. Consider "
+                        "running `hippocampus upgrade --target <DSN> --apply` "
+                        "to record the v0.2 schema version (additive, no "
+                        "data rewrite)."
                     ),
-                    "evidence": {"tables_present": present, "tables_total": total},
+                    "evidence": evidence,
                 }
+            if missing_upgrade_targets and not missing_alpha:
+                # All alpha tables present, but the v0.2 upgrade targets
+                # are missing — point at the upgrade command instead of
+                # the recreate-the-DB shortcut.
+                missing_human = ", ".join(missing_upgrade_targets)
+                return {
+                    "id": "schema_version",
+                    "status": "fail",
+                    "detail": (
+                        f"v0.2 upgrade targets missing on this install: "
+                        f"{missing_human}. Run `{cmd_dry_run}` to inspect "
+                        f"the additive closure, then `{cmd_apply}` to "
+                        "apply the transactional, idempotent, no-data-"
+                        "rewrite upgrade body. DO NOT recreate the "
+                        "database — the upgrade is additive."
+                    ),
+                    "evidence": evidence,
+                }
+            # Canonical alpha tables are missing: keep the prior
+            # bootstrap hint, but ALSO surface the upgrade command so the
+            # operator sees both the bootstrap-and-fresh-install path and
+            # the additive upgrade path as two distinct options.
+            detail_missing = (
+                ", ".join(missing_alpha) if missing_alpha else "none"
+            )
             return {
                 "id": "schema_version",
                 "status": "fail",
                 "detail": (
-                    f"only {present}/{total} canonical alpha tables are "
-                    "present. Run `hippocampus bootstrap --target <DSN>` to "
-                    "apply the packaged alpha_bootstrap.sql."
+                    f"only {present_alpha}/{total_alpha} canonical alpha "
+                    f"tables are present (missing: {detail_missing}). "
+                    "Two additive options — DO NOT recreate the "
+                    f"database. (a) `{cmd_dry_run}` then `{cmd_apply}` "
+                    "to apply the v0.2 upgrade (additive, idempotent, "
+                    "no data loss). (b) `hippocampus bootstrap --target "
+                    f"{dsn_for_cmd}` to apply the full packaged "
+                    "alpha_bootstrap.sql (idempotent — already-installed "
+                    "tables are no-ops)."
                 ),
-                "evidence": {"tables_present": present, "tables_total": total},
+                "evidence": evidence,
             }
         finally:
             try:
@@ -1034,7 +1283,125 @@ def _probe_db_vector_dim(parsed_dsn: dict[str, Any], timeout: float) -> int | No
             pass
 
 
-# ── 9. hermes_provider_discovery ───────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Runtime provenance — secret-safe identity report shared by the
+# hermes_provider_discovery and hermes_home checks. Never echoes
+# api_key / password / token; even ``sys.path`` entries and source
+# strings are run through the same secret-key mask the distribution
+# CLI already uses.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+_PROVENANCE_CACHE: dict[str, Any] | None = None
+
+
+def _runtime_provenance() -> dict[str, Any]:
+    """Return a cached, secret-free runtime provenance report.
+
+    The report intentionally scans *all* site-package ``.pth`` files visible
+    on ``sys.path``. Checking only the active distribution's metadata misses
+    stale editable paths that can win after a launcher changes path order.
+    """
+    global _PROVENANCE_CACHE
+    if _PROVENANCE_CACHE is not None:
+        return dict(_PROVENANCE_CACHE)
+
+    result: dict[str, Any] = {
+        "v3core_file": "",
+        "distribution_version": "",
+        "python_executable": sys.executable,
+        "sys_path": list(sys.path),
+        "pth_files": [],
+        "editable_targets": [],
+        "config_path": "",
+        "config_candidates": [],
+        "warnings": [],
+    }
+    try:
+        mod = importlib.import_module("v3core")
+        result["v3core_file"] = str(getattr(mod, "__file__", "") or "")
+    except Exception as exc:
+        result["warnings"].append(f"import v3core failed: {type(exc).__name__}")
+    try:
+        from importlib import metadata as importlib_metadata
+        result["distribution_version"] = importlib_metadata.version("v3-core")
+    except Exception as exc:
+        result["warnings"].append(
+            f"importlib.metadata version failed: {type(exc).__name__}"
+        )
+
+    # Scan every site-packages directory in the live import path, not only
+    # the distribution files list. Do not expose arbitrary file contents.
+    seen_pth: set[str] = set()
+    for raw_path in list(sys.path):
+        try:
+            site_dir = Path(raw_path)
+            if not site_dir.is_dir() or "site-packages" not in str(site_dir).lower():
+                continue
+            for pth in sorted(site_dir.glob("*.pth")):
+                key = str(pth.resolve())
+                if key in seen_pth:
+                    continue
+                seen_pth.add(key)
+                lines = pth.read_text(encoding="utf-8", errors="replace").splitlines()
+                interesting: list[str] = []
+                for line in lines:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if any(token in stripped.lower() for token in ("v3core", "v3-core", "hippocampus", "v3-memory")):
+                        interesting.append(stripped)
+                        result["editable_targets"].append(stripped)
+                result["pth_files"].append({"path": key, "targets": interesting})
+        except Exception as exc:
+            result["warnings"].append(f"pth scan failed: {type(exc).__name__}")
+
+    # Resolve the actual profile config path without returning its contents.
+    candidates: list[Path] = []
+    for key in ("V3CORE_CONFIG", "V3CORE_CONFIG_PATH", "HERMES_CONFIG"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            candidates.append(Path(value))
+    try:
+        from .config import resolve_config  # type: ignore
+        cfg = resolve_config()
+        base = getattr(cfg, "base_path", None) or getattr(cfg, "profile_dir", None)
+        if base:
+            candidates.append(Path(str(base)) / "config.yaml")
+    except Exception as exc:
+        result["warnings"].append(f"config resolver failed: {type(exc).__name__}")
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        candidates.append(Path(hermes_home) / "config.yaml")
+    seen_cfg: set[str] = set()
+    for candidate in candidates:
+        try:
+            key = str(candidate.expanduser().resolve())
+        except Exception:
+            key = str(candidate)
+        if key in seen_cfg:
+            continue
+        seen_cfg.add(key)
+        exists = Path(key).is_file()
+        result["config_candidates"].append({"path": key, "exists": exists})
+        if exists and not result["config_path"]:
+            result["config_path"] = key
+
+    if result["editable_targets"]:
+        result["warnings"].append("v3core-related editable .pth target(s) are present")
+        result["identity_warning"] = (
+            "v3core-related editable .pth target(s) are present; inspect path order "
+            "before changing or removing them"
+        )
+    result["build_identity"] = (
+        os.environ.get("V3CORE_BUILD_SHA")
+        or os.environ.get("HIPP_BUILD_SHA")
+        or "unknown"
+    )
+    _PROVENANCE_CACHE = dict(result)
+    return dict(result)
+
+# ── 9. hermes_provider_discovery ────────────────────────────────────────────
 
 
 def _check_hermes_provider_discovery() -> dict[str, Any]:
@@ -1049,16 +1416,47 @@ def _check_hermes_provider_discovery() -> dict[str, Any]:
                     f"distribution_cli._entry_point_presence unavailable: "
                     f"{type(e).__name__}: {e!s}"
                 ),
-                "evidence": {},
+                "evidence": {"runtime_provenance": _runtime_provenance()},
             }
         info = _entry_point_presence("hermes_agent.memory_providers",
                                      "deep_memory_v3")
+        provenance = _runtime_provenance()
+        evidence: dict[str, Any] = {**info, "runtime_provenance": provenance}
+        identity_warn = provenance.get("identity_warning")
         if info.get("present"):
+            detail = (
+                "hermes_agent.memory_providers / deep_memory_v3 entry "
+                "point is present"
+            )
+            status = "ok"
+            if identity_warn:
+                # Mismatch is a soft signal when the entry point still
+                # resolves — downgrade ok→warn so the operator notices.
+                status = "warn"
+                detail = (
+                    detail
+                    + ". " + identity_warn
+                )
             return {
                 "id": "hermes_provider_discovery",
-                "status": "ok",
-                "detail": "hermes_agent.memory_providers / deep_memory_v3 entry point is present",
-                "evidence": info,
+                "status": status,
+                "detail": detail,
+                "evidence": evidence,
+            }
+        if identity_warn:
+            # No entry point + identity mismatch — keep "warn" (the
+            # original severity) but include the mismatch detail so the
+            # operator sees both signals in one place.
+            return {
+                "id": "hermes_provider_discovery",
+                "status": "warn",
+                "detail": (
+                    "hermes_agent.memory_providers / deep_memory_v3 is not "
+                    "discovered. Install v3-hermes-plugin alongside v3-core "
+                    "and verify the entry point is registered. "
+                    + identity_warn
+                ),
+                "evidence": evidence,
             }
         return {
             "id": "hermes_provider_discovery",
@@ -1068,7 +1466,7 @@ def _check_hermes_provider_discovery() -> dict[str, Any]:
                 "discovered. Install v3-hermes-plugin alongside v3-core "
                 "and verify the entry point is registered."
             ),
-            "evidence": info,
+            "evidence": evidence,
         }
 
     return _safe(_do, fallback_id="hermes_provider_discovery")
@@ -1081,6 +1479,12 @@ def _check_hermes_home() -> dict[str, Any]:
     def _do() -> dict[str, Any]:
         home = os.environ.get("HERMES_HOME", "") or ""
         evidence: dict[str, Any] = {"HERMES_HOME": home or None}
+        # Attach the runtime provenance block to the hermes_home check
+        # as well — it is the operator-facing surface where the
+        # "where am I actually running" question lands, so attaching
+        # it here (in addition to hermes_provider_discovery) keeps the
+        # report self-contained when only HERMES_HOME is set.
+        evidence["runtime_provenance"] = _runtime_provenance()
         if home:
             p = Path(home).expanduser()
             evidence["exists"] = p.exists()

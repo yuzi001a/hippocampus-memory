@@ -46,11 +46,11 @@ PROD_LOCAL_DB = "v3embeddings"
 PROD_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1"})
 
 # Alpha bootstrap include marker — the canonical sentinel used by
-# `alpha_bootstrap.sql` to indicate where the packaged
-# `explicit_memories.sql` body must be spliced in. The marker must be a
-# standalone SQL comment line.
+# `alpha_bootstrap.sql` to indicate where a packaged schema artifact must be
+# spliced in. The marker captures only a repo-relative `schema/*.sql` path;
+# the loader resolves the basename inside the installed v3core package.
 _ALPHA_INCLUDE_MARKER = re.compile(
-    r"^--\s*>>>?\s*ALPHA_BOOTSTRAP_INCLUDE:[^\n]*<<<\s*$",
+    r"^--\s*>>>?\s*ALPHA_BOOTSTRAP_INCLUDE:\s*(schema/[A-Za-z0-9_.-]+\.sql)\s*<<<\s*$",
     re.MULTILINE,
 )
 
@@ -171,25 +171,15 @@ def _package_sql_sha256(name: str) -> str:
 
 
 def _expand_alpha_include(sql_text: str) -> str:
-    """Replace the canonical alpha include marker with the packaged
-    ``explicit_memories.sql`` body.
+    """Replace every canonical alpha include with its packaged SQL body."""
 
-    The marker line is exactly::
+    def _replace(match: re.Match[str]) -> str:
+        rel_path = match.group(1)
+        if not rel_path.startswith("schema/"):
+            raise ValueError(f"unsupported alpha SQL include: {rel_path}")
+        return _package_sql(rel_path.removeprefix("schema/"))
 
-        -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/explicit_memories.sql <<<
-
-    The combined result is what we hand to ``psycopg2.cursor.execute``,
-    so the SQL never depends on a repo-relative path being present at
-    run time.
-    """
-    explicit = _package_sql("explicit_memories.sql")
-    expanded, n = _ALPHA_INCLUDE_MARKER.subn(lambda _m: explicit, sql_text)
-    if n == 0:
-        # No marker found — return the original text. This is the
-        # contract: alpha_bootstrap.sql contains the marker; older
-        # revisions may not. The doctor check below reports whether
-        # the marker was present.
-        return sql_text
+    expanded, _ = _ALPHA_INCLUDE_MARKER.subn(_replace, sql_text)
     return expanded
 
 
@@ -318,8 +308,13 @@ def _doctor(args: argparse.Namespace) -> int:
 
     # 2. Packaged SQL resources present, well-formed, and the alpha
     # include marker is intact (we expand it at bootstrap time).
+    # v0.2 closing round: the packaged artifact set is FOUR files, not
+    # two — qa_embedding_chunks.sql and upgrade_v0_2.sql ship in the
+    # same package-data set and an install that is missing them cannot
+    # repair an existing install. Report every one of them.
     sql_check: dict[str, Any] = {}
-    for name in ("alpha_bootstrap.sql", "explicit_memories.sql"):
+    for name in ("alpha_bootstrap.sql", "explicit_memories.sql",
+                 "qa_embedding_chunks.sql", "upgrade_v0_2.sql"):
         try:
             text = _package_sql(name)
             sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -333,14 +328,24 @@ def _doctor(args: argparse.Namespace) -> int:
             report["errors"].append(f"missing packaged SQL: {name}")
     if sql_check.get("alpha_bootstrap.sql", {}).get("present"):
         alpha_text = _package_sql("alpha_bootstrap.sql")
-        sql_check["alpha_bootstrap.sql"]["include_marker_found"] = bool(
-            _ALPHA_INCLUDE_MARKER.search(alpha_text)
-        )
-        if not sql_check["alpha_bootstrap.sql"]["include_marker_found"]:
+        markers = [m.group(1) for m in _ALPHA_INCLUDE_MARKER.finditer(alpha_text)]
+        sql_check["alpha_bootstrap.sql"]["include_marker_found"] = bool(markers)
+        sql_check["alpha_bootstrap.sql"]["include_markers"] = markers
+        if not markers:
             report["warnings"].append(
                 "alpha_bootstrap.sql is missing the ALPHA_BOOTSTRAP_INCLUDE "
-                "marker; bootstrap will not splice explicit_memories.sql"
+                "marker; bootstrap will not splice the sidecar artifacts"
             )
+        # Every marker must point at a packaged artifact that is really present,
+        # otherwise `hippocampus bootstrap` would splice nothing and leave the
+        # install without that table.
+        for rel in markers:
+            base = rel.rsplit("/", 1)[-1]
+            if not sql_check.get(base, {}).get("present"):
+                report["warnings"].append(
+                    f"alpha_bootstrap.sql includes {rel} but that artifact is "
+                    f"not present in the installed package"
+                )
     report["checks"]["packaged_sql"] = sql_check
 
     # 3. Packaged v3hermes plugin.yaml (optional but checked here so
@@ -863,6 +868,654 @@ def _bootstrap(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# upgrade — additive existing-install closure (v0.2)
+# ---------------------------------------------------------------------------
+#
+# Contract (frozen — see existing_install_audit.json migration_contract):
+#   * Read-only path: ``hippocampus upgrade --target <DSN> --dry-run`` —
+#     connects (one SELECT, no writes), reports every missing additive
+#     object (public.explicit_memories, public.schema_versions, the
+#     qa_embedding_chunks sidecar table if the package ships it),
+#     never executes DDL. Exit code 0 when the install is fully covered,
+#     1 when additions would happen (informational, NOT an error), 2 on
+#     hard error / refusal.
+#   * Apply path: ``hippocampus upgrade --target <DSN> --apply`` —
+#     transactional, idempotent, refuses production by default. There is
+#     NO bypass flag in this command — operators must point at a
+#     non-production DSN exactly the same way `bootstrap` requires.
+#   * No DROP / TRUNCATE / DELETE / data rewrite — enforced by the
+#     static check in `test_existing_install_upgrade_contract.py`
+#     (regex against the packaged SQL files). The upgrade SQL body is
+#     `upgrade_v0_2.sql`, which is additive only.
+#   * The qa_embedding_chunks artifact (child-A-owned) is consumed when
+#     present in the installed package; the upgrade DOES NOT silently
+#     succeed when it is missing on a v0.2 install — dry-run reports the
+#     missing artifact and apply exits 2.
+#
+# The upgrade is intentionally a strict subset of alpha_bootstrap.sql:
+# re-running bootstrap after upgrade is safe and a no-op for every
+# statement in upgrade_v0_2.sql.
+
+# Canonical additive objects the upgrade is expected to bring to an
+# existing install. The dry-run report keys off this list.
+_UPGRADE_REQUIRED_TABLES: tuple[str, ...] = (
+    "explicit_memories",
+    "schema_versions",
+)
+# Optional tables the upgrade checks for but never adds directly. The
+# qa_embedding_chunks table is owned by child A; when child A's
+# artifact (v3core.schema.qa_embedding_chunks.sql) is packaged, the
+# upgrade consumes it. When it is missing on a v0.2 install, dry-run
+# reports it as missing and apply refuses to proceed.
+_UPGRADE_OPTIONAL_TABLES: tuple[str, ...] = (
+    "qa_embedding_chunks",
+)
+# Column-level requirements the dry-run diff emits so the operator can
+# see exactly what `bootstrap` would (re-)add via the same ALTER ADD
+# COLUMN IF NOT EXISTS guards.
+_UPGRADE_TABLE_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "qa_pairs": (
+        "source_id", "turn_id", "source", "tool_calls", "tool_results",
+        "embed_model", "created_at",
+    ),
+    "topics": ("note_ref", "last_observer_ts", "embed_model"),
+    "topic_entries": ("source_qa_id", "embed_model"),
+    "observation_notes": ("embed_model",),
+    "yin_paragraphs": ("embed_model",),
+}
+
+
+def _package_optional_sql(name: str) -> tuple[bool, str | None, str | None]:
+    """Try to load an optional packaged SQL resource (no exception on miss).
+
+    Returns ``(present, text_or_None, sha256_or_None)``. The doctor
+    contract is: when an artifact is missing, report it — never raise
+    or silently succeed.
+    """
+    try:
+        text = resources.files("v3core.schema").joinpath(name).read_text(
+            encoding="utf-8"
+        )
+    except (ModuleNotFoundError, FileNotFoundError):
+        return (False, None, None)
+    return (True, text, hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
+def _upgrade_required_column_diff(
+    parsed: dict[str, Any],
+) -> dict[str, list[str]]:
+    """For each table in ``_UPGRADE_TABLE_REQUIRED_COLUMNS``, return the
+    list of required columns that are missing on the live install.
+
+    Pure information_schema probe — no DDL.
+    """
+    missing: dict[str, list[str]] = {}
+    try:
+        import psycopg2  # type: ignore
+    except ImportError:
+        # Without psycopg2 we can't probe; surface as fully-missing so
+        # the operator sees the gap rather than a clean report.
+        for tbl, cols in _UPGRADE_TABLE_REQUIRED_COLUMNS.items():
+            missing[tbl] = list(cols)
+        return missing
+    password = parsed.get("password") or os.environ.get(
+        "V3CORE_PG_PASSWORD", ""
+    ) or os.environ.get("PGPASSWORD", "") or ""
+    try:
+        conn = psycopg2.connect(
+            host=parsed.get("host", ""),
+            port=int(parsed.get("port") or 0),
+            database=parsed.get("database", ""),
+            user=parsed.get("user", ""),
+            password=password or "",
+            connect_timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        for tbl, cols in _UPGRADE_TABLE_REQUIRED_COLUMNS.items():
+            missing[tbl] = list(cols)
+        return missing
+    try:
+        with conn.cursor() as cur:
+            for tbl, cols in _UPGRADE_TABLE_REQUIRED_COLUMNS.items():
+                missing_cols: list[str] = []
+                for col in cols:
+                    try:
+                        cur.execute(
+                            "SELECT 1 FROM information_schema.columns "
+                            "WHERE table_schema='public' "
+                            "  AND table_name=%s "
+                            "  AND column_name=%s",
+                            (tbl, col),
+                        )
+                        if cur.fetchone() is None:
+                            missing_cols.append(col)
+                    except Exception:  # noqa: BLE001
+                        # A failed SELECT on a missing table aborts the
+                        # transaction — rollback so the next probe starts
+                        # clean. Treat the row as fully-missing.
+                        try:
+                            conn.rollback()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        missing_cols.append(col)
+                if missing_cols:
+                    missing[tbl] = missing_cols
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return missing
+
+
+def _upgrade_table_presence(parsed: dict[str, Any]) -> dict[str, bool]:
+    """Return {table_name: present_on_target} for the canonical upgrade
+    tables. Never raises; a missing psycopg2 or a connect failure
+    reports every table as missing so the operator still gets a clear
+    signal.
+    """
+    out: dict[str, bool] = {}
+    for tbl in _UPGRADE_REQUIRED_TABLES + _UPGRADE_OPTIONAL_TABLES:
+        out[tbl] = False
+    try:
+        import psycopg2  # type: ignore
+    except ImportError:
+        return out
+    password = parsed.get("password") or os.environ.get(
+        "V3CORE_PG_PASSWORD", ""
+    ) or os.environ.get("PGPASSWORD", "") or ""
+    try:
+        conn = psycopg2.connect(
+            host=parsed.get("host", ""),
+            port=int(parsed.get("port") or 0),
+            database=parsed.get("database", ""),
+            user=parsed.get("user", ""),
+            password=password or "",
+            connect_timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        return out
+    try:
+        with conn.cursor() as cur:
+            for tbl in list(out):
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema='public' "
+                        "  AND table_name=%s",
+                        (tbl,),
+                    )
+                    out[tbl] = cur.fetchone() is not None
+                except Exception:  # noqa: BLE001
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    out[tbl] = False
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def _upgrade_schema_version_row(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Return ``{present, version, applied_at}`` for the v0.2 schema_versions
+    row, or ``{present: False}`` when the table/row does not exist.
+    """
+    out: dict[str, Any] = {"present": False}
+    try:
+        import psycopg2  # type: ignore
+    except ImportError:
+        return out
+    password = parsed.get("password") or os.environ.get(
+        "V3CORE_PG_PASSWORD", ""
+    ) or os.environ.get("PGPASSWORD", "") or ""
+    try:
+        conn = psycopg2.connect(
+            host=parsed.get("host", ""),
+            port=int(parsed.get("port") or 0),
+            database=parsed.get("database", ""),
+            user=parsed.get("user", ""),
+            password=password or "",
+            connect_timeout=5,
+        )
+    except Exception:  # noqa: BLE001
+        return out
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    "SELECT version, applied_at FROM public.schema_versions "
+                    "WHERE version='v0.2' LIMIT 1",
+                )
+                row = cur.fetchone()
+            except Exception:  # noqa: BLE001
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                row = None
+            if row:
+                out = {
+                    "present": True,
+                    "version": row[0],
+                    "applied_at": str(row[1]),
+                }
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def _upgrade_resolve_dsn(args: argparse.Namespace) -> dict[str, Any]:
+    """Mirror ``_bootstrap_resolve_dsn`` for the upgrade subcommand.
+
+    Requires an explicit ``--target`` (or ``--dsn`` /
+    ``V3CORE_UPGRADE_DSN``).
+
+    Production-boundary policy (frozen — see existing_install_audit.json):
+
+      * ``--apply`` ALWAYS refuses the production boundary
+        unconditionally (port 5433 or loopback+v3embeddings). No
+        flag can override this — production writes are never
+        auto-allowed by this command.
+
+      * ``--dry-run`` (the default) ALSO refuses by default; the
+        doctor-issued copy-paste command must be safe by default.
+
+      * ``--dry-run --allow-production-read`` is the single explicit
+        opt-in for a SELECT-only diagnostic against a production
+        target. The flag is unmistakably named (the word
+        "production" appears in the literal), applies ONLY to
+        dry-run, and is logged in the dry-run output so the audit
+        trail shows the operator chose it. The apply path ignores
+        this flag entirely — passing it to ``--apply`` is a no-op,
+        the production boundary remains enforced.
+
+    The production boundary check is implemented by
+    ``_enforce_production_boundary`` (port 5433 / loopback +
+    v3embeddings). On the read path we deliberately bypass it via
+    ``_parse_dsn`` directly (no ``_enforce_production_boundary``
+    call) when ``--allow-production-read`` is set, but we still
+    parse the DSN strictly so a malformed target still fails 2.
+    """
+    explicit = (args.target or args.dsn or "").strip()
+    env_dsn = os.environ.get("V3CORE_UPGRADE_DSN", "").strip()
+    allow_prod_read = bool(getattr(args, "allow_production_read", False))
+    is_apply = bool(getattr(args, "apply", False))
+    # A defense-in-depth check: the apply path NEVER honors
+    # --allow-production-read. If an operator passes both --apply
+    # and --allow-production-read, the production boundary is still
+    # enforced (we just ignore the flag silently so the operator
+    # gets the same refusal they would have gotten without it).
+    if is_apply and allow_prod_read:
+        # Surface the fact that we ignored the flag — without this
+        # the operator could think the read-only opt-in bypassed the
+        # write guard, which it did not.
+        LOG.warning(
+            "upgrade --apply ignores --allow-production-read: "
+            "production writes are unconditionally refused."
+        )
+        allow_prod_read = False
+    parsed: dict[str, Any] | None = None
+    if explicit:
+        parsed = _parse_dsn(explicit)
+    elif env_dsn:
+        parsed = _parse_dsn(env_dsn)
+    else:
+        raise SystemExit(
+            "ERROR: an explicit --target <DSN> (or --dsn / "
+            "V3CORE_UPGRADE_DSN) is required for upgrade. Refusing "
+            "to run without an explicit connection target."
+        )
+    if not allow_prod_read:
+        # Default path: enforce the production boundary the same way
+        # bootstrap does.
+        _enforce_production_boundary(parsed)
+    if not parsed.get("password"):
+        parsed["password"] = os.environ.get("PGPASSWORD", "") or ""
+    # Annotate the parsed DSN with the read-only-allowed flag so the
+    # downstream dry-run output can show the operator what they
+    # opted into. The annotation NEVER reaches any apply-side
+    # decision path.
+    if allow_prod_read and not is_apply:
+        parsed["_allow_production_read"] = True
+    return parsed
+
+
+def _upgrade_load_combined_sql(
+    include_qa_chunks_artifact: bool,
+) -> tuple[str, dict[str, Any]]:
+    """Load and combine the upgrade SQL files into a single body.
+
+    The upgrade body is ``upgrade_v0_2.sql`` (the additive DDL owned by
+    this task) with the ``ALPHA_BOOTSTRAP_INCLUDE`` marker replaced by
+    the packaged ``explicit_memories.sql`` body — same single-source
+    pattern ``_expand_alpha_include`` already uses.
+
+    When ``include_qa_chunks_artifact`` is True the optional
+    ``qa_embedding_chunks.sql`` artifact (when packaged) is spliced in
+    BEFORE the single final ``COMMIT;`` of ``upgrade_v0_2.sql`` so the
+    entire upgrade — schema_versions row, explicit_memories body, the
+    qa_embedding_chunks sidecar, every ADD COLUMN IF NOT EXISTS guard
+    — runs as ONE atomic transaction. The previous implementation
+    appended the chunk body AFTER ``COMMIT;``, which silently split
+    the upgrade into two transactions; the v0.2 contract is one
+    transaction per apply, so the schema_versions ledger reflects the
+    whole upgrade, not half of it.
+
+    The splicing rule is precise: locate the LAST standalone
+    ``COMMIT;`` line in the upgrade body (the one closing the
+    transaction) and insert the chunk body immediately before it. If
+    no such COMMIT is found (which would mean the SQL file regressed
+    away from the explicit BEGIN / COMMIT wrapper), the loader returns
+    an error and the apply path refuses to run — fail-closed on a
+    silent atomicity loss.
+    """
+    try:
+        upgrade_text = _package_sql("upgrade_v0_2.sql")
+    except FileNotFoundError as e:
+        return ("", {"error": _safe_repr(e), "applied": False})
+    expanded = _expand_alpha_include(upgrade_text)
+    out: dict[str, Any] = {
+        "upgrade_v0_2_sql_sha256": hashlib.sha256(
+            upgrade_text.encode("utf-8")
+        ).hexdigest(),
+        "expanded_bytes": len(expanded.encode("utf-8")),
+        "include_expanded": expanded != upgrade_text,
+    }
+    if not include_qa_chunks_artifact:
+        return (expanded, out)
+    present, qa_text, qa_sha = _package_optional_sql(
+        "qa_embedding_chunks.sql"
+    )
+    out["qa_embedding_chunks_sql_present"] = bool(present)
+    if not (present and qa_text is not None):
+        # Hard refusal: v0.2 install without the chunk artifact.
+        # The caller maps this to exit 2 in apply mode and to a
+        # missing-artifact signal in dry-run mode.
+        out["qa_embedding_chunks_sql_missing"] = True
+        return (expanded, out)
+    # Splice the chunk body BEFORE the final COMMIT; line. Match a
+    # standalone "COMMIT;" on its own line (allowing trailing
+    # whitespace) so we don't accidentally hit the word inside a
+    # string literal or a comment. The regex is intentionally strict
+    # — atomicity is the contract.
+    commit_re = re.compile(r"(?m)^[ \t]*COMMIT\s*;[ \t]*(?:\r\n|\n)?$")
+    matches = list(commit_re.finditer(expanded))
+    if not matches:
+        # Fail closed: without an explicit COMMIT we cannot guarantee
+        # the chunk splice is atomic with the rest of the upgrade.
+        out["error"] = (
+            "upgrade_v0_2.sql is missing the explicit COMMIT; "
+            "marker; refusing to splice qa_embedding_chunks.sql "
+            "without an atomic boundary. Restore the "
+            "BEGIN ... COMMIT wrapper in upgrade_v0_2.sql."
+        )
+        return ("", out)
+    last_commit = matches[-1]
+    chunk_block = (
+        "\n\n-- >>> BEGIN qa_embedding_chunks.sql (child-A artifact) <<<\n"
+        + qa_text
+        + "\n-- >>> END qa_embedding_chunks.sql <<<\n\n"
+    )
+    expanded = (
+        expanded[: last_commit.start()]
+        + chunk_block
+        + expanded[last_commit.start():]
+    )
+    out["qa_embedding_chunks_sql_sha256"] = qa_sha
+    out["qa_embedding_chunks_spliced_before_commit"] = True
+    out["expanded_bytes"] = len(expanded.encode("utf-8"))
+    # Final invariant: the LAST COMMIT; line in the combined body
+    # must follow the chunk block, so the entire upgrade remains one
+    # transaction. We re-check and surface it explicitly.
+    last_commit_after = list(commit_re.finditer(expanded))[-1]
+    chunk_end_after = expanded.find("-- >>> END qa_embedding_chunks.sql <<<")
+    if chunk_end_after == -1 or last_commit_after.start() <= chunk_end_after:
+        out["error"] = (
+            "internal: failed to splice qa_embedding_chunks.sql "
+            "before the final COMMIT; atomicity would be lost. "
+            "Refusing to apply."
+        )
+        return ("", out)
+    return (expanded, out)
+
+
+def _upgrade_dry_run(args: argparse.Namespace) -> int:
+    """Read-only upgrade dry-run. Connects with one SELECT per table,
+    reports every missing additive object, never executes DDL.
+
+    Exit codes:
+      0 — fully covered, upgrade would be a no-op
+      1 — additions would happen (informational)
+      2 — hard error / refusal / DSN parse failure
+    """
+    try:
+        parsed = _upgrade_resolve_dsn(args)
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    table_presence = _upgrade_table_presence(parsed)
+    column_diff = _upgrade_required_column_diff(parsed)
+    schema_version = _upgrade_schema_version_row(parsed)
+    chunk_present, _, chunk_sha = _package_optional_sql(
+        "qa_embedding_chunks.sql"
+    )
+    missing_required = [
+        t for t in _UPGRADE_REQUIRED_TABLES if not table_presence.get(t)
+    ]
+    missing_columns_total = sum(len(v) for v in column_diff.values())
+    chunk_artifact_missing = not chunk_present
+    # Determine the recommended operator command (always emit verbatim
+    # so it can be copy-pasted).
+    redacted_target = _redact_dsn(parsed)
+    cmd_dry_run = (
+        f"hippocampus upgrade --target {redacted_target.get('host','')}"
+        f":{redacted_target.get('port','')}/{redacted_target.get('database','')}"
+        " --dry-run"
+    )
+    cmd_apply = (
+        f"hippocampus upgrade --target {redacted_target.get('host','')}"
+        f":{redacted_target.get('port','')}/{redacted_target.get('database','')}"
+        " --apply"
+    )
+    out: dict[str, Any] = {
+        "command": "upgrade",
+        "mode": "dry-run",
+        "target": redacted_target,
+        "tables_present": table_presence,
+        "missing_required_tables": missing_required,
+        "missing_required_columns": column_diff,
+        "schema_versions_v0_2": schema_version,
+        "qa_embedding_chunks_artifact_present": bool(chunk_present),
+        "qa_embedding_chunks_artifact_sha256": chunk_sha,
+        "qa_embedding_chunks_table_present": bool(
+            table_presence.get("qa_embedding_chunks")
+        ),
+        "would_apply": bool(
+            missing_required
+            or missing_columns_total > 0
+            or not schema_version.get("present")
+        ),
+        "recommended_commands": {
+            "dry_run": cmd_dry_run,
+            "apply": cmd_apply,
+        },
+    }
+    # Surface the explicit opt-in so the audit trail shows the
+    # operator chose to point at production. Without this annotation
+    # the recommended_commands block would always advertise a
+    # production-unusable dry-run, which is the exact bug the user
+    # flagged.
+    if parsed.get("_allow_production_read"):
+        out["allow_production_read"] = True
+        # Replace the recommended apply command with an
+        # unambiguous copy-paste. The apply path NEVER accepts
+        # production (see _upgrade_resolve_dsn), so the recommended
+        # apply is wrapped in a "DO NOT RUN ON PRODUCTION" prefix.
+        out["recommended_commands"] = {
+            "dry_run": (
+                f"{cmd_dry_run} --allow-production-read "
+                "(running now — production SELECT only)"
+            ),
+            "apply": (
+                "DO NOT RUN ON PRODUCTION. Apply is unconditionally "
+                "refused against the production boundary. "
+                f"Use a non-production target DSN with: {cmd_apply}"
+            ),
+        }
+    if chunk_artifact_missing:
+        out["warning"] = (
+            "qa_embedding_chunks.sql artifact is NOT packaged in this "
+            "v3-core install. Apply mode will refuse to run; rebuild the "
+            "child-A artifact and reinstall before applying."
+        )
+    print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+    if chunk_artifact_missing:
+        # Dry-run is informative — still report the missing artifact but
+        # do not flag it as a hard error here. Apply is the hard gate.
+        return 1 if out["would_apply"] else 0
+    return 1 if out["would_apply"] else 0
+
+
+def _upgrade_apply(args: argparse.Namespace) -> int:
+    """Apply the additive existing-install upgrade.
+
+    Transactional / idempotent: the entire body runs in one
+    ``BEGIN ... COMMIT`` block (already wrapped in
+    ``upgrade_v0_2.sql``). On any exception the transaction is rolled
+    back; the schema_versions row is only written on a successful
+    COMMIT.
+
+    Refuses production by default (same ``PROD_PORTS`` /
+    ``PROD_LOOPBACK_HOSTS`` policy as ``bootstrap``). When the
+    qa_embedding_chunks artifact is missing on a v0.2 install, apply
+    exits 2 — the operator must rebuild child A first.
+    """
+    try:
+        parsed = _upgrade_resolve_dsn(args)
+    except SystemExit as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    chunk_present, _, chunk_sha = _package_optional_sql(
+        "qa_embedding_chunks.sql"
+    )
+    if not chunk_present:
+        out = {
+            "command": "upgrade",
+            "mode": "apply",
+            "applied": False,
+            "target": _redact_dsn(parsed),
+            "error": (
+                "qa_embedding_chunks.sql artifact is NOT packaged in this "
+                "v3-core install. Refusing to apply the v0.2 upgrade "
+                "without the child-A artifact. Reinstall a v3-core build "
+                "that ships qa_embedding_chunks.sql, then re-run upgrade."
+            ),
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+        return 2
+    try:
+        import psycopg2  # type: ignore
+    except ImportError as e:
+        out = {
+            "command": "upgrade",
+            "mode": "apply",
+            "applied": False,
+            "target": _redact_dsn(parsed),
+            "error": f"psycopg2 import failed: {e}",
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+        return 2
+    sql_text, sql_meta = _upgrade_load_combined_sql(
+        include_qa_chunks_artifact=True,
+    )
+    if not sql_text:
+        out = {
+            "command": "upgrade",
+            "mode": "apply",
+            "applied": False,
+            "target": _redact_dsn(parsed),
+            "error": sql_meta.get("error") or "upgrade_v0_2.sql not found",
+            "sql_meta": sql_meta,
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+        return 2
+    redacted = _redact_dsn(parsed)
+    result: dict[str, Any] = {
+        "applied": False,
+        "target": redacted,
+        "sql_bytes": len(sql_text.encode("utf-8")),
+    }
+    result.update(sql_meta)
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            host=parsed.get("host", ""),
+            port=int(parsed.get("port") or 0),
+            database=parsed.get("database", ""),
+            user=parsed.get("user", ""),
+            password=parsed.get("password", "") or "",
+            connect_timeout=5,
+        )
+        try:
+            # The upgrade body is already wrapped in BEGIN / COMMIT.
+            # Re-running it is a no-op thanks to CREATE TABLE IF NOT
+            # EXISTS / ADD COLUMN IF NOT EXISTS / INSERT ... ON CONFLICT
+            # DO NOTHING. We disable autocommit so the transaction is
+            # atomic.
+            conn.autocommit = False
+            with conn.cursor() as cur:
+                cur.execute(sql_text)
+            conn.commit()
+            result["applied"] = True
+        except Exception as e:  # noqa: BLE001
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            result["error"] = _safe_repr(e)
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        result["error"] = _safe_repr(e)
+    out = {
+        "command": "upgrade",
+        "mode": "apply",
+        "target": redacted,
+        "result": result,
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0 if result.get("applied") else 1
+
+
+def _upgrade(args: argparse.Namespace) -> int:
+    """Dispatch ``upgrade`` subcommand to dry-run or apply.
+
+    ``--dry-run`` is the default — the explicit ``--apply`` is the only
+    path that writes DDL. Mutual exclusion is enforced by argparse
+    (``add_mutually_exclusive_group``).
+    """
+    if getattr(args, "apply", False):
+        return _upgrade_apply(args)
+    return _upgrade_dry_run(args)
+
+
+# ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
 
@@ -927,6 +1580,71 @@ def _build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--port", default=None, type=int)
     bootstrap.add_argument("--database", default=None)
     bootstrap.add_argument("--user", default=None)
+
+    upgrade = sub.add_parser(
+        "upgrade",
+        help=(
+            "Additive existing-install upgrade (v0.2): dry-run reports "
+            "missing canonical objects without writing DDL; --apply runs "
+            "the transactional, idempotent, no-data-rewrite upgrade body. "
+            "Production-boundary DSNs (port 5433 or loopback/v3embeddings) "
+            "are refused unconditionally — same policy as bootstrap."
+        ),
+    )
+    upgrade.add_argument(
+        "--target",
+        default=None,
+        help=(
+            "Explicit DSN string for the upgrade target, e.g. "
+            "scheme://<user>:<password>@<host>:<port>/<database>. "
+            "Either this, --dsn, or V3CORE_UPGRADE_DSN is required."
+        ),
+    )
+    upgrade.add_argument(
+        "--dsn",
+        default=None,
+        help="Alias for --target (literal DSN).",
+    )
+    upgrade_mode = upgrade.add_mutually_exclusive_group()
+    upgrade_mode.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=True,
+        help=(
+            "Read-only path (default): connect, probe information_schema, "
+            "report every missing additive object, never execute DDL. "
+            "Exit 0 when the install is fully covered, 1 when additions "
+            "would happen (informational), 2 on hard refusal."
+        ),
+    )
+    upgrade_mode.add_argument(
+        "--apply",
+        dest="apply",
+        action="store_true",
+        help=(
+            "Apply the transactional, idempotent, no-data-rewrite upgrade "
+            "body. Refuses to run against production-boundary DSNs; "
+            "refuses to run when the qa_embedding_chunks.sql artifact "
+            "is missing in the installed v3-core package."
+        ),
+    )
+    upgrade.add_argument(
+        "--allow-production-read",
+        dest="allow_production_read",
+        action="store_true",
+        help=(
+            "DRY-RUN ONLY: explicit opt-in that allows a SELECT-only "
+            "diagnostic against a production-boundary DSN (port 5433 "
+            "or loopback/v3embeddings). The flag is REQUIRED for the "
+            "doctor-issued copy-paste command to work on an existing "
+            "production install without any DDL. It is IGNORED by "
+            "--apply: production writes are unconditionally refused. "
+            "Use of this flag is recorded in the dry-run output so "
+            "the audit trail shows the operator chose to point at "
+            "production."
+        ),
+    )
 
     # --- v0.2 First User Release surface ------------------------------------
     # These subcommands delegate to dedicated modules; each is imported lazily
@@ -1184,6 +1902,8 @@ def main(argv: list[str] | None = None) -> int:
         return _doctor(args)
     if args.command == "bootstrap":
         return _bootstrap(args)
+    if args.command == "upgrade":
+        return _upgrade(args)
     if args.command == "install":
         return _install(args)
     if args.command == "import":

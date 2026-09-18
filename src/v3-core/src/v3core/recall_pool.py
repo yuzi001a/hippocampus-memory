@@ -2810,14 +2810,41 @@ def recall_pool(
                             try:
                                 _emb_str = "[" + ",".join(str(x) for x in q_emb) + "]"
                                 with _qa_conn.cursor() as _qa_cur:
-                                    _qa_cur.execute(
-                                        "SELECT id, timestamp, question, answer, "
-                                        " 1 - (embedding <=> %s::vector) AS cosine "
-                                        "FROM qa_pairs WHERE embedding IS NOT NULL "
-                                        "AND answer IS NOT NULL "
-                                        "AND session_id NOT LIKE '%%.trajectory%%' "
-                                        "ORDER BY embedding <=> %s::vector LIMIT %s",
-                                        (_emb_str, _emb_str, max(rerank_top_n or 0, limit * _vec_mult)))
+                                    _qa_cur.execute("SELECT to_regclass('public.qa_embedding_chunks')")
+                                    _has_qa_chunks = bool((_qa_cur.fetchone() or [None])[0])
+                                    _qa_limit = max(rerank_top_n or 0, limit * _vec_mult)
+                                    if _has_qa_chunks:
+                                        _qa_sql = (
+                                            "WITH qa_hits AS ("
+                                            " SELECT id, timestamp, question, answer, "
+                                            " 1 - (embedding <=> %s::vector) AS cosine "
+                                            " FROM qa_pairs WHERE embedding IS NOT NULL "
+                                            " AND answer IS NOT NULL "
+                                            " AND session_id NOT LIKE '%%.trajectory%%' "
+                                            " UNION ALL "
+                                            " SELECT q.id, q.timestamp, q.question, q.answer, "
+                                            " 1 - (c.embedding <=> %s::vector) AS cosine "
+                                            " FROM qa_embedding_chunks c "
+                                            " JOIN qa_pairs q ON q.id = c.qa_id "
+                                            " WHERE c.embedding IS NOT NULL "
+                                            " AND q.answer IS NOT NULL "
+                                            " AND q.session_id NOT LIKE '%%.trajectory%%'"
+                                            ") SELECT id, timestamp, question, answer, MAX(cosine) AS cosine "
+                                            "FROM qa_hits GROUP BY id, timestamp, question, answer "
+                                            "ORDER BY MAX(cosine) DESC LIMIT %s"
+                                        )
+                                        _qa_params = (_emb_str, _emb_str, _qa_limit)
+                                    else:
+                                        _qa_sql = (
+                                            "SELECT id, timestamp, question, answer, "
+                                            " 1 - (embedding <=> %s::vector) AS cosine "
+                                            "FROM qa_pairs WHERE embedding IS NOT NULL "
+                                            "AND answer IS NOT NULL "
+                                            "AND session_id NOT LIKE '%%.trajectory%%' "
+                                            "ORDER BY embedding <=> %s::vector LIMIT %s"
+                                        )
+                                        _qa_params = (_emb_str, _emb_str, _qa_limit)
+                                    _qa_cur.execute(_qa_sql, _qa_params)
                                     for _qid, _qts, _qq, _qa, _cos in _qa_cur.fetchall():
                                         _sim = float(_cos or 0)
                                         if _sim < 0.35:  # 低阈值 — 语义兜底, 宁可多召回

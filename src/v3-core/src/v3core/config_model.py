@@ -50,6 +50,9 @@ class EmbedConfig:
     """Embedding API 客户端配置. ``endpoint == ''`` 表示未配置向量召回."""
     endpoint: str = ""
     dim: int = 1024
+    max_input_tokens: int = 8192
+    chunk_safety_margin: int = 512
+    tokenizer: str = ""
     api_key: str = ""  # canonical; YAML 既支持 api_key 也支持 apiKey
     proxy: str = ""  # 例如 http://127.0.0.1:10808
     model: str = ""  # 默认空: 必须显式配置, 禁止隐式 fallback 模型

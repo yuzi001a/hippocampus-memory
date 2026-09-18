@@ -450,8 +450,9 @@ class TestBootstrapScript:
         assert "explicit_memories" in ddl
         assert "BEGIN INCLUDED schema/explicit_memories.sql" in ddl
         assert "END INCLUDED schema/explicit_memories.sql" in ddl
-        assert len(includes) == 1
+        assert len(includes) == 2
         assert includes[0].endswith("explicit_memories.sql")
+        assert includes[1].endswith("qa_embedding_chunks.sql")
 
     def test_load_alpha_ddl_is_idempotent(self, bootstrap_mod):
         """Every CREATE uses IF NOT EXISTS; running load twice must not

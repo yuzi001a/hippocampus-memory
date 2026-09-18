@@ -294,6 +294,9 @@ def build_embed_cfg(cfg) -> dict:
         "api_key": api_key,
         "apiKey": api_key,  # 驼峰别名, 下游兼容
         "proxy": proxy,
+        "max_input_tokens": int(raw.get("max_input_tokens") or 8192),
+        "chunk_safety_margin": int(raw.get("chunk_safety_margin") or 512),
+        "tokenizer": raw.get("tokenizer") or model,
         "_profile": profile,
         "_fingerprint": fp,
         "_raw": cfg,
@@ -467,14 +470,31 @@ def call_embedding(
     raise RuntimeError("embedding 调用失败 (无 last_err 上下文)")
 
 
-def embed_batch(texts: list[str], embed_cfg: dict, retries: int = 3) -> list[list[float]]:
+def embed_batch(
+    texts: list[str],
+    embed_cfg: dict,
+    retries: int = 3,
+    *,
+    collision_safe_key: bool = False,
+) -> list[list[float]]:
     """Batch embedding with retries and exponential backoff.
 
     **阶段1 契约**:
     * **禁止** zero-vector 兜底: 重试耗尽 raise 真实错误, 调用方按需 catch.
     * **校验发生在去重/cache 命中前**.
     * 返回值仅包含真实算出的向量; 任何条目失败导致整个 batch 失败 → raise.
-    """
+
+    ``collision_safe_key`` (2026-09-18, v0.2 closing round):
+            默认 ``False`` — 短 QA 文本较短, 旧 ``t[:500]`` key 在短文本上从
+            不产生碰撞, 旧调用方（短 QA, 已有的 ``_flush_pending_qa`` 单文本路径）
+            行为完全等价（保留 byte-identical 输出顺序与向量）。长 QA 路径的
+            chunker 写入器调用 ``embed_batch`` 时**必须**显式传
+            ``collision_safe_key=True``, 让长 chunk 用完整文本作为 key, 避
+            免两个 token-safe chunk 共享 500 字符前缀却被错误合并到同一个
+            provider 请求 / 向量上 (违反 one-chunk-one-vector 契约)。输出
+            顺序按入参 ``texts`` 顺序一一对应, dedup 后顺序映射由 ``idx_map``
+            保持 (不论 key 选择如何, 顺序不变)。
+        """
     import time as _t
 
     if not texts:
@@ -489,12 +509,17 @@ def embed_batch(texts: list[str], embed_cfg: dict, retries: int = 3) -> list[lis
         dim = 1024
     # No placeholder vector is ever allocated; incomplete responses raise below.
 
-    # Deduplicate (按前 500 字符 key)
+    # Deduplicate. collision_safe_key=True uses the FULL text as the dict
+    # key — distinct long chunks that happen to share a 500-char prefix
+    # are now correctly treated as distinct (each gets its own provider
+    # request and its own vector). False preserves the legacy t[:500] key
+    # only for the existing short-QA caller that does not opt in; long
+    # representations MUST pass True (see _flush_pending_qa long path).
     seen: dict[str, int] = {}
     unique: list[str] = []
     idx_map: list[int] = []
     for t in texts:
-        key = t[:500]
+        key = t if collision_safe_key else t[:500]
         if key not in seen:
             seen[key] = len(unique)
             unique.append(t)

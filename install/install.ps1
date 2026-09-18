@@ -446,8 +446,8 @@ if ($rc -eq 0) {
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Cyan
     Write-Host "  1. Restart the Hermes Agent process so the new memory provider takes effect."
-    Write-Host "  2. Verify with: hippocampus doctor --static"
-    Write-Host "  3. Verify a real write+readback with: hippocampus install --skip-smoke false  (already done)"
+    Write-Host "  2. Verify with: hippocampus doctor --full"
+    Write-Host "  3. Optional gated write probe: hippocampus doctor --full --writes"
 } else {
     Write-Host "========================================================" -ForegroundColor Red
     Write-Host "  Hippocampus install: FAILURE (exit $rc)" -ForegroundColor Red

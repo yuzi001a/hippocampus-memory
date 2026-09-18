@@ -135,6 +135,8 @@ CREATE INDEX IF NOT EXISTS qa_pairs_embedding_ivfflat
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/qa_embedding_chunks.sql <<<
+
 -- -----------------------------------------------------------------------------
 -- conversation_stream — per-turn message log (replaces the archived
 -- v3_messages). Evidence: pg_store.insert_message INSERT (session_id, role,

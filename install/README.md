@@ -40,8 +40,8 @@ never double-edits the Hermes config.
 | 4 | `rerank` | Write the `storage.rerank` block (SKIP if no API key) |
 | 5 | `memory LLM` | Write the top-level `llm` block (SKIP if no key) |
 | 6 | `hermes provider` | Edit Hermes' `config.yaml` to set `memory.provider: deep_memory_v3`, timestamped backup first |
-| 7 | `restart persistence hint` | Final reminder to restart Hermes so the provider takes effect |
-| 8 | (not in the block) | End-to-end smoke: write → readback → recall. Disabled with `-SkipSmoke`. |
+| 7 | `restart persistence hint` (install verdict label; advisory reminder) | Reminds you to restart Hermes and run the independent recall proof | `advisory` |
+| 8 | (not in the block) | End-to-end smoke: write → readback → recall. Disabled with `-SkipSmoke`. | `PASS` or an actionable failure |
 
 Every step is reported individually as one of `PASS`, `FAIL`, `SKIP` plus
 a one-line reason. The exit code is `0` only when every required step
@@ -82,15 +82,15 @@ iex (irm https://raw.githubusercontent.com/yuzi001a/hippocampus-memory/main/inst
 
 ## Secrets
 
-API keys and passwords are **never printed** in any output. They are
-redacted to the first 4 characters + `...` in every line that names them,
-including failure messages. The container password is generated locally,
-stored only in `V3CORE_PG_PASSWORD` for the lifetime of the install
-process, and never written to disk.
+API keys and passwords are never printed in installer output. The installer writes the supplied values to
+the active profile `.env` and writes only `${env:...}` references (plus an empty password field) to
+`config.yaml`, so a later Hermes process can resolve the same credentials. On Windows the installer makes
+a best-effort `icacls` user-only ACL change on `.env`; keep the whole profile directory private, back up
+`.env` only through a trusted private backup, and never commit or upload it.
 
-The profile `config.yaml` always contains empty `password: ""` and
-`api_key: ""` fields. The engine reads the real values from
-`V3CORE_PG_PASSWORD` / per-provider environment variables.
+When a key changes, edit the profile `.env` and rerun `hippocampus doctor --full`. A missing or unreadable
+`.env` is reported as an authentication/configuration failure; it is not silently treated as a healthy
+provider.
 
 ---
 
@@ -99,7 +99,7 @@ The profile `config.yaml` always contains empty `password: ""` and
 | Action | Repeated run behaviour |
 | --- | --- |
 | `docker run` a fresh container | If a container named `hippocampus-pg` is already running, the installer reuses it. If it stopped, the installer restarts it. Never creates a duplicate. |
-| Write profile `config.yaml` | If `config.yaml` exists, the installer prints `SKIP` and returns the existing path. Use `--overwrite-config` to force a replace (with timestamped backup). |
+| Write profile `config.yaml` | If `config.yaml` exists, the installer prints `SKIP` and does not edit the live config. It may still leave a timestamped backup created before the no-op check. The lower-level config writer supports an overwrite flag, but the public installer CLI does not expose `--overwrite-config`; edit or back up the profile deliberately before changing it. |
 | Edit Hermes `config.yaml` | The installer writes a timestamped backup (`config.yaml.bak.YYYYMMDD-HHMMSS`) before each edit. When `memory.provider: deep_memory_v3` is already set, the installer prints `SKIP` and writes nothing. |
 | Bootstrap schema (`hippocampus bootstrap`) | The SQL artifact uses `IF NOT EXISTS` everywhere; running twice is a no-op. |
 
@@ -139,16 +139,27 @@ Pass `-RemoveProfile -Yes` to also delete the profile directory.
 
 ---
 
+## How it obtains the wheels
+
+The wrapper first resolves the versioned `v3_core-*.whl` and `v3_hermes_plugin-*.whl` assets from the configured
+GitHub release. If the release-assets request fails, it uses the documented source-tarball fallback and reports
+that fallback explicitly; it does not silently claim that a wheel was verified when it was not.
+
+---
+
 ## Verifying the install
 
-After the verdict block ends with `install: SUCCESS`:
+After the wrapper prints `Hippocampus install: SUCCESS` (the verdict topics themselves are `PASS` / `SKIP` lines):
 
 ```powershell
 # 1. Confirm the engine sees the right resources.
 hippocampus doctor --static
 
-# 2. Confirm a full lifecycle on the active profile.
-hippocampus doctor        # resolves the active config; non-static; redacted summary
+# 2. Run the full read-only install contract (16 checks plus runtime provenance).
+hippocampus doctor --full
+
+# 3. Add the gated write probe only when you explicitly want it.
+hippocampus doctor --full --writes
 ```
 
 The smoke test already ran during install (unless `-SkipSmoke` was
@@ -167,7 +178,7 @@ A direct recall probe should find it; you can also run
 | `SKIP: memory LLM: — no llm_key supplied` | The installer was run without `-LlmKey` | Re-run with `-LlmKey 'sk-...'` |
 | `port 55432 is already in use by something that is NOT a pgvector container` | A different process bound the port | Stop that process or pass `-PgPort <other>` |
 | `V3CORE_PG_PASSWORD is not set` | Smoke ran outside the installer's env | Re-run the installer; it sets the env var for the install process |
-| `existing_install: True` on a fresh system | A previous profile directory is being reused | Re-run; the installer will SKIP the write by default (use `--overwrite-config` to replace) |
+| `existing_install: True` on a fresh system | A previous profile directory is being reused | Re-run; the installer will SKIP the live config write by default. Make a deliberate backup/edit before changing it; the public CLI does not expose `--overwrite-config`. |
 
 ---
 

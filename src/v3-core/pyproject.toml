@@ -39,6 +39,8 @@ dependencies = [
     # environments where the C extension is unavailable, but the
     # fallback does not meet the long-query SLO.
     "pyahocorasick>=2.3.0",
+    # Token-aware long-QA representation; avoids provider-side truncation.
+    "tokenizers>=0.20.0",
 ]
 
 [project.optional-dependencies]
@@ -79,6 +81,8 @@ packages = {find = {where = ["src"]}}
     "*.yaml",
     "schema/alpha_bootstrap.sql",
     "schema/explicit_memories.sql",
+    "schema/qa_embedding_chunks.sql",
+    "schema/upgrade_v0_2.sql",
 ]
 
 [tool.pytest.ini_options]
