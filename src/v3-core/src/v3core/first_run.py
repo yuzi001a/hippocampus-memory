@@ -1326,26 +1326,27 @@ def smoke_write_recall(
     pool = PgPool(connect=_connect, max_connections=2, min_connections=0,
                   connect_timeout=5)
 
-    # Embedder — when embed is not configured we still want the smoke to
-    # pass on the durable path (writer + readback), so we use a *no-op*
-    # embedder that records embedding_ok=False but never blocks the write.
+    # Embedder — the install smoke must exercise the same real provider path
+    # that a first user will use; a no-op vector would make a false PASS.
     embed_cfg: dict | None = None
     if cfg.embed and cfg.embed.endpoint and cfg.embed.api_key:
         embed_cfg = cfg.embed.to_legacy_dict()
         result["embedding_ok"] = True
     else:
-        embed_cfg = None
+        result["embedding_ok"] = False
+        result["error"] = "embedding provider is not configured; refusing degraded smoke"
+        _print(f"FAIL: {result['error']}", out)
+        return result
 
-    # Inject an embedder that records whether embed was actually attempted.
+    from v3core.embedding import embed_batch
     embed_call_count = {"n": 0}
 
     def _maybe_embed(text: str, _cfg: dict) -> list[float]:
         embed_call_count["n"] += 1
-        # Real embedding would call v3core.embedding.call_embedding here.
-        # We do NOT do that in the smoke — the smoke verifies the durable
-        # write path; embedding_ok is reported separately from the configured
-        # block, not from a live call.
-        return []
+        vectors = embed_batch([text], _cfg)
+        if not vectors or not vectors[0]:
+            raise RuntimeError("embedding provider returned an empty vector")
+        return [float(x) for x in vectors[0]]
 
     writer = ActiveMemoryWriter(
         pool=pool, config=cfg, embed_cfg=embed_cfg,
@@ -1380,15 +1381,16 @@ def smoke_write_recall(
     try:
         with conn2.cursor() as cur:
             cur.execute(
-                "SELECT content FROM public.explicit_memories "
+                "SELECT content, embedding IS NOT NULL "
+                "FROM public.explicit_memories "
                 "WHERE memory_id = %s",
                 (write_res.memory_id,),
             )
             row = cur.fetchone()
-        if not row or row[0] != marker_text:
+        if not row or row[0] != marker_text or row[1] is not True:
             result["error"] = (
-                f"readback mismatch: got {row[0] if row else None!r}, "
-                f"expected {marker_text!r}"
+                f"readback mismatch or NULL embedding: got {row!r}, "
+                f"expected content={marker_text!r}, embedding=true"
             )
             _print(f"FAIL: {result['error']}", out)
             return result
@@ -1415,7 +1417,7 @@ def smoke_write_recall(
             limit=5,
             config=cfg,
             core=None,
-            pg=None,
+            pg=pool,
             fmt="list",
         ) or []
         # Inspect either the engine's hit dict OR the legacy row shape for
