@@ -63,3 +63,7 @@ scripts/
 compression_results/
 delta_run_state.json
 snapshot_*/
+
+# uv lockfile — this project does not use uv; the file only appears when a
+# developer runs `uv run --project` for ad-hoc tooling. It is not a build input.
+uv.lock
