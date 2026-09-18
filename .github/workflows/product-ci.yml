@@ -148,6 +148,14 @@ jobs:
       #     V3CORE_PG_PASSWORD -> legacy storage.pg.password env-fills
       #     contract; uses [REDACTED] placeholders, no real secrets.
       #
+      #   test_production_upgrade_contract.py
+      #     Production upgrade deployment contract — plan_sha256 binding
+      #     (target + SQL + artifacts), destructive-SQL scan refusal,
+      #     two-part production write confirmation
+      #     (--allow-production-write + --confirm-plan-sha), zero-DDL
+      #     dry-run, secret-free plan output. Fully offline: psycopg2 is
+      #     faked in-memory; no PG, no provider, no secrets.
+      #
       #   test_g5b_evaluator.py
       #     Lane A deterministic pool contract, failure taxonomy,
       #     Lane B safety guard (reserved port/dbname/host, env-only,
@@ -206,7 +214,8 @@ jobs:
               tests/test_alpha_bootstrap_contract.py \
               tests/test_config_pg_password_env.py \
               tests/test_topic_radar.py \
-              tests/test_e1_topic_radar_contract.py
+              tests/test_e1_topic_radar_contract.py \
+              tests/test_production_upgrade_contract.py
 
       - name: focused-tests-g5b-evaluator
         working-directory: src/v3-core

@@ -16,6 +16,15 @@ Subcommands:
     ``::1`` AND the database is ``v3embeddings``, the target is
     refused. There is no bypass flag — secrets never appear on argv.
 
+  * ``upgrade`` — additive existing-install closure (v0.2). Dry-run
+    emits a canonical plan (exact SQL + plan_sha256 + destructive
+    scan + transaction-boundary check) without writing DDL. Apply is
+    refused against the production boundary by default; an apply
+    against the production boundary requires BOTH
+    ``--allow-production-write`` AND ``--confirm-plan-sha <PLAN_SHA>``
+    (a two-part confirmation; the sha comes from a matching dry-run).
+    There is NO ``--force`` / ``--unsafe`` / ``--no-guard`` shortcut.
+
 Design contract (frozen by Gate 0/1):
   * Does NOT modify any runtime provider / observer / recall / source
     code paths. Pure CLI + config read + packaged-resource load.
@@ -730,6 +739,309 @@ def _enforce_production_boundary(parsed: dict[str, Any]) -> None:
         )
 
 
+def _is_production_boundary(parsed: dict[str, Any]) -> bool:
+    """Return ``True`` if the parsed DSN targets the production boundary.
+
+    Mirrors the two OR-ed rules used by ``_enforce_production_boundary``:
+      1. Port is one of ``PROD_PORTS``.
+      2. Host is loopback (``PROD_LOOPBACK_HOSTS``) AND database is the
+         local production database ``PROD_LOCAL_DB``.
+
+    Pure predicate — never raises. Used by the upgrade subcommand to
+    distinguish "default deny" from "explicit two-part confirmation"
+    paths without coupling to the SystemExit side-effect of
+    ``_enforce_production_boundary``.
+    """
+    try:
+        port = int(parsed.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if port in PROD_PORTS:
+        return True
+    host = str(parsed.get("host", "")).lower().strip("[]")
+    db = str(parsed.get("database", ""))
+    if host in PROD_LOOPBACK_HOSTS and db == PROD_LOCAL_DB:
+        return True
+    return False
+
+
+def _normalize_plan_target(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Return a credential-free, canonical projection of the parsed DSN
+    suitable for embedding into a public plan document.
+
+    Output contains only ``host`` / ``port`` / ``database``. The host is
+    normalized: stripped of surrounding whitespace, lowercased, and
+    unbracketed (``[::1]`` → ``::1``). The port is coerced to ``int``;
+    a non-integer / missing port falls back to ``0``. Never raises.
+
+    Critical contract: NEVER include user / password / any credential
+    field — the plan is the audit artifact operators compare against,
+    and a leaked password would be a security regression.
+    """
+    host_raw = str(parsed.get("host", "") or "")
+    host = host_raw.strip().lower().strip("[]")
+    port_raw = parsed.get("port", 0)
+    try:
+        port = int(port_raw)
+    except (TypeError, ValueError):
+        port = 0
+    database = parsed.get("database", "")
+    return {"host": host, "port": port, "database": database}
+
+
+def _canonical_json_sha256(obj: Any) -> str:
+    """Stable sha256 of a JSON-serializable object.
+
+    Uses ``json.dumps(obj, sort_keys=True, separators=(",", ":"),
+    ensure_ascii=False)`` → UTF-8 → sha256 hex. The sort + tight
+    separator + ``ensure_ascii=False`` combo guarantees the hash
+    depends only on the logical content, not on key ordering or
+    Unicode escape policy.
+    """
+    text = json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Strip ``/* ... */`` (non-nested) and ``-- ...`` line comments.
+
+    Each comment is replaced by a single space (preserves token
+    boundaries). ``--`` only counts at the start of a logical token
+    (preceded by whitespace or start-of-string) so it does not eat
+    substrings inside identifiers.
+    """
+    # /* ... */ block comments — non-nested (single pass).
+    out = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    # -- line comments to end-of-line.
+    out = re.sub(r"(?m)(^|[\s])--[^\n]*", lambda m: m.group(1) + " ", out)
+    return out
+
+
+def _strip_sql_strings(sql: str) -> str:
+    """Replace single-quoted string bodies with ``''`` (preserves the
+    paired-empty-quote SQL escape). Handles ``''`` escapes inside the
+    string literal. Double-quoted identifiers are left intact.
+
+    State machine: walk the text character by character; on a single
+    quote, consume until the matching closing single quote, collapsing
+    any ``''`` escape back to ``''`` and replacing everything else
+    with empty.
+    """
+    out_parts: list[str] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            # start of a single-quoted string
+            out_parts.append("''")
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    # check escape ''
+                    if i + 1 < n and sql[i + 1] == "'":
+                        out_parts.append("''")
+                        i += 2
+                        continue
+                    # end of string
+                    out_parts.append("'")
+                    i += 1
+                    break
+                # skip string body char
+                i += 1
+            continue
+        out_parts.append(ch)
+        i += 1
+    return "".join(out_parts)
+
+
+# Statement whitelist patterns (re.I). See A6 in the dispatch.
+_SQL_STMT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.I)
+    for p in (
+        r"^BEGIN$",
+        r"^COMMIT$",
+        r"^CREATE\s+EXTENSION\s+IF\s+NOT\s+EXISTS\s+\S+$",
+        r"^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+[\w.\"]+\s*\(",
+        r"^CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+[\w.\"]+\s+ON\s+[\w.\"]+\s+",
+        r"^ALTER\s+TABLE\s+[\w.\"]+\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+[\w\"]+\s+",
+        r"^INSERT\s+INTO\s+[\w.\"]+\s*\(.+\)\s*VALUES\s*\(.+\)\s+ON\s+CONFLICT\s+\(.+\)\s+DO\s+NOTHING$",
+    )
+)
+
+# Forbidden keywords (case-insensitive, word-boundary). See A6.
+_FORBIDDEN_KEYWORDS: tuple[str, ...] = (
+    "DROP",
+    "TRUNCATE",
+    "DELETE",
+    "UPDATE",
+    "MERGE",
+    "GRANT",
+    "REVOKE",
+    "COPY",
+    "RENAME",
+    "REPLACE",
+    "ALTER COLUMN",
+    "ALTER SYSTEM",
+)
+
+
+def _normalize_sql_stmt(stmt: str) -> str:
+    """Collapse whitespace in a SQL statement for whitelist matching."""
+    return re.sub(r"\s+", " ", stmt.strip())
+
+
+def _scan_destructive_sql(sql: str) -> dict[str, Any]:
+    """Static destructive-scan + whitelist check on the combined SQL.
+
+    Returns ``{"clean": bool, "violations": [...], "statement_count": int}``.
+
+    Two-stage analysis, both over the comment-stripped, string-stripped
+    SQL (so identifiers / string literals cannot smuggle a forbidden
+    keyword):
+
+      1. Forbidden-keyword scan (word-boundary, case-insensitive).
+         Each hit produces a violation with a 40-char context window
+         around the match. ``ON DELETE`` / ``ON UPDATE`` (foreign-key
+         referential actions inside CREATE TABLE) are stripped before
+         the scan so they don't false-positive the standalone
+         ``DELETE`` / ``UPDATE`` keyword detector.
+      2. Whitelist scan — every non-empty statement must match one of
+         the additive patterns in ``_SQL_STMT_PATTERNS``. Anything else
+         is an ``unexpected_statement`` violation.
+
+    ``statement_count`` is the number of non-empty statements seen.
+    """
+    cleaned = _strip_sql_strings(_strip_sql_comments(sql))
+    # Strip referential-action clauses first (FK actions like
+    # ``ON DELETE CASCADE``); these are not standalone DELETE/UPDATE
+    # statements. Replace with a single space to preserve token boundaries.
+    cleaned = re.sub(
+        r"(?i)\bON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|RESTRICT|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION)\b",
+        " ",
+        cleaned,
+    )
+    violations: list[dict[str, str]] = []
+
+    # 1) Forbidden keyword scan.
+    for kw in _FORBIDDEN_KEYWORDS:
+        # word-boundary; for multi-word keys, use a non-capturing group
+        # and treat internal whitespace flexibly.
+        pattern = r"(?i)(?<!\w)(" + re.escape(kw).replace(r"\ ", r"\s+") + r")(?!\w)"
+        for m in re.finditer(pattern, cleaned):
+            start, end = m.span()
+            ctx_start = max(0, start - 20)
+            ctx_end = min(len(cleaned), end + 40)
+            snippet = cleaned[ctx_start:ctx_end].strip()
+            violations.append({
+                "kind": "forbidden_keyword",
+                "detail": f"{kw}: {snippet[:80]}",
+            })
+
+    # 2) Statement split + whitelist check.
+    raw_stmts = [s for s in cleaned.split(";")]
+    non_empty: list[str] = [s for s in raw_stmts if s.strip()]
+    for stmt in non_empty:
+        normalized = _normalize_sql_stmt(stmt)
+        if not normalized:
+            continue
+        if any(p.match(normalized) for p in _SQL_STMT_PATTERNS):
+            continue
+        violations.append({
+            "kind": "unexpected_statement",
+            "detail": normalized[:120],
+        })
+
+    return {
+        "clean": not violations,
+        "violations": violations,
+        "statement_count": len(non_empty),
+    }
+
+
+def _check_transaction_boundary(sql: str) -> dict[str, Any]:
+    """Verify the combined SQL is one atomic BEGIN / COMMIT block.
+
+    Returns ``{single_transaction, begin_count, commit_count,
+    first_statement_is_begin, last_statement_is_commit}``.
+
+    ``single_transaction`` is True iff: exactly 1 BEGIN, exactly 1
+    COMMIT, the first non-empty statement is BEGIN, and the last
+    non-empty statement is COMMIT.
+    """
+    cleaned = _strip_sql_strings(_strip_sql_comments(sql))
+    raw_stmts = [s for s in cleaned.split(";")]
+    non_empty: list[str] = [_normalize_sql_stmt(s) for s in raw_stmts if s.strip()]
+    begin_count = sum(1 for s in non_empty if s.upper() == "BEGIN")
+    commit_count = sum(1 for s in non_empty if s.upper() == "COMMIT")
+    first_is_begin = bool(non_empty) and non_empty[0].upper() == "BEGIN"
+    last_is_commit = bool(non_empty) and non_empty[-1].upper() == "COMMIT"
+    single = (
+        begin_count == 1
+        and commit_count == 1
+        and first_is_begin
+        and last_is_commit
+    )
+    return {
+        "single_transaction": single,
+        "begin_count": begin_count,
+        "commit_count": commit_count,
+        "first_statement_is_begin": first_is_begin,
+        "last_statement_is_commit": last_is_commit,
+    }
+
+
+def _parse_expected_objects(sql: str) -> dict[str, Any]:
+    """Extract the canonical objects the upgrade is expected to add.
+
+    Operates on the comment-stripped SQL WITH strings preserved
+    (strings cannot introduce extra CREATE / ALTER statements because
+    they are quoted, but we still strip comments so the regexes do not
+    see commented-out lines).
+
+    Returns:
+      * ``tables`` — sorted unique list of
+        ``CREATE TABLE IF NOT EXISTS <name>`` targets.
+      * ``added_columns`` — ``{table: [cols...]}`` from
+        ``ALTER TABLE <t> ADD COLUMN IF NOT EXISTS <col>`` matches,
+        sorted within each table.
+      * ``schema_versions_rows`` — list of captured group-1 values
+        from the ``INSERT INTO [schema_versions] (...) VALUES ('X'...)``
+        pattern (single-quoted string in column-1 position).
+    """
+    cleaned = _strip_sql_comments(sql)
+    tables: set[str] = set()
+    for m in re.finditer(
+        r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([\w.\"]+)",
+        cleaned,
+        flags=re.I,
+    ):
+        tables.add(m.group(1))
+    added: dict[str, list[str]] = {}
+    for m in re.finditer(
+        r"ALTER\s+TABLE\s+([\w.\"]+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+([\w\"]+)",
+        cleaned,
+        flags=re.I,
+    ):
+        tbl = m.group(1)
+        col = m.group(2)
+        added.setdefault(tbl, []).append(col)
+    added_sorted = {t: sorted(set(cols)) for t, cols in added.items()}
+    schema_versions_rows: list[str] = []
+    for m in re.finditer(
+        r"INSERT\s+INTO\s+\S*schema_versions\S*\s*\([^)]*\)\s*VALUES\s*\('([^']+)'",
+        cleaned,
+        flags=re.I,
+    ):
+        schema_versions_rows.append(m.group(1))
+    return {
+        "tables": sorted(tables),
+        "added_columns": added_sorted,
+        "schema_versions_rows": schema_versions_rows,
+    }
+
+
 def _bootstrap_resolve_dsn(args: argparse.Namespace) -> dict[str, Any]:
     """Resolve the explicit bootstrap target DSN.
 
@@ -891,30 +1203,36 @@ def _bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# upgrade — additive existing-install closure (v0.2)
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# upgrade — additive existing-install closure (v0.2.1)
+# -----------------------------------------------------------------------
 #
-# Contract (frozen — see existing_install_audit.json migration_contract):
+# Contract (see existing_install_audit.json migration_contract):
 #   * Read-only path: ``hippocampus upgrade --target <DSN> --dry-run`` —
-#     connects (one SELECT, no writes), reports every missing additive
-#     object (public.explicit_memories, public.schema_versions, the
-#     qa_embedding_chunks sidecar table if the package ships it),
-#     never executes DDL. Exit code 0 when the install is fully covered,
-#     1 when additions would happen (informational, NOT an error), 2 on
-#     hard error / refusal.
+#     connects (one SELECT, no writes), emits a canonical plan
+#     (exact combined SQL + plan_sha256 + destructive scan +
+#     transaction-boundary check), reports every missing additive
+#     object, never executes DDL. Exit code 0 when the install is
+#     fully covered, 1 when additions would happen (informational),
+#     2 on hard error / refusal / destructive SQL detected.
 #   * Apply path: ``hippocampus upgrade --target <DSN> --apply`` —
-#     transactional, idempotent, refuses production by default. There is
-#     NO bypass flag in this command — operators must point at a
-#     non-production DSN exactly the same way `bootstrap` requires.
+#     transactional, idempotent, refuses production by default. The
+#     apply path builds the same canonical plan and re-verifies the
+#     plan_sha when one is supplied via --confirm-plan-sha.
+#   * Production-boundary apply (port 5433 or loopback+v3embeddings)
+#     requires BOTH ``--allow-production-write`` AND
+#     ``--confirm-plan-sha <PLAN_SHA>`` together — a two-part
+#     confirmation; the sha comes from a matching dry-run. There is
+#     no bypass shortcut in this command.
 #   * No DROP / TRUNCATE / DELETE / data rewrite — enforced by the
-#     static check in `test_existing_install_upgrade_contract.py`
-#     (regex against the packaged SQL files). The upgrade SQL body is
-#     `upgrade_v0_2.sql`, which is additive only.
-#   * The qa_embedding_chunks artifact (child-A-owned) is consumed when
-#     present in the installed package; the upgrade DOES NOT silently
-#     succeed when it is missing on a v0.2 install — dry-run reports the
-#     missing artifact and apply exits 2.
+#     static check in `_scan_destructive_sql` on the combined SQL.
+#     The upgrade SQL body is `upgrade_v0_2.sql`, which is additive
+#     only; any non-additive statement in the combined body makes
+#     the plan dirty and the apply path refuses (exit 2, zero DDL).
+#   * The qa_embedding_chunks artifact (child-A-owned) is consumed
+#     when present in the installed package; the upgrade DOES NOT
+#     silently succeed when it is missing on a v0.2 install —
+#     dry-run reports the missing artifact and apply exits 2.
 #
 # The upgrade is intentionally a strict subset of alpha_bootstrap.sql:
 # re-running bootstrap after upgrade is safe and a no-op for every
@@ -1141,50 +1459,42 @@ def _upgrade_resolve_dsn(args: argparse.Namespace) -> dict[str, Any]:
     Requires an explicit ``--target`` (or ``--dsn`` /
     ``V3CORE_UPGRADE_DSN``).
 
-    Production-boundary policy (frozen — see existing_install_audit.json):
+    Production-boundary policy (v0.2.1 — two-part confirmation contract):
 
-      * ``--apply`` ALWAYS refuses the production boundary
-        unconditionally (port 5433 or loopback+v3embeddings). No
-        flag can override this — production writes are never
-        auto-allowed by this command.
-
-      * ``--dry-run`` (the default) ALSO refuses by default; the
-        doctor-issued copy-paste command must be safe by default.
+      * ``--apply`` refuses the production boundary by default. An
+        operator MAY authorize a production-boundary apply by passing
+        BOTH ``--allow-production-write`` AND ``--confirm-plan-sha
+        <PLAN_SHA>`` together. The two flags MUST appear together;
+        one alone is a hard error (the operator is forced to read the
+        plan from a previous dry-run, hash it, and pass the hash back
+        in). No ``--force`` / ``--unsafe`` / ``--no-guard`` shortcut
+        exists.
 
       * ``--dry-run --allow-production-read`` is the single explicit
         opt-in for a SELECT-only diagnostic against a production
         target. The flag is unmistakably named (the word
         "production" appears in the literal), applies ONLY to
         dry-run, and is logged in the dry-run output so the audit
-        trail shows the operator chose it. The apply path ignores
-        this flag entirely — passing it to ``--apply`` is a no-op,
-        the production boundary remains enforced.
+        trail shows the operator chose it. The apply path never
+        honors the read flag for authorization — passing it to
+        ``--apply`` does not bypass the two-part confirmation.
+
+      * Without ``--allow-production-write``, the apply path
+        continues to refuse the production boundary the same way it
+        always has (port 5433 or loopback+v3embeddings).
 
     The production boundary check is implemented by
-    ``_enforce_production_boundary`` (port 5433 / loopback +
-    v3embeddings). On the read path we deliberately bypass it via
-    ``_parse_dsn`` directly (no ``_enforce_production_boundary``
-    call) when ``--allow-production-read`` is set, but we still
-    parse the DSN strictly so a malformed target still fails 2.
+    ``_is_production_boundary`` (predicate) /
+    ``_enforce_production_boundary`` (raise on match).
     """
     explicit = (args.target or args.dsn or "").strip()
     env_dsn = os.environ.get("V3CORE_UPGRADE_DSN", "").strip()
     allow_prod_read = bool(getattr(args, "allow_production_read", False))
+    allow_prod_write = bool(getattr(args, "allow_production_write", False))
+    confirm_plan_sha = (
+        getattr(args, "confirm_plan_sha", None) or ""
+    ).strip().lower()
     is_apply = bool(getattr(args, "apply", False))
-    # A defense-in-depth check: the apply path NEVER honors
-    # --allow-production-read. If an operator passes both --apply
-    # and --allow-production-read, the production boundary is still
-    # enforced (we just ignore the flag silently so the operator
-    # gets the same refusal they would have gotten without it).
-    if is_apply and allow_prod_read:
-        # Surface the fact that we ignored the flag — without this
-        # the operator could think the read-only opt-in bypassed the
-        # write guard, which it did not.
-        LOG.warning(
-            "upgrade --apply ignores --allow-production-read: "
-            "production writes are unconditionally refused."
-        )
-        allow_prod_read = False
     parsed: dict[str, Any] | None = None
     if explicit:
         parsed = _parse_dsn(explicit)
@@ -1196,18 +1506,45 @@ def _upgrade_resolve_dsn(args: argparse.Namespace) -> dict[str, Any]:
             "V3CORE_UPGRADE_DSN) is required for upgrade. Refusing "
             "to run without an explicit connection target."
         )
-    if not allow_prod_read:
-        # Default path: enforce the production boundary the same way
-        # bootstrap does.
-        _enforce_production_boundary(parsed)
+    # Original password fallback stays as-is (post-parse, pre-judgment).
     if not parsed.get("password"):
         parsed["password"] = os.environ.get("PGPASSWORD", "") or ""
-    # Annotate the parsed DSN with the read-only-allowed flag so the
-    # downstream dry-run output can show the operator what they
-    # opted into. The annotation NEVER reaches any apply-side
-    # decision path.
-    if allow_prod_read and not is_apply:
+    is_prod = _is_production_boundary(parsed)
+    if is_apply:
+        give_write, give_sha = allow_prod_write, bool(confirm_plan_sha)
+        if give_write != give_sha:
+            raise SystemExit(
+                "ERROR: --allow-production-write and --confirm-plan-sha must be "
+                "provided together (production write is a two-part confirmation). "
+                "Nothing was written."
+            )
+        if is_prod and not give_write:
+            raise SystemExit(
+                "ERROR: refusing production-boundary target in apply mode. "
+                "Production apply requires BOTH --allow-production-write AND "
+                "--confirm-plan-sha <PLAN_SHA> (from a production dry-run). "
+                "Nothing was written."
+            )
+        if allow_prod_read:
+            LOG.warning(
+                "upgrade --apply ignores --allow-production-read: "
+                "production writes are not authorized by the read flag."
+            )
+        if give_write:
+            parsed["_allow_production_write"] = True
+            parsed["_confirm_plan_sha"] = confirm_plan_sha
+        parsed["_is_production_target"] = is_prod
+        return parsed
+    # dry-run path
+    if allow_prod_read:
         parsed["_allow_production_read"] = True
+    else:
+        _enforce_production_boundary(parsed)
+    if allow_prod_write or confirm_plan_sha:
+        LOG.warning(
+            "--allow-production-write/--confirm-plan-sha are apply-mode flags; "
+            "ignored in dry-run mode."
+        )
     return parsed
 
 
@@ -1252,6 +1589,17 @@ def _upgrade_load_combined_sql(
         "expanded_bytes": len(expanded.encode("utf-8")),
         "include_expanded": expanded != upgrade_text,
     }
+    # A9: explicit_memories artifact sha256 for the canonical plan.
+    # Load failure (FileNotFoundError) records None — the upgrade
+    # body itself would have failed earlier in that case, so this is
+    # a defensive null-state marker for plan consumers.
+    try:
+        explicit_text = _package_sql("explicit_memories.sql")
+        out["explicit_memories_sql_sha256"] = hashlib.sha256(
+            explicit_text.encode("utf-8")
+        ).hexdigest()
+    except FileNotFoundError:
+        out["explicit_memories_sql_sha256"] = None
     if not include_qa_chunks_artifact:
         return (expanded, out)
     present, qa_text, qa_sha = _package_optional_sql(
@@ -1310,6 +1658,86 @@ def _upgrade_load_combined_sql(
     return (expanded, out)
 
 
+def _upgrade_build_plan(
+    parsed: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
+    """Build the canonical upgrade plan for ``parsed``.
+
+    Returns ``(plan, meta, sql_text)``:
+
+      * ``plan`` — full canonical plan dict with a stable ``plan_sha256``,
+        or ``None`` when the combined SQL could not be loaded.
+      * ``meta`` — the raw meta dict from ``_upgrade_load_combined_sql``
+        (always populated; on load failure it carries ``{"error", "applied": False}``).
+      * ``sql_text`` — the exact bytes that would be applied; ``None`` on
+        load failure.
+
+    The plan is deterministic: no timestamps, row counts, or random
+    values — only the upgrade body, the live schema probe, and the
+    distributable artifacts. Two plans with the same inputs hash the
+    same.
+    """
+    try:
+        sql_text, sql_meta = _upgrade_load_combined_sql(
+            include_qa_chunks_artifact=True
+        )
+    except Exception as e:  # noqa: BLE001
+        return (None, {"error": _safe_repr(e), "applied": False}, None)
+    meta: dict[str, Any] = dict(sql_meta)
+    if not sql_text:
+        return (None, meta, None)
+    # Reuse one probe pass for pre_state — three calls would multiply
+    # the round-trip cost on real PG.
+    table_presence = _upgrade_table_presence(parsed)
+    scan = _scan_destructive_sql(sql_text)
+    boundary = _check_transaction_boundary(sql_text)
+    expected = _parse_expected_objects(sql_text)
+    pre_state = {
+        "missing_required_tables": [
+            t for t in _UPGRADE_REQUIRED_TABLES if not table_presence.get(t)
+        ],
+        "missing_required_columns": _upgrade_required_column_diff(parsed),
+        "qa_embedding_chunks_table_present": bool(
+            table_presence.get("qa_embedding_chunks")
+        ),
+        "schema_versions_v0_2": _upgrade_schema_version_row(parsed),
+    }
+    plan: dict[str, Any] = {
+        "plan_version": 1,
+        "schema_upgrade_version": (
+            expected["schema_versions_rows"][0]
+            if expected["schema_versions_rows"]
+            else None
+        ),
+        "target": _normalize_plan_target(parsed),
+        "distribution": {
+            "name": "v3-core",
+            "version": _distribution_version() or "unknown",
+        },
+        "artifacts": {
+            "upgrade_v0_2.sql": sql_meta.get("upgrade_v0_2_sql_sha256"),
+            "explicit_memories.sql": sql_meta.get(
+                "explicit_memories_sql_sha256"
+            ),
+            "qa_embedding_chunks.sql": sql_meta.get(
+                "qa_embedding_chunks_sql_sha256"
+            ),
+        },
+        "combined_sql": {
+            "bytes": len(sql_text.encode("utf-8")),
+            "sha256": hashlib.sha256(
+                sql_text.encode("utf-8")
+            ).hexdigest(),
+        },
+        "destructive_scan": scan,
+        "transaction_boundary": boundary,
+        "pre_state": pre_state,
+        "expected_objects_after_apply": expected,
+    }
+    plan["plan_sha256"] = _canonical_json_sha256(plan)
+    return (plan, meta, sql_text)
+
+
 def _upgrade_dry_run(args: argparse.Namespace) -> int:
     """Read-only upgrade dry-run. Connects with one SELECT per table,
     reports every missing additive object, never executes DDL.
@@ -1317,7 +1745,12 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
     Exit codes:
       0 — fully covered, upgrade would be a no-op
       1 — additions would happen (informational)
-      2 — hard error / refusal / DSN parse failure
+      2 — hard error / refusal / DSN parse failure / destructive SQL
+
+    When ``--plan-out`` is passed, write the full canonical plan
+    (including the exact combined SQL) to that file path before
+    printing JSON. When ``--show-sql`` is passed, append the exact
+    SQL body after the JSON output, framed by sentinel markers.
     """
     try:
         parsed = _upgrade_resolve_dsn(args)
@@ -1327,12 +1760,36 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
     except ValueError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
-    table_presence = _upgrade_table_presence(parsed)
-    column_diff = _upgrade_required_column_diff(parsed)
-    schema_version = _upgrade_schema_version_row(parsed)
-    chunk_present, _, chunk_sha = _package_optional_sql(
-        "qa_embedding_chunks.sql"
-    )
+    # Build the canonical plan first — it re-runs the schema probes,
+    # so we reuse its findings to populate the legacy fields below
+    # rather than calling each probe a second time.
+    plan, plan_meta, plan_sql_text = _upgrade_build_plan(parsed)
+    if plan is not None:
+        pre = plan["pre_state"]
+        # pre_state.missing_required_columns has shape {table: [cols...]}
+        table_presence = {
+            t: (t not in pre["missing_required_tables"])
+            for t in _UPGRADE_REQUIRED_TABLES + _UPGRADE_OPTIONAL_TABLES
+        }
+        column_diff = pre["missing_required_columns"]
+        schema_version = pre["schema_versions_v0_2"]
+        # Mark the qa_embedding_chunks table from the live probe.
+        table_presence["qa_embedding_chunks"] = bool(
+            pre["qa_embedding_chunks_table_present"]
+        )
+        chunk_present = bool(plan["artifacts"].get("qa_embedding_chunks.sql"))
+        chunk_sha = plan["artifacts"].get("qa_embedding_chunks.sql")
+        scan_clean = bool(plan["destructive_scan"]["clean"])
+    else:
+        # Plan build failed — fall back to independent probes for the
+        # legacy fields so the operator still sees the gap surface.
+        table_presence = _upgrade_table_presence(parsed)
+        column_diff = _upgrade_required_column_diff(parsed)
+        schema_version = _upgrade_schema_version_row(parsed)
+        chunk_present, _, chunk_sha = _package_optional_sql(
+            "qa_embedding_chunks.sql"
+        )
+        scan_clean = False
     missing_required = [
         t for t in _UPGRADE_REQUIRED_TABLES if not table_presence.get(t)
     ]
@@ -1351,6 +1808,7 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
         f":{redacted_target.get('port','')}/{redacted_target.get('database','')}"
         " --apply"
     )
+    plan_sha = plan["plan_sha256"] if plan else None
     out: dict[str, Any] = {
         "command": "upgrade",
         "mode": "dry-run",
@@ -1369,40 +1827,96 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
             or missing_columns_total > 0
             or not schema_version.get("present")
         ),
-        "recommended_commands": {
-            "dry_run": cmd_dry_run,
-            "apply": cmd_apply,
-        },
+        "plan": plan,
+        "plan_sha256": plan_sha,
     }
-    # Surface the explicit opt-in so the audit trail shows the
-    # operator chose to point at production. Without this annotation
-    # the recommended_commands block would always advertise a
-    # production-unusable dry-run, which is the exact bug the user
-    # flagged.
-    if parsed.get("_allow_production_read"):
-        out["allow_production_read"] = True
-        # Replace the recommended apply command with an
-        # unambiguous copy-paste. The apply path NEVER accepts
-        # production (see _upgrade_resolve_dsn), so the recommended
-        # apply is wrapped in a "DO NOT RUN ON PRODUCTION" prefix.
+    if plan is not None:
+        out["final_combined_sql_sha256"] = plan["combined_sql"]["sha256"]
+        out["final_combined_sql_bytes"] = plan["combined_sql"]["bytes"]
+    else:
+        out["plan_error"] = plan_meta.get("error")
+    # Recommended commands — production vs non-production target.
+    is_prod = _is_production_boundary(parsed)
+    plan_sha_literal = plan_sha if plan_sha else "<PLAN_SHA>"
+    if is_prod or parsed.get("_allow_production_read"):
+        # Production dry-run: the apply path requires two-part confirmation.
+        # The plan_sha in the recommendation is the actual sha from this
+        # run so the operator can copy-paste the apply verbatim.
+        cmd_apply_confirm = (
+            f"{cmd_apply} --allow-production-write "
+            f"--confirm-plan-sha {plan_sha_literal}"
+        )
         out["recommended_commands"] = {
             "dry_run": (
                 f"{cmd_dry_run} --allow-production-read "
                 "(running now — production SELECT only)"
             ),
-            "apply": (
-                "DO NOT RUN ON PRODUCTION. Apply is unconditionally "
-                "refused against the production boundary. "
-                f"Use a non-production target DSN with: {cmd_apply}"
+            "apply": cmd_apply_confirm,
+        }
+    else:
+        out["recommended_commands"] = {
+            "dry_run": cmd_dry_run,
+            "apply": cmd_apply,
+            "apply_with_plan_confirm": (
+                f"{cmd_apply} --allow-production-write "
+                f"--confirm-plan-sha {plan_sha_literal}"
             ),
         }
+    if parsed.get("_allow_production_read"):
+        out["allow_production_read"] = True
     if chunk_artifact_missing:
         out["warning"] = (
             "qa_embedding_chunks.sql artifact is NOT packaged in this "
             "v3-core install. Apply mode will refuse to run; rebuild the "
             "child-A artifact and reinstall before applying."
         )
+    # Plan-out side effect (must run before stdout so a write failure
+    # aborts the operator-friendly output rather than hiding it after).
+    plan_out_path = getattr(args, "plan_out", None)
+    if plan_out_path:
+        if plan is None or plan_sql_text is None:
+            print(
+                "ERROR: --plan-out requires a successful plan build; "
+                f"plan_meta={plan_meta!r}",
+                file=sys.stderr,
+            )
+            return 2
+        plan_payload = {
+            "plan": plan,
+            "plan_sha256": plan["plan_sha256"],
+            "final_combined_sql": plan_sql_text,
+        }
+        try:
+            with open(plan_out_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    plan_payload,
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+        except Exception as e:  # noqa: BLE001
+            print(
+                f"ERROR: failed to write --plan-out to {plan_out_path}: "
+                f"{_safe_repr(e)}",
+                file=sys.stderr,
+            )
+            return 2
     print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+    # Show-SQL append after JSON output (so JSON parsing stays clean).
+    if getattr(args, "show_sql", False):
+        if plan_sql_text is not None:
+            sha = plan["combined_sql"]["sha256"] if plan else ""
+            print(
+                f"\n# ===== FINAL COMBINED SQL (exact bytes, sha256={sha}) ====="
+            )
+            print(plan_sql_text, end=("" if plan_sql_text.endswith("\n") else "\n"))
+            print("# ===== END FINAL COMBINED SQL =====")
+    # Hard refusal on destructive scan / plan build failure.
+    if plan is None:
+        return 2
+    if not scan_clean:
+        return 2
     if chunk_artifact_missing:
         # Dry-run is informative — still report the missing artifact but
         # do not flag it as a hard error here. Apply is the hard gate.
@@ -1450,6 +1964,68 @@ def _upgrade_apply(args: argparse.Namespace) -> int:
         }
         print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
         return 2
+    # Build the canonical plan BEFORE touching psycopg2 — the
+    # destructive scan + sha-verify check must short-circuit before
+    # any connection is opened, so a malformed / mismatched / dirty
+    # plan never reaches the write path.
+    plan, plan_meta, sql_text = _upgrade_build_plan(parsed)
+    confirm = parsed.get("_confirm_plan_sha") or ""
+    # Plan-load failure (upgrade_v0_2.sql missing, splice error, etc.)
+    if plan is None:
+        out = {
+            "command": "upgrade",
+            "mode": "apply",
+            "applied": False,
+            "target": _redact_dsn(parsed),
+            "error": plan_meta.get("error") or "upgrade_v0_2.sql not found",
+            "sql_meta": plan_meta,
+            "plan_sha256": None,
+            "confirmed_plan_sha": confirm or None,
+            "plan_verified": False,
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+        return 2
+    # Destructive scan refusal (zero DDL on this path).
+    if not plan["destructive_scan"]["clean"]:
+        out = {
+            "command": "upgrade",
+            "mode": "apply",
+            "applied": False,
+            "target": _redact_dsn(parsed),
+            "error": (
+                "destructive SQL detected; refusing to apply. "
+                "Re-run dry-run for the full violation list."
+            ),
+            "destructive_scan": plan["destructive_scan"],
+            "plan_sha256": plan["plan_sha256"],
+            "confirmed_plan_sha": confirm or None,
+            "plan_verified": False,
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+        return 2
+    # Plan-sha verification (only when a sha was provided).
+    if confirm:
+        if plan["plan_sha256"] != confirm:
+            out = {
+                "command": "upgrade",
+                "mode": "apply",
+                "applied": False,
+                "target": _redact_dsn(parsed),
+                "plan_mismatch": True,
+                "expected_plan_sha": confirm,
+                "current_plan_sha": plan["plan_sha256"],
+                "error": (
+                    "plan_sha mismatch: the upgrade body or schema "
+                    "changed since this dry-run was produced. Re-run "
+                    "dry-run and pass the new --confirm-plan-sha."
+                ),
+                "plan_sha256": plan["plan_sha256"],
+                "confirmed_plan_sha": confirm,
+                "plan_verified": False,
+            }
+            print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+            return 2
+    plan_verified = bool(confirm) and (plan["plan_sha256"] == confirm)
     try:
         import psycopg2  # type: ignore
     except ImportError as e:
@@ -1459,20 +2035,24 @@ def _upgrade_apply(args: argparse.Namespace) -> int:
             "applied": False,
             "target": _redact_dsn(parsed),
             "error": f"psycopg2 import failed: {e}",
+            "plan_sha256": plan["plan_sha256"],
+            "confirmed_plan_sha": confirm or None,
+            "plan_verified": plan_verified,
+            "plan": plan,
         }
         print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
         return 2
-    sql_text, sql_meta = _upgrade_load_combined_sql(
-        include_qa_chunks_artifact=True,
-    )
-    if not sql_text:
+    if sql_text is None:  # pragma: no cover — defensive, plan already None
         out = {
             "command": "upgrade",
             "mode": "apply",
             "applied": False,
             "target": _redact_dsn(parsed),
-            "error": sql_meta.get("error") or "upgrade_v0_2.sql not found",
-            "sql_meta": sql_meta,
+            "error": "upgrade_v0_2.sql not found",
+            "sql_meta": plan_meta,
+            "plan_sha256": plan["plan_sha256"],
+            "confirmed_plan_sha": confirm or None,
+            "plan_verified": plan_verified,
         }
         print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
         return 2
@@ -1482,7 +2062,7 @@ def _upgrade_apply(args: argparse.Namespace) -> int:
         "target": redacted,
         "sql_bytes": len(sql_text.encode("utf-8")),
     }
-    result.update(sql_meta)
+    result.update(plan_meta)
     conn = None
     try:
         conn = psycopg2.connect(
@@ -1522,6 +2102,10 @@ def _upgrade_apply(args: argparse.Namespace) -> int:
         "mode": "apply",
         "target": redacted,
         "result": result,
+        "plan_sha256": plan["plan_sha256"],
+        "confirmed_plan_sha": confirm or None,
+        "plan_verified": plan_verified,
+        "plan": plan,
     }
     print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result.get("applied") else 1
@@ -1608,11 +2192,16 @@ def _build_parser() -> argparse.ArgumentParser:
     upgrade = sub.add_parser(
         "upgrade",
         help=(
-            "Additive existing-install upgrade (v0.2): dry-run reports "
-            "missing canonical objects without writing DDL; --apply runs "
-            "the transactional, idempotent, no-data-rewrite upgrade body. "
-            "Production-boundary DSNs (port 5433 or loopback/v3embeddings) "
-            "are refused unconditionally — same policy as bootstrap."
+            "Additive existing-install upgrade (v0.2.1): dry-run reports "
+            "missing canonical objects and emits a canonical plan (incl. "
+            "exact SQL + plan_sha256); --apply runs the transactional, "
+            "idempotent, no-data-rewrite upgrade body. Production-boundary "
+            "DSNs (port 5433 or loopback/v3embeddings) are refused by "
+            "default — an apply against the production boundary requires "
+            "BOTH --allow-production-write AND --confirm-plan-sha "
+            "<PLAN_SHA> (a two-part confirmation; the sha comes from a "
+            "matching dry-run). --allow-production-read is dry-run-only "
+            "and never authorizes writes."
         ),
     )
     upgrade.add_argument(
@@ -1637,9 +2226,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help=(
             "Read-only path (default): connect, probe information_schema, "
-            "report every missing additive object, never execute DDL. "
-            "Exit 0 when the install is fully covered, 1 when additions "
-            "would happen (informational), 2 on hard refusal."
+            "emit a canonical plan (incl. exact combined SQL + "
+            "plan_sha256), report every missing additive object, never "
+            "execute DDL. Exit 0 when the install is fully covered, 1 "
+            "when additions would happen (informational), 2 on hard "
+            "refusal (including destructive SQL detected)."
         ),
     )
     upgrade_mode.add_argument(
@@ -1647,10 +2238,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="apply",
         action="store_true",
         help=(
-            "Apply the transactional, idempotent, no-data-rewrite upgrade "
-            "body. Refuses to run against production-boundary DSNs; "
-            "refuses to run when the qa_embedding_chunks.sql artifact "
-            "is missing in the installed v3-core package."
+            "Apply the transactional, idempotent, no-data-rewrite "
+            "upgrade body. Refuses to run against production-boundary "
+            "DSNs by default; against the production boundary, apply "
+            "requires BOTH --allow-production-write AND "
+            "--confirm-plan-sha <PLAN_SHA> (two-part confirmation, sha "
+            "from a matching dry-run). Refuses to run when the "
+            "qa_embedding_chunks.sql artifact is missing in the "
+            "installed v3-core package."
         ),
     )
     upgrade.add_argument(
@@ -1661,12 +2256,54 @@ def _build_parser() -> argparse.ArgumentParser:
             "DRY-RUN ONLY: explicit opt-in that allows a SELECT-only "
             "diagnostic against a production-boundary DSN (port 5433 "
             "or loopback/v3embeddings). The flag is REQUIRED for the "
-            "doctor-issued copy-paste command to work on an existing "
-            "production install without any DDL. It is IGNORED by "
-            "--apply: production writes are unconditionally refused. "
-            "Use of this flag is recorded in the dry-run output so "
-            "the audit trail shows the operator chose to point at "
-            "production."
+            "dry-run to inspect an existing production install without "
+            "any DDL. It is IGNORED by --apply: read authorization "
+            "never authorizes writes. Use of this flag is recorded in "
+            "the dry-run output so the audit trail shows the operator "
+            "chose to point at production."
+        ),
+    )
+    upgrade.add_argument(
+        "--allow-production-write",
+        dest="allow_production_write",
+        action="store_true",
+        help=(
+            "APPLY ONLY: explicit opt-in (with --confirm-plan-sha) for "
+            "a production-boundary additive apply. Never implied by "
+            "--allow-production-read. Must be paired with "
+            "--confirm-plan-sha <PLAN_SHA> or apply exits 2 with zero "
+            "DDL."
+        ),
+    )
+    upgrade.add_argument(
+        "--confirm-plan-sha",
+        dest="confirm_plan_sha",
+        default=None,
+        help=(
+            "APPLY ONLY: the plan_sha256 from a dry-run; the apply "
+            "path recomputes the plan and refuses (exit 2, zero DDL) "
+            "unless it matches exactly. Must be paired with "
+            "--allow-production-write for a production-boundary target."
+        ),
+    )
+    upgrade.add_argument(
+        "--plan-out",
+        dest="plan_out",
+        default=None,
+        help=(
+            "DRY-RUN ONLY: write the full canonical plan (including "
+            "the exact combined SQL) to this file as JSON. A write "
+            "failure exits 2 before any plan is reported."
+        ),
+    )
+    upgrade.add_argument(
+        "--show-sql",
+        dest="show_sql",
+        action="store_true",
+        help=(
+            "DRY-RUN ONLY: print the exact combined SQL after the JSON "
+            "report, framed by '# ===== FINAL COMBINED SQL ... =====' "
+            "sentinel markers."
         ),
     )
 
