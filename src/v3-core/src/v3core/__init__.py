@@ -787,7 +787,7 @@ class V3Core:
             "error_fingerprint": fingerprint,
             "provider_status": provider_status,
             "retryable": retryable,
-            "error_detail": text,
+            "error_type": type(error).__name__,
         }
 
     def _update_qa_marker(self, session_id: str, pending: dict, **updates: Any) -> None:
