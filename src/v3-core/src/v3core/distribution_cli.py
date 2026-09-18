@@ -2360,6 +2360,123 @@ def _build_parser() -> argparse.ArgumentParser:
     rb.add_argument("--no-resume", action="store_true")
     rb.add_argument("--profile-dir", default=None)
 
+    # --- reliability layer (feature/reliability-recovery-v1) -----------------
+    # Read-only subcommands. health / diagnose / repair all share the same
+    # flags for window sizing, production opt-in, and path-debug. ``repair``
+    # only runs as ``--dry-run``; ``--apply`` is provided so the help text
+    # can be explicit, but the handler always rejects it.
+
+    _reliability_common_args = (
+        ("--json", "json", "store_true",
+         "Emit the full HealthReport as deterministic JSON (sort_keys=True, "
+         "ensure_ascii=False). Default emits a one-line-per-section summary."),
+        ("--deep", "deep", "store_true",
+         "Run the deep provider auth probes (bounded HTTP, 10 s timeout each)."),
+        ("--allow-production-read", "allow_production_read", "store_true",
+         "Authorize SELECTs against the production boundary (port 5433 or "
+         "loopback/v3embeddings). Without this flag, storage / memory_write / "
+         "derived checks report skip and never lower the verdict."),
+        ("--profile-dir", "profile_dir", "store",
+         "Explicit profile directory to resolve the v3-core base path. "
+         "Defaults to v3core.config._resolve_data_dir() or "
+         "~/.v3-core/profiles/default."),
+        ("--window-hours", "window_hours", "store_int",
+         "Width of the 'recent' window for current-incident classification "
+         "(default 24)."),
+        ("--debug-paths", "debug_paths", "store_true",
+         "Include raw filesystem paths in path labels (off by default; "
+         "default output is a kind/leaf/hash12 triple)."),
+    )
+
+    health_p = sub.add_parser(
+        "health",
+        help=(
+            "Read-only Hippocampus health snapshot (DESIGN §4-§5). "
+            "Returns exit 0 healthy, 1 degraded, 2 unhealthy or hard-failure. "
+            "Production reads require --allow-production-read."
+        ),
+        description=(
+            "Read-only Hippocampus health snapshot (DESIGN §4-§5). "
+            "Returns exit 0 healthy, 1 degraded, 2 unhealthy or hard-failure. "
+            "Production reads require --allow-production-read."
+        ),
+    )
+    diagnose_p = sub.add_parser(
+        "diagnose",
+        help=(
+            "Read-only Hippocampus health classification (DESIGN §8). "
+            "Returns exit 0 when there are no active issues (info-only or "
+            "empty), 1 when there is at least one severity>=warning issue, "
+            "2 on hard failure. Production reads require "
+            "--allow-production-read."
+        ),
+        description=(
+            "Read-only Hippocampus health classification (DESIGN §8). "
+            "Returns exit 0 when there are no active issues (info-only or "
+            "empty), 1 when there is at least one severity>=warning issue, "
+            "2 on hard failure. Production reads require "
+            "--allow-production-read."
+        ),
+    )
+    repair_p = sub.add_parser(
+        "repair",
+        help=(
+            "Read-only dry-run repair plan (DESIGN §9). Returns exit 0 when "
+            "there are no candidate actions, 1 when at least one action is "
+            "planned, 2 on hard failure. --dry-run is the default; "
+            "--apply is NOT IMPLEMENTED IN v1 -- always refuses. "
+            "Production reads require --allow-production-read."
+        ),
+        description=(
+            "Read-only dry-run repair plan (DESIGN §9). Returns exit 0 when "
+            "there are no candidate actions, 1 when at least one action is "
+            "planned, 2 on hard failure. --dry-run is the default; "
+            "--apply is NOT IMPLEMENTED IN v1 -- always refuses. "
+            "Production reads require --allow-production-read."
+        ),
+    )
+
+    for flag, dest, action, help_text in _reliability_common_args:
+        kwargs = {"dest": dest, "help": help_text}
+        if action == "store_true":
+            kwargs["action"] = "store_true"
+            kwargs["default"] = False
+        elif action == "store_int":
+            kwargs["action"] = "store"
+            kwargs["type"] = int
+            kwargs["default"] = 24
+        elif action == "store":
+            kwargs["action"] = "store"
+            kwargs["type"] = str
+            kwargs["default"] = None
+        else:  # pragma: no cover - defensive
+            raise ValueError(f"unknown reliability arg action: {action!r}")
+        health_p.add_argument(flag, **kwargs)
+        diagnose_p.add_argument(flag, **kwargs)
+        repair_p.add_argument(flag, **kwargs)
+
+    # Repair-only knobs. ``--dry-run`` is the default; ``--apply`` is a
+    # documented trapdoor that the handler refuses with exit 2 + the
+    # REPAIR_APPLY_NOT_IMPLEMENTED error code.
+    repair_p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=True,
+        help="Default. Emit a deterministic dry-run plan; never write.",
+    )
+    repair_p.add_argument(
+        "--apply",
+        dest="apply",
+        action="store_true",
+        help=(
+            "NOT IMPLEMENTED IN v1 -- always refuses. The handler exits 2 "
+            "with REPAIR_APPLY_NOT_IMPLEMENTED_IN_V1 before any work. "
+            "Kept on the parser so the help text can document the "
+            "intentional absence."
+        ),
+    )
+
     doctor.add_argument(
         "--full",
         action="store_true",
@@ -2571,6 +2688,33 @@ def main(argv: list[str] | None = None) -> int:
         return _import(args)
     if args.command == "rebuild":
         return _rebuild(args)
+    if args.command == "health":
+        try:
+            from v3core.reliability.cli import handle_health
+        except Exception as exc:  # pragma: no cover - defensive
+            print(json.dumps({"command": "health", "status": "error",
+                              "detail": f"reliability module unavailable: {exc}"},
+                             ensure_ascii=False))
+            return 2
+        return handle_health(args)
+    if args.command == "diagnose":
+        try:
+            from v3core.reliability.cli import handle_diagnose
+        except Exception as exc:  # pragma: no cover - defensive
+            print(json.dumps({"command": "diagnose", "status": "error",
+                              "detail": f"reliability module unavailable: {exc}"},
+                             ensure_ascii=False))
+            return 2
+        return handle_diagnose(args)
+    if args.command == "repair":
+        try:
+            from v3core.reliability.cli import handle_repair
+        except Exception as exc:  # pragma: no cover - defensive
+            print(json.dumps({"command": "repair", "status": "error",
+                              "detail": f"reliability module unavailable: {exc}"},
+                             ensure_ascii=False))
+            return 2
+        return handle_repair(args)
     parser.print_help()
     return 2
 

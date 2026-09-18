@@ -1,23 +1,28 @@
 """Hippocampus reliability layer — public API re-exports.
 
-This subpackage ships the read-only ``health`` half of the
-``reliability-recovery-v1`` feature branch. The interactive layers
-(``diagnose``, ``repair``, ``cli``) are added in the next dispatch.
+This subpackage ships the read-only ``health`` / ``diagnose`` /
+``repair --dry-run`` surfaces of the ``reliability-recovery-v1``
+feature branch. The interactive ``cli`` module is lazy-imported (callers
+that only want the data layer still work without it).
 
 The contract frozen here:
 
   - ``HealthReport`` — the data structure that every section feeds.
   - ``CheckResult`` — the unit row inside ``HealthReport.checks``.
-  - ``Diagnosis`` / ``RepairAction`` — placeholders for the next dispatch;
-    defined here so callers can already type their code against them.
+  - ``Diagnosis`` / ``RepairAction`` — ``diagnose`` / ``plan_repairs``
+    outputs (DESIGN §8 / §9).
   - ``aggregate_overall`` — the canonical reducer; rules in DESIGN §5.
   - ``FailureReader`` — the marker-ledger reader.
   - ``HealthService`` — the collector.
+  - ``diagnose`` — the classifier (DESIGN §8).
+  - ``plan_repairs`` — the dry-run planner (DESIGN §9).
+  - ``repair_apply_disabled`` — the *only* apply entry point, hard-disabled.
   - redaction helpers + the production-target predicate.
   - contract constants from DESIGN §2.
 """
 from __future__ import annotations
 
+from .diagnose import diagnose
 from .failure_reader import (
     ALL_STATUSES,
     FailureReader,
@@ -68,6 +73,11 @@ from .redaction import (
     path_label,
     sanitize_text,
 )
+from .repair import (
+    REPAIR_APPLY_NOT_IMPLEMENTED,
+    plan_repairs,
+    repair_apply_disabled,
+)
 
 __all__ = [
     # constants
@@ -81,6 +91,7 @@ __all__ = [
     "LOOPBACK_HOSTS",
     "PROD_PORT",
     "PROD_LOCAL_DB",
+    "REPAIR_APPLY_NOT_IMPLEMENTED",
     # status / overall enums
     "STATUSES",
     "STATUS_OK",
@@ -101,6 +112,10 @@ __all__ = [
     # readers / services
     "FailureReader",
     "HealthService",
+    # reasoner + planner
+    "diagnose",
+    "plan_repairs",
+    "repair_apply_disabled",
     # marker-status names (re-exported so callers don't import internals)
     "ALL_STATUSES",
     "STATUS_MALFORMED",
