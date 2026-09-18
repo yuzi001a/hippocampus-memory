@@ -1328,9 +1328,9 @@ def smoke_write_recall(
 
     # Embedder — the install smoke must exercise the same real provider path
     # that a first user will use; a no-op vector would make a false PASS.
-    embed_cfg: dict | None = None
+    from v3core.embedding import build_embed_cfg, embed_batch
     if cfg.embed and cfg.embed.endpoint and cfg.embed.api_key:
-        embed_cfg = cfg.embed.to_legacy_dict()
+        embed_cfg = build_embed_cfg(cfg)
         result["embedding_ok"] = True
     else:
         result["embedding_ok"] = False
