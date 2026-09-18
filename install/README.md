@@ -28,6 +28,19 @@ The install is **idempotent**: re-running never duplicates containers,
 never overwrites an existing profile config without an explicit flag,
 never double-edits the Hermes config.
 
+The release canary treats two database cases separately:
+
+- **Matrix A — truly fresh:** new profile, new `hippocampus-pg` container, new
+  schema, wheel install, provider configuration, doctor, write/readback, and
+  restart recall.
+- **Matrix B — existing-container reinstall:** new profile reusing an existing
+  pgvector container whose original password differs from the new profile's
+  generated password. The installer reads and adopts the container's actual
+  password before bootstrap, then repeats doctor, write/readback, and restart
+  recall.
+
+Passing Matrix A does not imply Matrix B passed.
+
 ---
 
 ## What it does (full ordered list)

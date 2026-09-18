@@ -90,20 +90,13 @@ def _resolve_base_path_for_lock(core: "V3Core") -> str:
 
 logger = logging.getLogger("v3core")
 
-# Upper bound for a single message entering the message river (conversation_stream).
-# v0.2 closing round (2026-09-18): this guard used to drop oversized messages
-# SILENTLY. Two consequences were proven on a disposable DB with the real
-# provider:
-#   1. the raw experience of that message is lost (it never reaches
-#      conversation_stream), and
-#   2. the pending QA keeps an empty `a`, so the flush writes a POISONED row —
-#      question stored, answer empty, and an embedding computed from the
-#      question alone.
-# Production currently carries 452 such answer-empty rows and no
-# conversation_stream row above 23234 chars, i.e. the cliff is real.
-# This round only makes every trip VISIBLE; raising or removing the bound is a
-# product-data decision and is deliberately left to the release owner.
-RIVER_MAX_MESSAGE_CHARS = 24000
+# Source-ingest policy (v0.2): conversation_stream is the raw experience store.
+# Provider/token limits belong to the derived embedding representation, not to
+# source acceptance. Normal user/assistant messages therefore have no ordinary
+# character ceiling here; the token-safe QA representation is enforced later by
+# ``embed_chunks``. Tool/tool_result payloads remain on their existing
+# provenance-only path and do not become semantic vectors merely because this
+# source gate was removed.
 
 
 # -- 日志脱敏 (v3-hermes-plugin 依赖 _safe_err) --
@@ -743,27 +736,135 @@ class V3Core:
         except Exception:
             pass
 
-    def _mark_qa_embedding_failure(self, session_id: str, pending: dict, error: BaseException) -> None:
-        """Keep a durable QA marker and record bounded embedding retry state."""
+    @staticmethod
+    def _qa_failure_details(error: BaseException, phase: str) -> dict[str, Any]:
+        """Classify a QA failure without persisting secrets or raw payloads."""
+        text = _safe_err(error, 240)
+        lower = text.lower()
+        response = getattr(error, "response", None)
+        provider_status = getattr(response, "status_code", None)
+        if provider_status is None:
+            provider_status = getattr(error, "status_code", None)
+        try:
+            provider_status = int(provider_status) if provider_status is not None else None
+        except (TypeError, ValueError):
+            provider_status = None
+        name = type(error).__name__.lower()
+        if phase == "tokenizer" or "tokenizer" in name or "tokenizer" in lower:
+            error_class, retryable = "tokenizer_unavailable", True
+        elif phase == "db_write":
+            error_class, retryable = "db_write_failure", True
+        elif phase == "db_unavailable":
+            error_class, retryable = "db_unavailable", True
+        elif provider_status == 401:
+            error_class, retryable = "provider_401", False
+        elif provider_status == 402:
+            error_class, retryable = "provider_402", False
+        elif provider_status == 429:
+            error_class, retryable = "provider_429", True
+        elif provider_status in {413} or any(
+            token in lower for token in ("context length", "too long", "max input", "input length", "over-limit")
+        ):
+            error_class, retryable = "provider_input_over_limit", False
+        elif provider_status is not None and provider_status >= 500:
+            error_class, retryable = "provider_5xx", True
+        elif provider_status is not None and provider_status >= 400:
+            error_class, retryable = "provider_4xx", False
+        elif "timeout" in name or "timed out" in lower:
+            error_class, retryable = "timeout", True
+        elif any(token in name or token in lower for token in ("connection", "connecterror", "network")):
+            error_class, retryable = "connection_error", True
+        elif phase == "chunk_embedding":
+            error_class, retryable = "chunk_embedding_failure", True
+        else:
+            error_class, retryable = "unknown", True
+        fingerprint = hashlib.sha256(
+            f"{error_class}:{type(error).__name__}:{text}".encode("utf-8", errors="replace")
+        ).hexdigest()
+        return {
+            "error_class": error_class,
+            "error_phase": phase,
+            "error_fingerprint": fingerprint,
+            "provider_status": provider_status,
+            "retryable": retryable,
+            "error_detail": text,
+        }
+
+    def _update_qa_marker(self, session_id: str, pending: dict, **updates: Any) -> None:
         path = self._persist_qa_pending(session_id, pending)
         if path is None:
-            logger.warning("QA embedding failure has no durable marker (session=%s)", session_id)
+            logger.warning("QA state has no durable marker (session=%s)", session_id)
             return
         try:
             with self._qa_durability_lock:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                attempts = int(data.get("embedding_attempts", 0) or 0) + 1
+                now = datetime.now(timezone.utc).isoformat()
+                if updates.pop("increment_attempt", False):
+                    data["embedding_attempts"] = int(data.get("embedding_attempts", 0) or 0) + 1
+                if updates.get("error_class"):
+                    data.setdefault("first_failure_at", now)
+                    data["last_failure_at"] = now
+                    data["failure_count"] = int(data.get("failure_count", 0) or 0) + 1
+                data.update(updates)
+                tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(data, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                os.replace(str(tmp), str(path))
+        except Exception as e:
+            logger.warning("QA durable state update failed: %s", _safe_err(e, 120))
+
+    def _mark_qa_embedding_started(self, session_id: str, pending: dict) -> None:
+        self._update_qa_marker(
+            session_id,
+            pending,
+            embedding_status="in_flight",
+            embedding_attempt_started_at=datetime.now(timezone.utc).isoformat(),
+            increment_attempt=True,
+        )
+
+    def _mark_qa_embedding_success_pending_db(self, session_id: str, pending: dict) -> None:
+        self._update_qa_marker(
+            session_id,
+            pending,
+            embedding_status="embedding_succeeded_pending_db",
+            embedding_attempt_started_at=None,
+        )
+
+    def _mark_qa_embedding_failure(
+        self, session_id: str, pending: dict, error: BaseException, *, phase: str = "embedding"
+    ) -> None:
+        """Keep a durable marker with class, retryability, attempts and timestamps."""
+        details = self._qa_failure_details(error, phase)
+        path = self._persist_qa_pending(session_id, pending)
+        if path is None:
+            logger.warning("QA %s failure has no durable marker (session=%s)", phase, session_id)
+            return
+        try:
+            with self._qa_durability_lock:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                attempts = int(data.get("embedding_attempts", 0) or 0)
+                # Direct callers from legacy paths may not mark in_flight first.
+                if data.get("embedding_status") != "in_flight":
+                    attempts += 1
                 max_attempts = 3
-                delay_s = min(3600.0, 60.0 * (2 ** min(attempts - 1, 5)))
-                error_sig = hashlib.sha256(
-                    f"{type(error).__name__}:{error}".encode("utf-8", errors="replace")
-                ).hexdigest()
+                retryable = bool(details.get("retryable"))
+                poisoned = attempts >= max_attempts or not retryable
+                delay_s = min(3600.0, 60.0 * (2 ** min(max(attempts - 1, 0), 5)))
+                now = datetime.now(timezone.utc).isoformat()
                 data.update(
                     {
-                        "embedding_status": "poisoned" if attempts >= max_attempts else "failed",
+                        **details,
+                        "embedding_status": "poisoned" if poisoned else "failed",
                         "embedding_attempts": attempts,
-                        "embedding_next_retry_at": time.time() + delay_s,
-                        "embedding_error_fingerprint": error_sig,
+                        "embedding_next_retry_at": (time.time() + delay_s) if retryable else None,
+                        "first_failure_at": data.get("first_failure_at") or now,
+                        "last_failure_at": now,
+                        "failure_count": int(data.get("failure_count", 0) or 0) + 1,
                     }
                 )
                 tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -776,7 +877,7 @@ class V3Core:
                         pass
                 os.replace(str(tmp), str(path))
         except Exception as e:
-            logger.warning("QA embedding failure state update failed: %s", _safe_err(e)[:120])
+            logger.warning("QA embedding failure state update failed: %s", _safe_err(e, 120))
 
     def _recover_pending_qa(self):
         try:
@@ -794,8 +895,8 @@ class V3Core:
                         continue
                     job_id = str(data.get("job_id") or self._qa_job_id(session_id, pending))
                     attempts = int(data.get("embedding_attempts", 0) or 0)
-                    if attempts >= 3:
-                        logger.warning("QA embedding marker quarantined after bounded retries: %s", p.name)
+                    if attempts >= 3 or data.get("retryable") is False or data.get("embedding_status") == "poisoned":
+                        logger.warning("QA embedding marker quarantined: %s class=%s", p.name, data.get("error_class"))
                         continue
                     retry_at = data.get("embedding_next_retry_at")
                     if retry_at is not None and float(retry_at) > time.time():
@@ -3336,17 +3437,9 @@ class V3Core:
             if content.startswith(_injection_prefixes_fallback):
                 processed_this_call.add(key)
                 continue
-            # 超长消息跳过（>24K chars不进消息河）— 见 RIVER_MAX_MESSAGE_CHARS。
-            # v0.2 closing round: 这条分支过去是静默的, 现在每次都留下日志。
-            if len(content) > RIVER_MAX_MESSAGE_CHARS:
-                logger.warning(
-                    "sync_turn 丢弃超长消息 (role=%s chars=%d > %d key=%s): "
-                    "该消息不进入消息河, 其内容也不会进入 QA 配对 — "
-                    "若它是 assistant 回答, pending 的 a 将保持为空并写出空答案 QA 行",
-                    role, len(content), RIVER_MAX_MESSAGE_CHARS, key,
-                )
-                processed_this_call.add(key)
-                continue
+            # Source acceptance is complete for normal user/assistant messages.
+            # Do not let provider limits delete raw experience or manufacture
+            # an answer-empty QA row; ``embed_chunks`` owns derived limits.
             # LiveBuffer identity must follow the canonical stable key,
             # not a content-derived surrogate that changes on compression.
             msg_id = key
@@ -3673,9 +3766,14 @@ class V3Core:
         # Empty list on the short path or on long failure.
         pending_long_chunks: list[tuple] = []
         if embed_cfg is not None:
+            # Mark before remote work: if the process dies after the provider
+            # call but before the DB commit, restart sees an in-flight durable
+            # marker instead of an unexplained NULL embedding.
+            self._mark_qa_embedding_started(session_id, pending)
             # fence before embedding
             if self._is_core_fenced():
                 return
+            embed_phase = "embedding"
             try:
                 from .embed_chunks import (
                     build_qa_embedding_representation,
@@ -3688,6 +3786,7 @@ class V3Core:
                     short_text_for_emb=short_text_for_emb,
                 )
                 if representation.is_long:
+                    embed_phase = "chunk_embedding"
                     # Long path: tokenizer-aware split, embed each chunk,
                     # aggregate the parent. collision_safe_key=True ensures
                     # distinct long chunks that share a 500-char prefix
@@ -3735,22 +3834,25 @@ class V3Core:
                 embedding_error = e
                 emb = None
                 pending_long_chunks = []
-            except ValueError:
-                # Aggregation / dimension failure (or embed_batch fail-
-                # closed ValueError). Re-raise so the contract holds:
-                # embedding / vector consistency cannot be silently skipped.
-                raise
+                embed_phase = "tokenizer"
+            except ValueError as e:
+                # Configuration/dimension/input-limit failures are durable
+                # failures, not reasons to manufacture an acknowledged NULL.
+                embedding_failed = True
+                embedding_error = e
+                emb = None
+                pending_long_chunks = []
             except Exception as e:
                 logger.warning("_flush_pending_qa embedding 失败: %s", _safe_err(e))
                 embedding_failed = True
                 embedding_error = e
-                # keep marker for retry, do not ack
-                # but if embedding fails, we still try to write without embedding? original does; keep marker only on PG exception?
-                # For durability, embedding failure should keep marker (not ack) so next gen can retry with embedding
-                # However we will still attempt PG without embedding; if that succeeds, ack.
                 emb = None
-            if embedding_failed and embedding_error is not None:
-                self._mark_qa_embedding_failure(session_id, pending, embedding_error)
+            if not embedding_failed:
+                self._mark_qa_embedding_success_pending_db(session_id, pending)
+            elif embedding_error is not None:
+                self._mark_qa_embedding_failure(
+                    session_id, pending, embedding_error, phase=embed_phase
+                )
             # fence after embedding
             if self._is_core_fenced():
                 return
@@ -3770,6 +3872,13 @@ class V3Core:
             with _lease_pg_store(pg) as conn:
                 if not conn:
                     logger.debug("_flush_pending_qa PG 不可用, 跳过写入 (q_turn=%s)", q_turn)
+                    if embed_cfg is not None:
+                        self._mark_qa_embedding_failure(
+                            session_id,
+                            pending,
+                            RuntimeError("PG connection unavailable"),
+                            phase="db_unavailable",
+                        )
                     return
                 # fence re-check after lease acquired? if fenced, skip PG use
                 if self._is_core_fenced():
@@ -3929,8 +4038,13 @@ class V3Core:
                 )
         except Exception as e:
             # Any exception means the configured durability contract is not
-            # proven.  Keep the marker for a later retry or quarantine.
+            # proven. Keep the marker and classify the DB write failure so a
+            # repair planner can distinguish it from provider failures.
             logger.warning("_flush_pending_qa 写 qa_pairs 失败: %s", _safe_err(e))
+            if embed_cfg is not None:
+                self._mark_qa_embedding_failure(
+                    session_id, pending, e, phase="db_write"
+                )
             should_ack = False
             return
         finally:

@@ -286,8 +286,8 @@ def _is_importable_qa(question: str, answer: str) -> bool:
     a = (answer or "").strip()
     if len(q) < 5 or len(a) < 5:
         return False
-    if len(q) > 24000 or len(a) > 24000:
-        return False
+    # Provider/token limits belong to derived embeddings. Importing a normal
+    # user/assistant pair must preserve complete source text, including >24K.
     q_lower = q.lower()
     if q_lower.startswith("heartbeat") or q_lower.startswith("system"):
         return False

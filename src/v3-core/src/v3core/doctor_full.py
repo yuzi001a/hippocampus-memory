@@ -1485,6 +1485,35 @@ def _check_hermes_home() -> dict[str, Any]:
         # it here (in addition to hermes_provider_discovery) keeps the
         # report self-contained when only HERMES_HOME is set.
         evidence["runtime_provenance"] = _runtime_provenance()
+        config_env = os.environ.get("V3CORE_CONFIG") or os.environ.get("V3CORE_CONFIG_PATH")
+        if config_env:
+            pending_dir = Path(config_env).expanduser().parent / "j" / "pending_qa"
+            marker_summary: dict[str, Any] = {
+                "path": str(pending_dir),
+                "exists": pending_dir.is_dir(),
+                "total": 0,
+                "by_status": {},
+                "by_error_class": {},
+                "missing_accounting_fields": 0,
+            }
+            if pending_dir.is_dir():
+                for marker in sorted(pending_dir.glob("*.json")):
+                    try:
+                        data = json.loads(marker.read_text(encoding="utf-8"))
+                        marker_summary["total"] += 1
+                        status = str(data.get("embedding_status") or "pending")
+                        marker_summary["by_status"][status] = marker_summary["by_status"].get(status, 0) + 1
+                        error_class = data.get("error_class")
+                        if error_class:
+                            key = str(error_class)
+                            marker_summary["by_error_class"][key] = marker_summary["by_error_class"].get(key, 0) + 1
+                        if status in {"failed", "poisoned", "in_flight", "embedding_succeeded_pending_db"} and not all(
+                            field in data for field in ("embedding_attempts", "error_fingerprint", "retryable")
+                        ):
+                            marker_summary["missing_accounting_fields"] += 1
+                    except Exception:
+                        marker_summary["missing_accounting_fields"] += 1
+            evidence["qa_embedding_failure_accounting"] = marker_summary
         if home:
             p = Path(home).expanduser()
             evidence["exists"] = p.exists()

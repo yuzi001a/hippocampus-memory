@@ -31,35 +31,16 @@ def test_runtime_provenance_reports_path_and_config_without_secrets():
     assert "password" not in rendered
 
 
-def test_river_size_guard_is_single_sourced_and_not_silent():
-    """Static contract for the message-river size guard.
-
-    The guard is a pre-existing product-data decision, so this test does NOT
-    assert the bound is right — it asserts the two properties that made the
-    behaviour dangerous: it must be single-sourced (no stray literals that drift
-    from the constant) and it must not drop a message silently.
-
-    Real end-to-end evidence for what a trip costs lives in
-    reports/v0.2-first-user-release/chunk_canary.py (an oversized assistant
-    answer never reaches conversation_stream, and the pending QA is flushed with
-    an EMPTY answer plus a question-only embedding).
-    """
-    import re
+def test_source_ingest_does_not_drop_normal_user_assistant_messages_for_provider_limits():
+    """Provider limits belong to derived representations, not raw history."""
     from pathlib import Path
 
     import v3core
 
-    assert v3core.RIVER_MAX_MESSAGE_CHARS == 24000
-
     src = Path(v3core.__file__).read_text(encoding="utf-8")
-    # the guard compares against the constant, never a bare literal
-    assert "len(content) > RIVER_MAX_MESSAGE_CHARS" in src
-    assert not re.search(r"len\(content\)\s*>\s*24000\b", src)
-
-    # and the drop branch logs before it drops
-    guard = src.split("len(content) > RIVER_MAX_MESSAGE_CHARS", 1)[1]
-    branch = guard.split("continue", 1)[0]
-    assert "logger.warning" in branch, "oversized-message drop must not be silent"
+    assert "RIVER_MAX_MESSAGE_CHARS" not in src
+    assert "len(content) > 24000" not in src
+    assert "embed_chunks" in src
 
 
 def test_fresh_bootstrap_reaches_the_current_schema_level():

@@ -27,7 +27,7 @@ A long answer is not truncated, rewritten, or silently dropped.
 2. Use the model tokenizer (configured tokenizer name; for the production BAAI/bge-m3 profile this is `BAAI/bge-m3`) to split the question and answer into non-overlapping token-safe derived spans.
 3. Store each derived span in `qa_embedding_chunks`, with `qa_id`, source field (`question`/`answer`), source character offsets, token count, representation version, source hash, text, and its embedding.
 4. Compute the stable parent vector as the L2-normalized mean of all successful child vectors. This gives the existing `qa_pairs.embedding` contract a whole-QA representation without another over-limit provider request.
-5. Recall searches both the parent vector and child vectors, takes the best score per `qa_id`, and returns the complete parent QA. A middle/tail child hit therefore never loses the surrounding answer.
+5. Recall searches both the parent vector and child vectors, takes the best score per `qa_id`, and returns the complete parent QA. A middle/tail child hit therefore never loses the surrounding answer. The child representation primarily removes provider input-length failure and preserves local semantic addressing; the current canary has **not** proved a stable recall gain over the parent aggregate.
 6. Tool calls/results remain in source/provenance fields. They are not blindly added to the semantic chunks. Natural-language assistant content is indexed; evidence-dump indexing is deferred and does not enter this v0.2 change.
 
 The child target is deliberately below the provider limit (`max_input_tokens - safety_margin`, default safety margin 512). Every chunk is locally counted before the provider call; if the tokenizer cannot be loaded, the item fails closed with a durable marker instead of sending an unsafe request or silently truncating.
@@ -65,8 +65,8 @@ Repair is per source, never a blanket reset:
 - orphan markers: retain in the dry-run report until their source identity is verified;
 - source rows without markers: report as legacy repair candidates, not silently reset.
 
-The repair planner emits counts, IDs/source IDs, hashes, token counts, model/config fingerprint, and the exact intended state transition. Production writes remain a separately confirmed operation.
-
+- `hippocampus prefetch(query, config=...)` must also receive the matching `pg=...` (or `core=...`) when the config names PostgreSQL; otherwise it fails fast instead of silently reading ambient storage. This is the explicit multi-profile isolation contract.
+- Fresh install evidence and existing-container reinstall evidence are separate matrices. A fresh profile/database/container is not evidence that reinstallation against an existing container password works.
 ## 7. Verification gates
 
 The implementation must pass:

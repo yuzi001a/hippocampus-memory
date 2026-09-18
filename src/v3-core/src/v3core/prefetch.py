@@ -181,6 +181,13 @@ def _try_get_sqlite_store(config):
         return None
 
 
+def _config_declares_pg(config) -> bool:
+    """Whether a supplied config names a database that recall must honor."""
+    if isinstance(config, dict):
+        return bool((config.get("storage") or {}).get("pg"))
+    return getattr(config, "pg", None) is not None
+
+
 def prefetch(query: str, limit: int = 5, config=None,
              card_index: dict | None = None, pg=None, q_emb: list[float] | None = None,
              pg_was_connected: bool = False, fmt: str = "list",
@@ -218,6 +225,11 @@ def prefetch(query: str, limit: int = 5, config=None,
     deadline = coerce_deadline(deadline)
     if deadline is not None:
         deadline.check(context="prefetch")
+    if config is not None and pg is None and core is None and _config_declares_pg(config):
+        raise ValueError(
+            "prefetch(config=...) with a PostgreSQL target requires pg=... "
+            "or core=...; refusing to read ambient storage"
+        )
     if not query or not query.strip():
         if fmt == "chain":
             return {"query": query or "", "type": "fallback", "error": "empty query", "cards": []}
