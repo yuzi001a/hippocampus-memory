@@ -306,7 +306,19 @@ def detect_environment(*, docker_timeout: int = 6,
             [docker_path, "info", "--format", "{{.ServerVersion}}"],
             timeout=docker_timeout,
         )
+        if rc2 != 0:
+            # Windows Docker Desktop: the FIRST `docker info` of a session pays
+            # the CLI + named-pipe cold start and can exceed a short timeout
+            # while the daemon is perfectly healthy. Treating that as "daemon
+            # down" told a user with a running daemon to go start Docker — a
+            # false negative with an unhelpful instruction. Retry once with a
+            # generous timeout before believing the daemon is down.
+            rc2, _, err2 = _run(
+                [docker_path, "info", "--format", "{{.ServerVersion}}"],
+                timeout=max(docker_timeout * 4, 30),
+            )
         env["docker_running"] = rc2 == 0
+        env["docker_probe_error"] = "" if rc2 == 0 else str(err2 or "")[:300]
 
     # Hermes.
     hermes_home = _resolve_hermes_home(None)
@@ -1593,9 +1605,11 @@ def run_install(
             "before continuing."
         )
     elif not pre["docker_running"]:
+        _probe_err = str(pre.get("docker_probe_error") or "").strip()
         problems.append(
             "Docker is installed but the daemon is not responding to "
             "`docker info`; start Docker Desktop and re-run."
+            + (f" (probe said: {_probe_err[:200]})" if _probe_err else "")
         )
     if problems:
         verdict["install"] = "FAIL — " + "; ".join(problems)
