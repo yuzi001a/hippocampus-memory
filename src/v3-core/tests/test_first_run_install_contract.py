@@ -508,3 +508,43 @@ def test_run_rejects_string_command():
 def test_run_rejects_empty_command():
     with pytest.raises(ValueError):
         fr._run([])
+
+
+# ---------------------------------------------------------------------------
+# 10. Reused container keeps ITS password (2026-09-18)
+# ---------------------------------------------------------------------------
+
+
+def test_reused_container_password_is_adopted():
+    """A container keeps the password it was born with.
+
+    When the profile is new (reinstall, wiped profile dir, second profile) the
+    installer generates a fresh password, then reuses the existing container of
+    the same name. Writing the generated password to the profile made every later
+    TCP connection fail with ``password authentication failed for user
+    "postgres"`` — while ``docker exec`` probes kept passing, because those go
+    over the container's local socket (trust). Observed live on the fresh-install
+    canary. The reuse path must adopt the container's real password.
+    """
+    calls = []
+
+    def stub(cmd):
+        calls.append(cmd)
+        sub = cmd[1] if len(cmd) > 1 else ""
+        if sub == "ps":
+            # no container of this name is running yet -> fall through to `run`
+            return (0, "", "")
+        if sub == "run":
+            return (125, "", 'The container name "/hippocampus-pg" is already in '
+                             'use by container "abc".')
+        if sub == "start":
+            return (0, "hippocampus-pg", "")
+        if sub == "inspect":
+            return (0, "POSTGRES_USER=postgres\nPOSTGRES_PASSWORD=container-born-pw\n", "")
+        return (0, "1", "")
+
+    result = fr.ensure_pgvector_container(
+        port=55999, password="newly-generated-pw", docker_runner=stub,
+    )
+    assert result.get("reused") is True, result
+    assert result.get("container_password") == "container-born-pw"

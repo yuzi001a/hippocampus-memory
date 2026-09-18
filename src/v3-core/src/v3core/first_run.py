@@ -356,6 +356,27 @@ def detect_environment(*, docker_timeout: int = 6,
 # ---------------------------------------------------------------------------
 
 
+def _read_container_password(run, docker: str, container_name: str) -> str | None:
+    """The password the EXISTING container was created with, or ``None``.
+
+    A container keeps the password it was born with. The profile ``.env`` only
+    happens to match when it came from the same install, so any password the
+    caller writes or connects with must follow the container — never the other
+    way round. Missing it produced `password authentication failed for user
+    "postgres"` on the very next TCP connection, while every ``docker exec``
+    probe kept passing (those use the container's local socket, which trusts).
+    """
+    rc, out, _ = run([docker, "inspect", container_name, "--format",
+                      "{{range .Config.Env}}{{println .}}{{end}}"])
+    if rc != 0:
+        return None
+    for line in (out or "").splitlines():
+        if line.startswith("POSTGRES_PASSWORD="):
+            value = line.split("=", 1)[1].strip()
+            return value or None
+    return None
+
+
 def ensure_pgvector_container(
     *,
     port: int,
@@ -447,6 +468,9 @@ def ensure_pgvector_container(
             result["reused"] = True
             result["port"] = port
             result["dsn"] = _build_dsn(port=port)
+            _cp = _read_container_password(run, docker, container_name)
+            if _cp:
+                result["container_password"] = _cp
             _print(
                 f"PASS: container {container_name} already running, reusing",
                 out,
@@ -531,6 +555,12 @@ def ensure_pgvector_container(
                 return result
             result["started"] = True
             result["reused"] = True
+            # The container keeps the password it was BORN with — adopt it, or
+            # the profile .env we write next authenticates with a password the
+            # container never had.
+            _cp = _read_container_password(run, docker, container_name)
+            if _cp:
+                result["container_password"] = _cp
         else:
             result["error"] = (
                 f"docker run failed (rc={rc}): {err.strip() or '(no stderr)'}"
@@ -1639,6 +1669,18 @@ def run_install(
         )
         _emit_verdict(verdict, out)
         return 11
+    # A reused container keeps the password it was created with. Prefer it over
+    # whatever this profile had (or generated), otherwise the .env we write below
+    # and every later connection authenticate with a password the container never
+    # had — see ensure_pgvector_container's reuse branch.
+    if pg.get("container_password") and pg["container_password"] != password:
+        _print(
+            "NOTE: reusing the existing container "
+            f"'{pg.get('container')}'; adopting the database password it was "
+            "created with (the profile password is updated to match).",
+            out,
+        )
+        password = pg["container_password"]
     verdict["database"] = (
         f"PASS — pgvector {pg.get('pgvector_version') or 'unknown'} on "
         f"port {pg.get('port')}, container {pg.get('container')}"
