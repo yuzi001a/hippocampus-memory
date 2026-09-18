@@ -282,6 +282,20 @@ def _load_legacy_dict(profile: str = "default", hermes_home: str = "") -> dict[s
             os.environ.setdefault(k, v)
 
     config_path = _find_config(profile, hermes_home=hermes_home)
+    # Profile-scoped .env (v0.2 closing round): `hippocampus install` writes the
+    # generated PG password AND the provider keys into <profile_dir>/.env, next
+    # to the config.yaml that references them as ${env:...}. That file was never
+    # one of `_find_env()`'s candidates, so a clean process resolved every
+    # provider reference to an empty string: the first session after a fresh
+    # install 401'd on embed / rerank / memory LLM, and `doctor --full` told the
+    # user their key had been rejected — while the key sat unread in the profile.
+    # `setdefault` keeps the existing precedence (explicit env, then the global
+    # .env, then this profile's file) so nothing that already works changes.
+    if config_path:
+        _profile_env_path = Path(config_path).parent / ".env"
+        if _profile_env_path.exists():
+            for k, v in _load_env_file(_profile_env_path).items():
+                os.environ.setdefault(k, v)
     if config_path:
         try:
             import yaml

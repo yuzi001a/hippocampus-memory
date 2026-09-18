@@ -324,3 +324,42 @@ def test_legacy_env_placeholder_still_works(monkeypatch, tmp_path):
     cfg = resolve_config(profile="default", hermes_home=str(tmp_path))
     assert cfg.pg.port == 6543
     assert cfg.pg.password == _ENV_PWD
+
+
+# ---------------------------------------------------------------------------
+# Profile-scoped .env must be read back (2026-09-18)
+# ---------------------------------------------------------------------------
+
+
+def test_profile_scoped_env_is_loaded_for_referenced_secrets(tmp_path, monkeypatch):
+    """`hippocampus install` writes the provider keys to <profile_dir>/.env.
+
+    The config it writes references them as ${env:...}, and the engine's .env
+    search did not include the profile directory — so a clean process resolved
+    every provider key to "" and the first session after a fresh install 401'd,
+    while `doctor --full` reported "the configured key was rejected". The profile
+    .env must be read back (explicit env still wins).
+    """
+    prof = tmp_path / "profile"
+    prof.mkdir()
+    (prof / ".env").write_text("V3CORE_EMBED_API_KEY=profile-scoped-key\n",
+                               encoding="utf-8")
+    (prof / "config.yaml").write_text(
+        "basePath: 'x'\n"
+        "storage:\n"
+        "  pg:\n"
+        "    password: 'p'\n"
+        "  embed:\n"
+        "    endpoint: 'https://example.invalid/v1/embeddings'\n"
+        "    model: 'BAAI/bge-m3'\n"
+        "    api_key: '${env:V3CORE_EMBED_API_KEY}'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("V3CORE_EMBED_API_KEY", raising=False)
+    monkeypatch.setenv("V3CORE_CONFIG", str(prof / "config.yaml"))
+    monkeypatch.setenv("V3CORE_PG_PASSWORD", "p")
+
+    from v3core import config as cfg_mod
+
+    cfg = cfg_mod.resolve_config()
+    assert cfg.embed.api_key == "profile-scoped-key"
