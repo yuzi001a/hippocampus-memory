@@ -613,7 +613,7 @@ def ensure_pgvector_container(
         )
         rc_mk, _, err_mk = run([
             docker, "exec", "-e", f"PGPASSWORD={password}", container_name,
-            "createdb", "-U", "postgres", result["database"],
+            "createdb", "-U", "postgres", "-d", "postgres", result["database"],
         ])
         if rc_mk != 0:
             result["error"] = (
