@@ -1,0 +1,112 @@
+name: release
+
+# Build the release artifacts on demand without publishing them. A tag push is
+# the only event allowed to create/update a GitHub Release. This keeps RC
+# verification safe: workflow_dispatch produces downloadable CI artifacts, never
+# a formal release or a tag.
+#
+# The installer discovers versioned wheel assets by the package-name prefix
+# (v3_core-*.whl and v3_hermes_plugin-*.whl); no version is duplicated here.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RC_ARTIFACT_NAME: v0.2-rc-assets-${{ github.run_id }}
+
+jobs:
+  build:
+    name: build and smoke-test release artifacts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv (which brings Python 3.11)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheels and sdists
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          uv build --wheel --sdist --out-dir dist src/v3-core
+          uv build --wheel --sdist --out-dir dist src/v3-hermes-plugin
+          Get-ChildItem dist | Select-Object Name, Length
+
+      - name: Verify dynamic versioned asset names and installer contract
+        shell: pwsh
+        run: |
+          $assets = Get-ChildItem dist -File | Select-Object -ExpandProperty Name
+          $coreWheel = @($assets | Where-Object { $_ -match '^v3_core-[^-]+-py3-none-any\.whl$' })
+          $pluginWheel = @($assets | Where-Object { $_ -match '^v3_hermes_plugin-[^-]+-py3-none-any\.whl$' })
+          $coreSdist = @($assets | Where-Object { $_ -match '^v3_core-[^-]+\.tar\.gz$' })
+          $pluginSdist = @($assets | Where-Object { $_ -match '^v3_hermes_plugin-[^-]+\.tar\.gz$' })
+          if ($coreWheel.Count -ne 1 -or $pluginWheel.Count -ne 1 -or $coreSdist.Count -ne 1 -or $pluginSdist.Count -ne 1) {
+            throw "expected exactly one versioned wheel and sdist per package; assets=$($assets -join ', ')"
+          }
+          $version = ([regex]::Match($coreWheel[0], '^v3_core-([^-]+)-')).Groups[1].Value
+          if (([regex]::Match($pluginWheel[0], '^v3_hermes_plugin-([^-]+)-')).Groups[1].Value -ne $version) {
+            throw "core/plugin versions differ"
+          }
+          $installer = Get-Content install/install.ps1 -Raw
+          if ($installer -notmatch 'v3_core-\*\.whl' -or $installer -notmatch 'v3_hermes_plugin-\*\.whl') {
+            throw "installer wheel discovery prefixes no longer match built package names"
+          }
+          Write-Host "artifact contract PASS: version=$version core=$($coreWheel[0]) plugin=$($pluginWheel[0])"
+
+      - name: Verify the built wheels install into a clean Windows venv
+        shell: pwsh
+        run: |
+          uv venv --python 3.11 .release-venv
+          $py = Join-Path $PWD ".release-venv/Scripts/python.exe"
+          $wheels = @(Get-ChildItem dist -Filter *.whl | ForEach-Object { $_.FullName })
+          if ($wheels.Count -ne 2) { throw "expected two wheels, found $($wheels.Count)" }
+          uv pip install --python $py @wheels
+          & $py -c "import v3core, v3hermes; print('wheel import PASS', v3core.__file__, v3hermes.__file__)"
+          uv pip check --python $py
+
+      - name: Upload RC artifacts (never a formal release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RC_ARTIFACT_NAME }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: attach artifacts to the pushed tag release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download the exact build output
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.RC_ARTIFACT_NAME }}
+          path: dist
+
+      - name: Create or update the formal release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "${GITHUB_REPOSITORY}" --title "Hippocampus $tag" --generate-notes
+          fi
+          gh release upload "$tag" dist/* --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release view "$tag" --repo "${GITHUB_REPOSITORY}" --json assets,tagName
