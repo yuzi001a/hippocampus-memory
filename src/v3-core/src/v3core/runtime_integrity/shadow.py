@@ -131,20 +131,20 @@ def verdict_for_process(
     if _resolution_matches_approved(resolution, approved):
         # Stale-process guard (§25): content changed after the process
         # started => the live process may still run the old modules.
-        if (
-            active is not None
-            and active.mtime_iso
-            and process_started
-            and active.mtime_iso > process_started
-        ):
-            notes.append(
-                "active package content is newer than this process's start time; "
-                "restart required before the running process can load it"
-            )
-            details["stale_process"] = True
-            details["package_mtime"] = active.mtime_iso
-            details["process_started"] = process_started
-            return VERDICT_HEALTHY, SEVERITY_WARN, notes, details
+        # Normalize the separator before comparing ("T" vs " " would sort
+        # wrong at the first differing character).
+        if active is not None and active.mtime_iso and process_started:
+            norm_m = str(active.mtime_iso).replace("T", " ")[:19]
+            norm_p = str(process_started).replace("T", " ")[:19]
+            if norm_m > norm_p:
+                notes.append(
+                    "active package content is newer than this process's start time; "
+                    "restart required before the running process can load it"
+                )
+                details["stale_process"] = True
+                details["package_mtime"] = active.mtime_iso
+                details["process_started"] = process_started
+                return VERDICT_HEALTHY, SEVERITY_WARN, notes, details
         return VERDICT_HEALTHY, SEVERITY_INFO, notes, details
 
     # Not matching. Is there an approved copy elsewhere that is being shadowed?
