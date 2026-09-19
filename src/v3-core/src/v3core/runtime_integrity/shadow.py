@@ -96,9 +96,17 @@ def verdict_for_process(
     resolution: ResolutionResult,
     copies: list[InstallCopy],
     approved: ApprovedArtifact | None,
+    process_started: str | None = None,
 ) -> tuple[str, str, list[str], dict]:
     """Return ``(verdict, severity, notes, details)`` for one process
-    resolution. ``details`` may carry shadow evidence."""
+    resolution. ``details`` may carry shadow evidence.
+
+    ``process_started`` (ISO string) enables the stale-process guard: when
+    the active package content is NEWER than the process start time, the
+    process may still hold pre-upgrade modules in memory — the verdict
+    stays HEALTHY but severity is raised to warn ("restart required"), so
+    a disk-upgraded-but-not-restarted host cannot read as a clean PASS.
+    """
     notes: list[str] = []
     details: dict = {}
 
@@ -121,6 +129,22 @@ def verdict_for_process(
         return VERDICT_PROCESS_UNVERIFIED, SEVERITY_WARN, notes, details
 
     if _resolution_matches_approved(resolution, approved):
+        # Stale-process guard (§25): content changed after the process
+        # started => the live process may still run the old modules.
+        if (
+            active is not None
+            and active.mtime_iso
+            and process_started
+            and active.mtime_iso > process_started
+        ):
+            notes.append(
+                "active package content is newer than this process's start time; "
+                "restart required before the running process can load it"
+            )
+            details["stale_process"] = True
+            details["package_mtime"] = active.mtime_iso
+            details["process_started"] = process_started
+            return VERDICT_HEALTHY, SEVERITY_WARN, notes, details
         return VERDICT_HEALTHY, SEVERITY_INFO, notes, details
 
     # Not matching. Is there an approved copy elsewhere that is being shadowed?

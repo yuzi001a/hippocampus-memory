@@ -162,7 +162,9 @@ def build_report(
             ))
             continue
         res = probe_environment(py, pythonpath=proc.pythonpath, cwd=proc.cwd, timeout=probe_timeout)
-        verdict, severity, notes, details = verdict_for_process(res, copies, approved)
+        verdict, severity, notes, details = verdict_for_process(
+            res, copies, approved, process_started=proc.started_at
+        )
         pr = ProcessResolution(process=proc, resolution=res, verdict=verdict, severity=severity, notes=notes)
         if details:
             pr.notes = pr.notes + [f"{k}={v}" for k, v in sorted(details.items())]
@@ -182,6 +184,13 @@ def build_report(
         verdict, severity = VERDICT_PROCESS_UNVERIFIED, SEVERITY_WARN
     elif verdicts and all(v == VERDICT_HEALTHY for v in verdicts):
         verdict, severity = VERDICT_HEALTHY, SEVERITY_INFO
+        # Escalate when any process reported warn-level conditions even
+        # though its content matches (e.g. stale process: the disk was
+        # upgraded but the process has not been restarted yet). A host in
+        # that state must not read as a clean PASS.
+        per_proc_worst = worst_severity([pr.severity for pr in process_resolutions])
+        if per_proc_worst == SEVERITY_WARN:
+            severity = SEVERITY_WARN
     else:
         verdict, severity = VERDICT_PROCESS_UNVERIFIED, SEVERITY_WARN
         if not verdicts:

@@ -84,7 +84,7 @@ def _fake_process(pythonpath: str, *, role: str = "serve", pid: int = 4001) -> P
         virtual_env="",
         path_present=True,
         path_entry_count=5,
-        started_at="2026-09-19 09:00:00",
+        started_at="2099-01-01 00:00:00",
     )
 
 

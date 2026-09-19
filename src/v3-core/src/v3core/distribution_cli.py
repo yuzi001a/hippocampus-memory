@@ -2571,11 +2571,17 @@ def _install_plan(args) -> int:
                           "detail": f"runtime_integrity module unavailable: {exc}"},
                          ensure_ascii=False))
         return 2
-    plan = build_install_plan(
-        hermes_home=getattr(args, "hermes_home", None) or _default_hermes_home(),
-        approved_wheel=getattr(args, "wheel", None),
-        tag=getattr(args, "tag", None),
-    )
+    try:
+        plan = build_install_plan(
+            hermes_home=getattr(args, "hermes_home", None) or _default_hermes_home(),
+            approved_wheel=getattr(args, "wheel", None),
+            tag=getattr(args, "tag", None),
+        )
+    except Exception as exc:
+        print(json.dumps({"command": "install", "plan": True, "status": "error",
+                          "detail": f"plan failed: {type(exc).__name__}: {exc}"},
+                         ensure_ascii=False))
+        return 2
     payload = {"command": "install", "plan": True, **plan.to_dict()}
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
     return 2 if plan.severity == "error" else 0

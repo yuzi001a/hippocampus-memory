@@ -46,7 +46,7 @@ def _proc(pythonpath: str, pid: int = 5001, role: str = "serve") -> ProcessInfo:
         role=role, pid=pid, ppid=1, name="python.exe",
         executable=sys.executable, cmdline="python -m hermes_cli.main serve",
         cwd=None, pythonpath=pythonpath, virtual_env="",
-        path_present=True, path_entry_count=4, started_at="2026-09-19 09:00:00",
+        path_present=True, path_entry_count=4, started_at="2099-01-01 00:00:00",
     )
 
 
