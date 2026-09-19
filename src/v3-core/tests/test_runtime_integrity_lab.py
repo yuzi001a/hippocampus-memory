@@ -256,3 +256,26 @@ def test_process_info_has_no_env_payload():
     blob = json.dumps(d)
     # no PATH VALUE can ever appear — only the count/presence summary exists
     assert "path_entry_count" in blob
+
+
+# ── §30 uninstall plan ────────────────────────────────────────────────────
+
+
+def test_uninstall_plan_targets_active_copy(tmp_path):
+    """The uninstall plan must point at the ACTIVE copy and warn that
+    removing only a staging copy would leave the plugin loaded."""
+    from v3core.runtime_integrity import build_uninstall_plan
+
+    venv = tmp_path / "venv_sp"
+    _write_package(venv, "APPROVED")
+    rt = tmp_path / "runtime_sp"
+    _write_package(rt, "APPROVED")
+    plan = build_uninstall_plan(
+        extra_roots=[venv, rt],
+        processes=[_proc(str(venv), started="2099-01-01 00:00:00")],
+    )
+    assert any("venv_sp" in p["location"] for p in plan.active_packages)
+    assert any("runtime_sp" in p["location"] for p in plan.duplicate_packages)
+    assert plan.requires_restart
+    assert any("active" in w.lower() for w in plan.warnings)
+    assert plan.db_writes is False

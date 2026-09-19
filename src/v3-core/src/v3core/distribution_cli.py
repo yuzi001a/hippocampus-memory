@@ -2351,6 +2351,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     install.add_argument("--tag", default=None, help="Release tag label for --wheel.")
 
+    uninst = sub.add_parser(
+        "uninstall",
+        help=(
+            "Uninstall planning: list the ACTIVE packages, duplicates, config, "
+            "database and source-data concerns. Execution is not implemented in "
+            "this round — --plan only."
+        ),
+    )
+    uninst.add_argument("--plan", action="store_true",
+                        help="Emit the uninstall plan (required; execution is not implemented).")
+    uninst.add_argument("--hermes-home", default=None)
+
     imp = sub.add_parser(
         "import",
         help="Import existing memory (raw history / user-curated notes / other systems).",
@@ -2560,6 +2572,37 @@ def _resolve_profile_dir(explicit: str | None):
         return _Path(_cfg._resolve_data_dir(cfg))
     except Exception:
         return _Path.home() / ".v3-core" / "profiles" / "default"
+
+
+def _uninstall(args) -> int:
+    """Uninstall planning only (§30). Execution is not implemented this round."""
+    try:
+        from v3core.runtime_integrity import build_uninstall_plan
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "uninstall", "status": "error",
+                          "detail": f"runtime_integrity module unavailable: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    if not getattr(args, "plan", False):
+        print(json.dumps({
+            "command": "uninstall",
+            "status": "error",
+            "detail": "uninstall execution is not implemented in this round; "
+                      "run `hippocampus uninstall --plan` to inspect the plan",
+        }, ensure_ascii=False))
+        return 2
+    try:
+        plan = build_uninstall_plan(
+            hermes_home=getattr(args, "hermes_home", None) or _default_hermes_home(),
+        )
+    except Exception as exc:
+        print(json.dumps({"command": "uninstall", "plan": True, "status": "error",
+                          "detail": f"plan failed: {type(exc).__name__}: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    payload = {"command": "uninstall", "plan": True, **plan.to_dict()}
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+    return 0
 
 
 def _install_plan(args) -> int:
@@ -2861,6 +2904,8 @@ def main(argv: list[str] | None = None) -> int:
         return _upgrade(args)
     if args.command == "install":
         return _install(args)
+    if args.command == "uninstall":
+        return _uninstall(args)
     if args.command == "import":
         return _import(args)
     if args.command == "rebuild":

@@ -91,6 +91,118 @@ def _expected_site_packages(python_exe: str) -> str | None:
     return None
 
 
+@dataclass
+class UninstallPlan:
+    schema_version: str = "1"
+    generated_at: str = ""
+    host: dict[str, Any] = field(default_factory=dict)
+    active_packages: list[dict[str, Any]] = field(default_factory=list)
+    duplicate_packages: list[dict[str, Any]] = field(default_factory=list)
+    requires_restart: list[str] = field(default_factory=list)
+    config: dict[str, Any] = field(default_factory=dict)
+    database: dict[str, Any] = field(default_factory=dict)
+    source_data: dict[str, Any] = field(default_factory=dict)
+    preserve_data_option: str = (
+        "--preserve-data keeps config, database contents, and source data; "
+        "removing packages alone does not delete memory."
+    )
+    steps: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    db_writes: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "generated_at": self.generated_at,
+            "host": dict(self.host),
+            "active_packages": list(self.active_packages),
+            "duplicate_packages": list(self.duplicate_packages),
+            "requires_restart": list(self.requires_restart),
+            "config": dict(self.config),
+            "database": dict(self.database),
+            "source_data": dict(self.source_data),
+            "preserve_data_option": self.preserve_data_option,
+            "steps": list(self.steps),
+            "warnings": list(self.warnings),
+            "db_writes": self.db_writes,
+        }
+
+
+def build_uninstall_plan(
+    *,
+    hermes_home: str | Path | None = None,
+    checkout: str | Path | None = None,
+    extra_roots: list[str | Path] | None = None,
+    processes: Any | None = None,
+) -> UninstallPlan:
+    """Produce a read-only uninstall plan targeting the ACTUAL loaded install
+    (§30). Never deletes anything; execution is operator-gated."""
+    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds")
+    report = build_report(
+        hermes_home=hermes_home,
+        checkout=checkout,
+        extra_roots=extra_roots,
+        processes=processes,
+    )
+    plan = UninstallPlan(generated_at=now)
+    plan.host = dict(report.host)
+
+    for c in report.copies:
+        row = {
+            "package": c.package,
+            "location": c.package_root,
+            "state": c.state,
+            "install_type": c.install_type,
+            "version": c.version,
+        }
+        if c.state == "active":
+            plan.active_packages.append(row)
+        else:
+            plan.duplicate_packages.append(row)
+
+    roles = sorted({pr.process.role for pr in report.live_processes
+                    if pr.process.role in ("serve", "gateway")})
+    plan.requires_restart = roles or ["serve", "gateway"]
+
+    # Config / source-data pointers are hints only (never touched by this plan).
+    if report.host.get("hermes_home"):
+        plan.config = {"profile_hint": "~/.v3-core/profiles/default (engine default)"}
+    plan.database = {
+        "target": "configured PostgreSQL/pgvector database",
+        "action": "NOT touched by uninstall; data preserved unless the operator "
+                  "explicitly drops the database",
+    }
+    plan.source_data = {
+        "note": "j/ outbox + profile data live under the engine profile dir; "
+                "preserved by default",
+    }
+
+    if plan.active_packages and plan.duplicate_packages:
+        plan.warnings.append(
+            "multiple copies exist; removing only one (e.g. a staging directory) "
+            "would leave the ACTIVE plugin loaded — remove the active copy listed "
+            "above, or the host keeps loading it"
+        )
+    if not plan.active_packages:
+        plan.warnings.append(
+            "no live-resolved active copy; the plan lists on-disk copies only"
+        )
+
+    plan.steps = [
+        "1. Snapshot live identity (doctor --runtime --json).",
+        "2. Stop every affected component: " + ", ".join(plan.requires_restart) + ".",
+        "3. Remove the ACTIVE packages (v3core, v3hermes + dist-info) from the "
+        "loaded environment listed above.",
+        "4. Optionally remove duplicate/staging copies (see duplicate list).",
+        "5. Restart the components from step 2.",
+        "6. Verify: doctor --runtime must report no active full-plugin install "
+        "(or the intended remaining state).",
+        "Data (config / database / source data) is preserved unless the operator "
+        "explicitly removes it — package removal never deletes memory.",
+    ]
+    return plan
+
+
 def build_install_plan(
     *,
     hermes_home: str | Path | None = None,

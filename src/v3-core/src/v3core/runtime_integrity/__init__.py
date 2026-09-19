@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from .contract import approved_from_wheel, build_report, discover_processes
 from .discovery import candidate_roots, discover_copies
-from .plan import InstallPlan, build_install_plan
+from .plan import InstallPlan, UninstallPlan, build_install_plan, build_uninstall_plan
 from .identity import (
     SCOPE_CRITICAL,
     SCOPE_FULL,
@@ -91,4 +91,6 @@ __all__ = [
     # planning
     "build_install_plan",
     "InstallPlan",
+    "build_uninstall_plan",
+    "UninstallPlan",
 ]
