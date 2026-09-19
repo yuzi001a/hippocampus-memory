@@ -83,6 +83,7 @@ class HealthReport:
     generated_at: str = ""
     profile: dict[str, Any] = field(default_factory=dict)
     runtime: dict[str, Any] = field(default_factory=dict)
+    runtime_integrity: dict[str, Any] = field(default_factory=dict)
     storage: dict[str, Any] = field(default_factory=dict)
     memory_write: dict[str, Any] = field(default_factory=dict)
     failure_accounting: dict[str, Any] = field(default_factory=dict)

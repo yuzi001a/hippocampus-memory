@@ -206,6 +206,20 @@ _ACTION_BASE: dict[str, dict[str, Any]] = {
         "target_count_keys": ("malformed", "current_malformed"),
         "estimated_cost_keys": (),
     },
+    "ALIGN_ACTIVE_RUNTIME_TO_APPROVED_RELEASE": {
+        "risk": "high",
+        "reversible": True,
+        "requires_provider": False,
+        "writes_database": False,
+        "automatic_safe": False,
+        "reason": "Align the ACTUALLY LOADED environment with the approved "
+                  "artifact: install approved wheels into the live env, "
+                  "restart serve+gateway, re-verify via doctor --runtime. "
+                  "Rollback: restore backup + restart. No DB writes.",
+        "issue_codes": ("RUNTIME_SHADOWED_INSTALL", "RUNTIME_RELEASE_MISMATCH"),
+        "target_count_keys": (),
+        "estimated_cost_keys": (),
+    },
 }
 
 

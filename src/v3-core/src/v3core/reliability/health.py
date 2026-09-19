@@ -209,6 +209,11 @@ class HealthService:
         debug_paths: bool = False,
         deep_auth_runner: Callable[..., dict[str, Any]] | None = None,
         config_loader: Callable[..., dict[str, Any]] | None = None,
+        runtime_integrity_enabled: bool = True,
+        approved_wheel: str | Path | None = None,
+        hermes_home: Path | None = None,
+        runtime_processes: Any | None = None,
+        runtime_extra_roots: Any | None = None,
     ):
         self.profile_dir = Path(profile_dir) if profile_dir is not None else None
         self.base_path = Path(base_path) if base_path is not None else None
@@ -227,6 +232,13 @@ class HealthService:
         self.config_loader = config_loader or (
             lambda **kw: _default_config_loader()
         )
+        # Runtime-integrity inputs (2026-09-19): which code do LIVE
+        # processes actually load, and does it match the approved wheel?
+        self.runtime_integrity_enabled = bool(runtime_integrity_enabled)
+        self.approved_wheel = Path(approved_wheel) if approved_wheel is not None else None
+        self.hermes_home = Path(hermes_home) if hermes_home is not None else None
+        self.runtime_processes = runtime_processes
+        self.runtime_extra_roots = runtime_extra_roots
 
     # ── entry point ──
     def collect(self) -> HealthReport:
@@ -264,11 +276,13 @@ class HealthService:
         try:
             checks: list[CheckResult] = []
             sections: dict[str, dict[str, Any]] = {
-                "runtime": {}, "storage": {}, "memory_write": {},
-                "failure_accounting": {}, "derived_memory": {}, "providers": {},
+                "runtime": {}, "runtime_integrity": {}, "storage": {},
+                "memory_write": {}, "failure_accounting": {}, "derived_memory": {},
+                "providers": {},
             }
 
             self._collect_runtime(checks, sections)
+            self._collect_runtime_integrity(checks, sections)
             self._collect_storage(
                 checks, sections, conn=conn, conn_err=conn_err, allow_pg=allow_pg
             )
@@ -305,6 +319,7 @@ class HealthService:
                     "config_parsed": False,
                 },
                 runtime=sections["runtime"],
+                runtime_integrity=sections["runtime_integrity"],
                 storage=sections["storage"],
                 memory_write=sections["memory_write"],
                 failure_accounting=sections["failure_accounting"],
@@ -443,6 +458,211 @@ class HealthService:
             "profile": {
                 "parsed": parsed,
             },
+        }
+
+    def _collect_runtime_integrity(
+        self, checks: list[CheckResult], sections: dict[str, dict[str, Any]]
+    ) -> None:
+        """RT05-RT09 — runtime code provenance (2026-09-19 contract).
+
+        Answers the question the 2026-09-19 incident exposed: is the
+        v3core content that LIVE production processes actually load the
+        content of an approved Release artifact? The probe is run under
+        each process's exact environment — never a sanitized one.
+
+        Degrades to skip when disabled or when the runtime_integrity
+        module is unavailable; degrades process checks to warn (never
+        silently passes) when live processes cannot be inspected.
+        """
+        ids = (
+            "RT05_runtime_duplicates", "RT06_runtime_active_install",
+            "RT07_runtime_approved_match", "RT08_runtime_shadow_detected",
+            "RT09_runtime_live_processes",
+        )
+
+        def _skip_all(summary: str) -> None:
+            for cid in ids:
+                checks.append(CheckResult(
+                    check_id=cid, section="runtime_integrity",
+                    status=STATUS_SKIP, summary=summary, evidence={}, duration_ms=0,
+                ))
+            sections["runtime_integrity"] = {"skipped": summary}
+
+        if not self.runtime_integrity_enabled:
+            _skip_all("runtime integrity disabled")
+            return
+        try:
+            from v3core.runtime_integrity import approved_from_wheel, build_report
+        except Exception as exc:
+            _skip_all(f"runtime_integrity module unavailable: {sanitize_text(str(exc))}")
+            return
+
+        approved = None
+        approved_note = "not supplied"
+        if self.approved_wheel is not None:
+            try:
+                approved = approved_from_wheel(str(self.approved_wheel))
+                approved_note = f"{approved.wheel_filename} sha256={str(approved.wheel_sha256)[:12]}..."
+            except Exception as exc:
+                approved_note = f"unreadable: {sanitize_text(str(exc))}"
+        try:
+            report = build_report(
+                hermes_home=self.hermes_home,
+                extra_roots=self.runtime_extra_roots,
+                approved=approved,
+                processes=self.runtime_processes,
+            )
+        except Exception as exc:
+            _skip_all(f"runtime integrity probe failed: {sanitize_text(str(exc))}")
+            return
+
+        v3core_copies = [c for c in report.copies if c.package == "v3core"]
+        duplicates = [c for c in v3core_copies if c.state == "duplicate"]
+        dup_approved = [c for c in duplicates if c.install_type == "official_release"]
+        editables = [c for c in v3core_copies
+                     if c.install_type in ("editable", "source_tree")]
+        active = [c for c in v3core_copies if c.state == "active"]
+
+        # RT05 — duplicates (informational; duplicates of the approved
+        # artifact are NOT an error per the contract).
+        rt05_status = STATUS_OK
+        if report.verdict in ("SHADOWED_APPROVED_INSTALL", "RUNTIME_RELEASE_MISMATCH"):
+            rt05_status = STATUS_WARN
+        checks.append(CheckResult(
+            check_id="RT05_runtime_duplicates", section="runtime_integrity",
+            status=rt05_status,
+            summary=(
+                f"{len(v3core_copies)} v3core copies on disk; "
+                f"{len(duplicates)} duplicate(s), {len(dup_approved)} matching approved"
+            ),
+            evidence={
+                "duplicate_install_count": len(duplicates),
+                "duplicate_approved_count": len(dup_approved),
+                "copy_paths": [c.package_root for c in v3core_copies],
+            },
+            duration_ms=0,
+        ))
+
+        # RT06 — active install identity.
+        if active:
+            a = active[0]
+            rt06_status = STATUS_OK
+            rt06_evidence = {
+                "active_install": a.package_root,
+                "install_type": a.install_type,
+                "version": a.version,
+                "fingerprint": a.fingerprint,
+                "fingerprint_scope": a.fingerprint_scope,
+            }
+        else:
+            rt06_status = STATUS_OK if v3core_copies else STATUS_WARN
+            rt06_evidence = {
+                "active_install": None,
+                "install_type": None,
+                "note": "no live process resolution available",
+            }
+        checks.append(CheckResult(
+            check_id="RT06_runtime_active_install", section="runtime_integrity",
+            status=rt06_status,
+            summary=(
+                f"active v3core: {rt06_evidence.get('install_type') or 'unknown'}"
+                + (f" @ {rt06_evidence['active_install']}" if rt06_evidence.get("active_install") else "")
+            ),
+            evidence=rt06_evidence,
+            duration_ms=0,
+        ))
+
+        # RT07 — approved release match.
+        if approved is None:
+            rt07_status = STATUS_OK  # cannot compare; not a failure by itself
+            rt07_match = "unavailable"
+            rt07_summary = "approved artifact not supplied; content match not evaluated"
+        else:
+            rt07_match = "yes" if report.verdict == "HEALTHY" else "no"
+            rt07_status = STATUS_OK if report.verdict == "HEALTHY" else STATUS_FAIL
+            rt07_summary = (
+                "live content matches the approved release"
+                if report.verdict == "HEALTHY"
+                else "live content does NOT match the approved release"
+            )
+        checks.append(CheckResult(
+            check_id="RT07_runtime_approved_match", section="runtime_integrity",
+            status=rt07_status,
+            summary=rt07_summary,
+            evidence={
+                "approved": approved_note,
+                "approved_release_match": rt07_match,
+                "verdict": report.verdict,
+            },
+            duration_ms=0,
+        ))
+
+        # RT08 — shadow / editable conflicts.
+        rt08_status = STATUS_OK
+        rt08_summary = "no shadowed or editable installs detected"
+        if report.verdict == "RUNTIME_EDITABLE_ACTIVE":
+            rt08_status = STATUS_FAIL
+            rt08_summary = "live resolution loads an editable/source-tree install"
+        elif report.verdict == "SHADOWED_APPROVED_INSTALL":
+            rt08_status = STATUS_FAIL
+            rt08_summary = "approved content is shadowed by a non-approved active copy"
+        elif editables:
+            rt08_status = STATUS_WARN
+            rt08_summary = "editable/source-tree copies present on disk (not loaded)"
+        checks.append(CheckResult(
+            check_id="RT08_runtime_shadow_detected", section="runtime_integrity",
+            status=rt08_status,
+            summary=rt08_summary,
+            evidence={
+                "shadow_detected": report.verdict == "SHADOWED_APPROVED_INSTALL",
+                "editable_active": report.verdict == "RUNTIME_EDITABLE_ACTIVE",
+                "editable_copies": [c.package_root for c in editables],
+                "details": report.details,
+            },
+            duration_ms=0,
+        ))
+
+        # RT09 — live process verdicts.
+        per_proc = [
+            {"role": pr.process.role, "pid": pr.process.pid, "verdict": pr.verdict}
+            for pr in report.live_processes
+        ]
+        if not report.live_processes:
+            rt09_status = STATUS_WARN
+            rt09_summary = "no live Hermes processes discovered to verify"
+        elif any(pr.verdict == "HEALTHY" for pr in report.live_processes) and all(
+            pr.verdict in ("HEALTHY",) for pr in report.live_processes
+        ):
+            rt09_status = STATUS_OK
+            rt09_summary = f"{len(per_proc)} live process(es) verified"
+        elif any(pr.severity == "error" for pr in report.live_processes):
+            rt09_status = STATUS_FAIL
+            rt09_summary = "live process(es) resolve to unapproved content"
+        else:
+            rt09_status = STATUS_WARN
+            rt09_summary = "live process verification incomplete"
+        checks.append(CheckResult(
+            check_id="RT09_runtime_live_processes", section="runtime_integrity",
+            status=rt09_status,
+            summary=rt09_summary,
+            evidence={
+                "live_processes_checked": len(report.live_processes),
+                "processes": per_proc,
+                "degraded": report.degraded,
+                "evidence_scope": report.evidence_scopes,
+            },
+            duration_ms=0,
+        ))
+
+        sections["runtime_integrity"] = {
+            "verdict": report.verdict,
+            "severity": report.severity,
+            "duplicate_install_count": len(duplicates),
+            "active_install": active[0].package_root if active else None,
+            "shadow_detected": report.verdict == "SHADOWED_APPROVED_INSTALL",
+            "editable_active": report.verdict == "RUNTIME_EDITABLE_ACTIVE",
+            "live_processes_checked": len(report.live_processes),
+            "approved": approved_note,
         }
 
     def _collect_storage(

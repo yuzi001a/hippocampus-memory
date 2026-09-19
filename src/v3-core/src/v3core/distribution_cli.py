@@ -2386,6 +2386,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ("--debug-paths", "debug_paths", "store_true",
          "Include raw filesystem paths in path labels (off by default; "
          "default output is a kind/leaf/hash12 triple)."),
+        ("--wheel", "wheel", "store",
+         "Approved release wheel path (optional). Enables exact content "
+         "comparison in the runtime-integrity checks (RT05-RT09 / "
+         "doctor --runtime)."),
+        ("--tag", "tag", "store",
+         "Release tag label for --wheel (e.g. v0.2.1)."),
+        ("--hermes-home", "hermes_home", "store",
+         "Hermes home directory used for runtime-integrity discovery "
+         "(defaults to HERMES_HOME or the platform convention)."),
     )
 
     health_p = sub.add_parser(

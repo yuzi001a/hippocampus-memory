@@ -128,6 +128,61 @@ def _classify_runtime(report) -> list[Diagnosis]:
     return out
 
 
+def _classify_runtime_integrity(report) -> list[Diagnosis]:
+    """RT05..RT09 — runtime code provenance (2026-09-19 contract).
+
+    These codes describe what LIVE production processes actually load;
+    they are only emitted when the runtime-integrity checks ran (not
+    skipped). See docs/RUNTIME-INTEGRITY.md for the identity contract.
+    """
+    out: list[Diagnosis] = []
+    rt05 = _find(report, "RT05_runtime_duplicates")
+    rt07 = _find(report, "RT07_runtime_approved_match")
+    rt08 = _find(report, "RT08_runtime_shadow_detected")
+    rt09 = _find(report, "RT09_runtime_live_processes")
+
+    if rt08 is not None and rt08.status == STATUS_FAIL:
+        ev = _ev(rt08)
+        if ev.get("editable_active"):
+            out.append(_diag(
+                "RUNTIME_EDITABLE_ACTIVE", "error", "runtime_integrity",
+                "live processes load an editable/source-tree install — "
+                "production contract is approved-release-only",
+                ev, repairable=False,
+            ))
+        elif ev.get("shadow_detected"):
+            out.append(_diag(
+                "RUNTIME_SHADOWED_INSTALL", "error", "runtime_integrity",
+                "live processes resolve to non-approved content while an "
+                "approved copy is shadowed",
+                ev, repairable=True,
+            ))
+
+    if rt07 is not None and rt07.status == STATUS_FAIL:
+        out.append(_diag(
+            "RUNTIME_RELEASE_MISMATCH", "error", "runtime_integrity",
+            "live content does not match the approved release artifact",
+            _ev(rt07), repairable=True,
+        ))
+
+    if rt05 is not None and rt05.status == STATUS_WARN:
+        out.append(_diag(
+            "RUNTIME_DUPLICATE_INSTALL", "info", "runtime_integrity",
+            "multiple v3core copies on disk (duplicates of the approved "
+            "artifact are informational, not errors)",
+            _ev(rt05), repairable=False,
+        ))
+
+    if rt09 is not None and rt09.status == STATUS_WARN:
+        out.append(_diag(
+            "RUNTIME_PROCESS_UNVERIFIED", "warning", "runtime_integrity",
+            "live process verification incomplete (no processes discovered "
+            "or probe degraded)",
+            _ev(rt09), repairable=False,
+        ))
+    return out
+
+
 def _classify_storage(report) -> list[Diagnosis]:
     out: list[Diagnosis] = []
     st01 = _find(report, "ST01_pg_reachable")
@@ -482,6 +537,7 @@ def diagnose(report) -> list[Diagnosis]:
 
     candidates: list[Diagnosis] = []
     candidates.extend(_classify_runtime(report))
+    candidates.extend(_classify_runtime_integrity(report))
     candidates.extend(_classify_storage(report))
     candidates.extend(_classify_memory_write(report))
     candidates.extend(_classify_failure_accounting(report))

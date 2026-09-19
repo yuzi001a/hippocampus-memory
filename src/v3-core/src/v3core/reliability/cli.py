@@ -160,11 +160,13 @@ def _build_service(args: argparse.Namespace) -> Any:
     """
     from .health import HealthService
 
+    import os as _os
     base_path = _resolve_base_path(getattr(args, "profile_dir", None))
     pg = _resolve_pg_dict(getattr(args, "profile_dir", None))
     # ``marker_dir`` defaults to ``base_path / 'j' / 'pending_qa'`` —
     # the engine's contract location for the failure ledger.
     marker_dir = base_path / "j" / "pending_qa"
+    hermes_home = getattr(args, "hermes_home", None) or _os.environ.get("HERMES_HOME")
 
     return HealthService(
         profile_dir=base_path,
@@ -176,6 +178,8 @@ def _build_service(args: argparse.Namespace) -> Any:
         allow_production_read=bool(getattr(args, "allow_production_read", False)),
         deep=bool(getattr(args, "deep", False)),
         debug_paths=bool(getattr(args, "debug_paths", False)),
+        approved_wheel=getattr(args, "wheel", None),
+        hermes_home=hermes_home,
     )
 
 
