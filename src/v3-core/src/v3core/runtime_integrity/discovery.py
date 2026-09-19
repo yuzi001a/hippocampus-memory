@@ -126,13 +126,20 @@ def _editable_targets(site_packages: Path) -> dict[str, str]:
 
 def candidate_roots(
     *,
-    hermes_home: Path | None = None,
-    checkout: Path | None = None,
-    extra_roots: list[Path] | None = None,
+    hermes_home: Path | str | None = None,
+    checkout: Path | str | None = None,
+    extra_roots: list[Path | str] | None = None,
 ) -> list[tuple[Path, str]]:
-    """Return ``(site_packages_or_root, origin_label)`` candidates, deduped."""
+    """Return ``(site_packages_or_root, origin_label)`` candidates, deduped.
+
+    Accepts str or Path for every argument (str is coerced) so callers that
+    pass raw config values cannot crash discovery.
+    """
     out: list[tuple[Path, str]] = []
     seen: set[str] = set()
+    hermes_home = Path(hermes_home) if hermes_home is not None else None
+    checkout = Path(checkout) if checkout is not None else None
+    extra_roots = [Path(p) for p in (extra_roots or [])]
 
     def add(p: Path | None, origin: str) -> None:
         if p is None:
@@ -208,6 +215,9 @@ def discover_copies(
     """Find and classify every reachable copy. Deterministic order."""
     copies: list[InstallCopy] = []
     seen_pkg_roots: set[str] = set()
+    hermes_home = Path(hermes_home) if hermes_home is not None else None
+    checkout = Path(checkout) if checkout is not None else None
+    extra_roots = [Path(p) for p in (extra_roots or [])]
     roots = candidate_roots(hermes_home=hermes_home, checkout=checkout, extra_roots=extra_roots)
     for root, origin in roots:
         for pkg in _PACKAGES:

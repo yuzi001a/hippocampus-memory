@@ -156,7 +156,17 @@ $env:PGPASSWORD        = $pgPassword
 # 6. Static read-only install check
 hippocampus doctor --static
 
-# 7. Explicit database bootstrap against the disposable target.
+# 7. Runtime integrity — verify the host ACTUALLY loads this install.
+#    Version strings cannot tell builds apart (both read "4.0.0"); the check
+#    compares CONTENT fingerprints under the live process environment.
+hippocampus doctor --runtime --wheel .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
+#    Expect: "runtime integrity: HEALTHY" (exit 0).
+#    warn exit  = a restart is still pending (stale process).
+#    error exit = the host resolves to a different (shadowed) copy — fix the
+#                 environment before trusting the install.
+#    See docs/RUNTIME-INTEGRITY.md and docs/UPGRADE.md.
+
+# 8. Explicit database bootstrap against the disposable target.
 #    Port 5433 and local `v3embeddings` are unconditionally refused — no override.
 hippocampus bootstrap --target "postgres://postgres@127.0.0.1:${pgPort}/v3embeddings_alpha"
 ```
