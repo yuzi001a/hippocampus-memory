@@ -2335,6 +2335,21 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument("--plugin-wheel", default=None,
                          help="Path to the v3-hermes-plugin wheel (or source directory) so the"
                               " installer can put the provider into the Hermes environment.")
+    install.add_argument(
+        "--plan",
+        action="store_true",
+        help=(
+            "PLAN ONLY: derive the actual loaded environment from live "
+            "processes, detect duplicate/shadowed copies, and print a "
+            "deterministic install/upgrade plan. Nothing is installed."
+        ),
+    )
+    install.add_argument(
+        "--wheel",
+        default=None,
+        help="Approved v3-core wheel for --plan (enables exact content comparison).",
+    )
+    install.add_argument("--tag", default=None, help="Release tag label for --wheel.")
 
     imp = sub.add_parser(
         "import",
@@ -2547,7 +2562,28 @@ def _resolve_profile_dir(explicit: str | None):
         return _Path.home() / ".v3-core" / "profiles" / "default"
 
 
+def _install_plan(args) -> int:
+    """PLAN ONLY — print a deterministic install/upgrade plan; never installs."""
+    try:
+        from v3core.runtime_integrity import build_install_plan
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "install", "plan": True, "status": "error",
+                          "detail": f"runtime_integrity module unavailable: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    plan = build_install_plan(
+        hermes_home=getattr(args, "hermes_home", None) or _default_hermes_home(),
+        approved_wheel=getattr(args, "wheel", None),
+        tag=getattr(args, "tag", None),
+    )
+    payload = {"command": "install", "plan": True, **plan.to_dict()}
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+    return 2 if plan.severity == "error" else 0
+
+
 def _install(args) -> int:
+    if getattr(args, "plan", False):
+        return _install_plan(args)
     try:
         from v3core import first_run
     except Exception as exc:  # pragma: no cover - defensive
@@ -2712,6 +2748,17 @@ def _doctor_full(args) -> int:
     return 0 if summary.get("fail", 0) == 0 else 1
 
 
+def _default_hermes_home() -> str | None:
+    """HERMES_HOME env -> Windows convention -> None (never guesses)."""
+    import os as _os
+    from pathlib import Path as _Path
+    hh = _os.environ.get("HERMES_HOME")
+    if hh:
+        return hh
+    cand = _Path.home() / "AppData" / "Local" / "hermes"
+    return str(cand) if cand.is_dir() else None
+
+
 def _doctor_runtime(args) -> int:
     """Runtime integrity: which v3core content do the LIVE processes load?
 
@@ -2736,12 +2783,7 @@ def _doctor_runtime(args) -> int:
                               "detail": f"approved wheel unreadable: {exc}"},
                              ensure_ascii=False))
             return 2
-    import os as _os
-    from pathlib import Path as _Path
-    hermes_home = _os.environ.get("HERMES_HOME")
-    if not hermes_home:
-        hh = _Path.home() / "AppData" / "Local" / "hermes"
-        hermes_home = str(hh) if hh.is_dir() else None
+    hermes_home = _default_hermes_home()
     scope = "full" if getattr(args, "runtime_deep", False) else "critical"
     report = build_report(hermes_home=hermes_home, approved=approved, scope=scope)
     payload = {"command": "doctor", "runtime": True, **report.to_dict()}
