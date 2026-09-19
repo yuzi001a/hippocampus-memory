@@ -2487,6 +2487,38 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --full: allow the write probe (writes one row into the target DB).",
     )
+    doctor.add_argument(
+        "--runtime",
+        action="store_true",
+        help=(
+            "Runtime integrity section: verify which v3core content the LIVE "
+            "Hermes processes actually load, against an approved Release "
+            "artifact (--wheel). Exit 0 healthy, 1 unverified/degraded, "
+            "2 integrity violation (shadow/mismatch/editable)."
+        ),
+    )
+    doctor.add_argument(
+        "--wheel",
+        default=None,
+        help="Path to the approved release wheel (enables exact content comparison).",
+    )
+    doctor.add_argument(
+        "--tag",
+        default=None,
+        help="Release tag label for --wheel (e.g. v0.2.1).",
+    )
+    doctor.add_argument(
+        "--json",
+        dest="runtime_json",
+        action="store_true",
+        help="With --runtime: emit the machine-readable JSON report instead of the human summary.",
+    )
+    doctor.add_argument(
+        "--deep",
+        dest="runtime_deep",
+        action="store_true",
+        help="With --runtime: fingerprint every package file instead of the critical set.",
+    )
 
     return parser
 
@@ -2671,10 +2703,98 @@ def _doctor_full(args) -> int:
     return 0 if summary.get("fail", 0) == 0 else 1
 
 
+def _doctor_runtime(args) -> int:
+    """Runtime integrity: which v3core content do the LIVE processes load?
+
+    Read-only: no environment writes, no process restarts, no DB access.
+    Exit codes: 0 healthy, 1 unverified/degraded, 2 integrity violation
+    (shadow / mismatch / editable-active).
+    """
+    try:
+        from v3core.runtime_integrity import approved_from_wheel, build_report
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "doctor", "runtime": True, "status": "error",
+                          "detail": f"runtime_integrity module unavailable: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    approved = None
+    wheel = getattr(args, "wheel", None)
+    if wheel:
+        try:
+            approved = approved_from_wheel(wheel, tag=getattr(args, "tag", None))
+        except Exception as exc:
+            print(json.dumps({"command": "doctor", "runtime": True, "status": "error",
+                              "detail": f"approved wheel unreadable: {exc}"},
+                             ensure_ascii=False))
+            return 2
+    import os as _os
+    from pathlib import Path as _Path
+    hermes_home = _os.environ.get("HERMES_HOME")
+    if not hermes_home:
+        hh = _Path.home() / "AppData" / "Local" / "hermes"
+        hermes_home = str(hh) if hh.is_dir() else None
+    scope = "full" if getattr(args, "runtime_deep", False) else "critical"
+    report = build_report(hermes_home=hermes_home, approved=approved, scope=scope)
+    payload = {"command": "doctor", "runtime": True, **report.to_dict()}
+    if getattr(args, "runtime_json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+    else:
+        _render_runtime_human(payload)
+    if report.severity == "error":
+        return 2
+    if report.severity == "warn":
+        return 1
+    return 0
+
+
+def _render_runtime_human(payload: dict) -> None:
+    """Compact human summary for ``doctor --runtime``."""
+    out: list[str] = ["Hermes runtime integrity", "=" * 26]
+    host = payload.get("host") or {}
+    out.append(f"host: platform={host.get('platform')} python={host.get('python')}")
+    appr = payload.get("approved")
+    if appr and appr.get("wheel_filename"):
+        sha = (appr.get("wheel_sha256") or "")[:12]
+        out.append(f"approved: {appr.get('tag') or '?'} {appr['wheel_filename']} (sha256 {sha}...)")
+        out.append(f"approved fingerprint: {str(appr.get('content_fingerprint'))[:16]}...")
+    else:
+        out.append("approved: not supplied (content comparison disabled; pass --wheel)")
+    out.append("")
+    out.append("live processes:")
+    for pr in payload.get("live_processes") or []:
+        proc = pr.get("process") or {}
+        res = pr.get("resolution") or {}
+        fp = str(res.get("fingerprint") or "")[:12]
+        out.append(
+            f"  {proc.get('role', '?'):8s} PID {proc.get('pid'):<7} -> {pr.get('verdict')}  fp={fp}"
+        )
+    active = [c for c in (payload.get("copies") or [])
+              if c.get("package") == "v3core" and c.get("state") == "active"]
+    if active:
+        out.append("")
+        out.append(f"loaded path: {active[0].get('package_root')}")
+    others = [c for c in (payload.get("copies") or [])
+              if c.get("package") == "v3core" and c.get("state") != "active"]
+    if others:
+        out.append("")
+        out.append("other copies:")
+        for c in others:
+            out.append(f"  {c.get('package_root')}  [{c.get('state')} - {c.get('install_type')}]")
+    if payload.get("degraded"):
+        out.append("")
+        out.append("degraded: " + "; ".join(payload["degraded"]))
+    out.append("")
+    out.append(f"runtime integrity: {payload.get('verdict')} ({payload.get('severity')})")
+    out.append(f"summary: {payload.get('summary')}")
+    print("\n".join(out))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "doctor":
+        if getattr(args, "runtime", False):
+            return _doctor_runtime(args)
         if getattr(args, "full", False):
             return _doctor_full(args)
         return _doctor(args)
