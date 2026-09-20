@@ -31,6 +31,10 @@ from ._deadline import PrefetchDeadlineExceeded, bind_store_deadline, coerce_dea
 from .ingest import LiveBuffer
 from .types import CardResult
 from .llm import LLMClient
+from .generated_context_contract import (
+    GeneratedContextError,
+    validate_situation_overview,
+)
 from .scheduler import E1Scheduler
 from .injector import MemoryInjector
 from .session_context import V3SessionContext
@@ -104,6 +108,21 @@ _PWD_SIG = re.compile(r'(password|passwd|pwd)\s*[=:]\s*\S+', re.IGNORECASE)
 _DSN_SIG = re.compile(r'://[^:]+:[^@]+@')
 _BEARER_SIG = re.compile(r'Bearer\s+\S+', re.IGNORECASE)
 _APIKEY_SIG = re.compile(r'(api[_-]?key)\s*[=:]\s*\S+', re.IGNORECASE)
+
+
+# -- 系统态势总览注入前缀 (手帐机制 C) --
+# 注入格式与身份块的"## 我是谁"段平级。定义在这里是因为读侧需要在**加前缀之前**
+# 校验产物，而缓存里存的是已加前缀的成品 —— 退化路径（读异常）要用同一个常量
+# 把 payload 剥回来再校验一次。
+_SITUATION_INJECT_PREFIX = "## 系统态势\n"
+
+
+def _situation_payload_of(injected_block: str) -> str:
+    """从"已加注入前缀"的成品里剥回可校验的 payload（校验器只认 payload）。"""
+    text = injected_block or ""
+    if text.startswith(_SITUATION_INJECT_PREFIX):
+        return text[len(_SITUATION_INJECT_PREFIX):]
+    return text
 
 
 def _extract_base_path(cfg) -> str:
@@ -1562,9 +1581,20 @@ class V3Core:
     def _read_situation_overview(self) -> str:
         """读取 E1 生成的系统态势总览（手帐机制 C：prefetch 固定注入）
 
+        P0 (2026-09-21): 该产物被逐字注入每个新 session，所以读侧与写侧共用
+        ``generated_context_contract.validate_situation_overview`` 做**同一份**
+        校验 —— 校验在加 ``## 系统态势`` 前缀**之前**进行。
+
+        fail-closed 语义：
+          * 校验失败 → 返回 ""，绝不返回原文；
+          * mtime 缓存只可能持有**通过校验**的值；
+          * 读异常不再无条件回退缓存 —— 缓存值必须在**本次调用**同样通过校验
+            才允许返回；
+          * 磁盘上是"更新但非法"的文件 → 返回 ""，绝不回退到更旧的缓存块。
+
         Returns:
-            "## 系统态势\n{content}" — 文件存在且 mtime 变化时。
-            "" — 文件不存在或读取失败时（静默，不阻塞注入链路）。
+            "## 系统态势\n{content}" — 文件存在、mtime 变化且通过校验时。
+            "" — 文件不存在、内容为空、未通过校验或读取失败时（静默，不阻塞注入链路）。
         """
         base_path = self._get_base_path()
         situation_path = base_path / "situation_overview.md"
@@ -1576,6 +1606,7 @@ class V3Core:
         try:
             situation_mtime = situation_path.stat().st_mtime
             # mtime 未变 → 直接返回进程内缓存（毫秒级）
+            # 缓存只可能持有通过校验的成品（见下方写入缓存的唯一位置）。
             if (
                 self._situation_overview is not None
                 and situation_mtime <= self._situation_overview_mtime
@@ -1588,15 +1619,40 @@ class V3Core:
             if not block:
                 return ""
 
+            # ── 输出契约闸门（读/注入侧，P0 2026-09-21）──
+            # 必须在加注入前缀之前校验：前缀本身是一个 level-2 标题，加上去之后
+            # 就再也过不了结构校验了。校验失败 → ""，绝不注入原文。
+            try:
+                validated = validate_situation_overview(block)
+            except GeneratedContextError as _contract_e:
+                logger.warning(
+                    "系统态势总览未通过输出契约，已拒绝注入 (来源=%s, reason=%s, "
+                    "chars=%d, detail=%s)",
+                    situation_path.name, _contract_e.reason, len(block),
+                    _contract_e.detail,
+                )
+                # fail-closed: 绝不回退到更旧的缓存块，也绝不污染缓存。
+                return ""
+
             # 注入格式: 与身份块的"## 我是谁"平级
-            formatted = "## 系统态势\n" + block
+            formatted = _SITUATION_INJECT_PREFIX + validated
             self._situation_overview = formatted
             self._situation_overview_mtime = situation_mtime
             logger.info("系统态势总览已读取 (来源=%s, %d 字)", situation_path.name, len(formatted))
             return formatted
         except Exception as e:
             logger.warning("系统态势总览读取失败: %s", _safe_err(e))
-            return self._situation_overview or ""
+            # 退化路径：缓存值必须在**本次调用**同样通过校验才允许返回，
+            # 否则清掉缓存并返回 ""（不再无条件回退）。
+            cached = self._situation_overview
+            if cached:
+                try:
+                    validate_situation_overview(_situation_payload_of(cached))
+                    return cached
+                except Exception:
+                    self._situation_overview = None
+                    self._situation_overview_mtime = 0.0
+            return ""
 
     # ── 卡库操作 ──
 

@@ -75,6 +75,54 @@ def _looks_like_rejected_extra(err: Exception) -> bool:
                                        "unexpected", "field required", "invalid_request"))
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Per-call output budget (additive; default path unchanged)
+#
+# ``chat(..., max_output_tokens=N)`` exists so a caller that KNOWS its answer is
+# short (e.g. the E1 300-500 字 系统态势总览) cannot leave the model a six-figure
+# token budget to overrun its output contract and keep generating into a second
+# chat turn. ``None`` means "exactly the historical behaviour" — the provider
+# default below is untouched for every existing caller.
+#
+# The provider field mapping is INTERNAL to this module:
+#   minimax (OpenAI-compatible endpoint) -> "max_completion_tokens"
+#   openai  (openai SDK)                 -> "max_tokens"
+# Callers never see which field is used.
+# ──────────────────────────────────────────────────────────────────────────────
+
+_MIN_OUTPUT_TOKENS = 1
+# 1M is already far beyond any model's output window; anything above it is a
+# unit/typo error (e.g. passing a character count as a token count).
+_MAX_OUTPUT_TOKENS = 1_000_000
+
+
+def validate_output_tokens(value: int | None) -> int | None:
+    """Validate an optional per-call output budget; return it or ``None``.
+
+    ``None`` is legal and means "use the provider default". Anything else must
+    be a real ``int`` in ``[_MIN_OUTPUT_TOKENS, _MAX_OUTPUT_TOKENS]``.
+    ``bool`` is rejected explicitly: ``isinstance(True, int)`` is True in
+    Python, and a stray flag must not silently become a 1-token budget.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(
+            f"max_output_tokens 必须是 int 或 None, 收到 {type(value).__name__}: {value!r}"
+        )
+    if value < _MIN_OUTPUT_TOKENS:
+        raise ValueError(
+            f"max_output_tokens 必须 >= {_MIN_OUTPUT_TOKENS}, 收到 {value}"
+            "（传 None 表示使用 provider 默认上限）"
+        )
+    if value > _MAX_OUTPUT_TOKENS:
+        raise ValueError(
+            f"max_output_tokens 超过合理上限 {_MAX_OUTPUT_TOKENS}, 收到 {value}"
+            "（传 None 表示使用 provider 默认上限）"
+        )
+    return value
+
+
 class LLMClient:
     """统一 LLM 客户端"""
 
@@ -156,8 +204,20 @@ class LLMClient:
                     return proxy
         return None
         
-    def chat(self, system: str, messages: list[dict], temperature: float = 0.7) -> str:
-        """调 LLM chat"""
+    def chat(self, system: str, messages: list[dict], temperature: float = 0.7,
+             max_output_tokens: int | None = None) -> str:
+        """调 LLM chat
+
+        ``max_output_tokens`` — OPTIONAL per-call output budget.
+        ``None`` (default) = exactly the historical behaviour, i.e. the
+        provider default set by this module/config; every existing caller is
+        unaffected. The caller never names a provider field: this method maps
+        the value to ``max_completion_tokens`` (minimax) or ``max_tokens``
+        (openai). Validated here, before any network I/O.
+        """
+        # Validate the budget FIRST: a bad caller value must fail locally
+        # (no request built, no credential touched) instead of being sent.
+        _output_override = validate_output_tokens(max_output_tokens)
         try:
             from . import llmstatus as _llmstatus
         except ImportError:
@@ -176,9 +236,9 @@ class LLMClient:
             raise RuntimeError("LLM api_key 缺失 (credential_missing)")
         try:
             if self.provider == "minimax":
-                result = self._chat_minimax(system, messages, temperature)
+                result = self._chat_minimax(system, messages, temperature, _output_override)
             elif self.provider == "openai":
-                result = self._chat_openai(system, messages, temperature)
+                result = self._chat_openai(system, messages, temperature, _output_override)
             else:
                 raise ValueError(f"不支持的 LLM provider: {self.provider}")
             if _llmstatus is not None:
@@ -195,7 +255,8 @@ class LLMClient:
                     pass
             raise
     
-    def _chat_minimax(self, system: str, messages: list[dict], temperature: float) -> str:
+    def _chat_minimax(self, system: str, messages: list[dict], temperature: float,
+                      max_output_tokens: int | None = None) -> str:
         # OpenAI 兼容端点 — 优先用 self.base_url（来自 config.yaml llm.base_url），
         # 空则回退到官方默认 https://platform.minimaxi.com/docs/api-reference/text-openai-api
         url = (
@@ -207,17 +268,24 @@ class LLMClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        # Per-call override wins; otherwise the historical literal 131072 is
+        # kept verbatim. Deliberately NOT self._max_tokens — that would change
+        # what every existing caller sends (llm.max_tokens is honoured on the
+        # openai path only, see _chat_openai).
+        _output_budget = 131072 if max_output_tokens is None else max_output_tokens
         body = {
             "model": self.model,
             "messages": [{"role": "system", "content": system}] + messages,
             "temperature": temperature,
-            "max_completion_tokens": 131072,  # M3 铁律: max_tokens 已弃用被忽略, 必须用 max_completion_tokens
+            "max_completion_tokens": _output_budget,  # M3 铁律: max_tokens 已弃用被忽略, 必须用 max_completion_tokens
             "thinking": {"type": "disabled"},  # 稳定 M3 输出
         }
         proxies = {"https": self._proxy} if self._proxy else None
         prompt_len = len(json.dumps(body, ensure_ascii=False))
-        logger.info("LLM call: provider=minimax model=%s prompt_len=%d temperature=%.2f",
-                    self.model, prompt_len, temperature)
+        logger.info("LLM call: provider=minimax model=%s prompt_len=%d temperature=%.2f "
+                    "max_completion_tokens=%d%s",
+                    self.model, prompt_len, temperature, _output_budget,
+                    "" if max_output_tokens is None else " (per-call override)")
 
         last_err = None
         for attempt in range(_MAX_RETRIES):
@@ -288,16 +356,22 @@ class LLMClient:
         logger.error("LLM failed after %d attempts: %s", _MAX_RETRIES, str(last_err)[:200])
         raise RuntimeError(f"LLM failed after {_MAX_RETRIES} attempts: {last_err}") from last_err
     
-    def _chat_openai(self, system: str, messages: list[dict], temperature: float) -> str:
+    def _chat_openai(self, system: str, messages: list[dict], temperature: float,
+                     max_output_tokens: int | None = None) -> str:
         import openai
         client_kwargs = {"api_key": self.api_key}
         if self.base_url:
             # 用户在 config.yaml llm.base_url 配置自定义端点（兼容硅基流动/自建）
             client_kwargs["base_url"] = self.base_url
         client = openai.OpenAI(**client_kwargs)
+        # Per-call override wins; otherwise self._max_tokens (llm.max_tokens,
+        # default 131072) — the field this path has always sent.
+        _output_budget = self._max_tokens if max_output_tokens is None else max_output_tokens
         prompt_len = sum(len(m.get("content", "") or "") for m in messages)
-        logger.info("LLM call: provider=openai model=%s prompt_len=%d temperature=%.2f",
-                    self.model, prompt_len, temperature)
+        logger.info("LLM call: provider=openai model=%s prompt_len=%d temperature=%.2f "
+                    "max_tokens=%d%s",
+                    self.model, prompt_len, temperature, _output_budget,
+                    "" if max_output_tokens is None else " (per-call override)")
         t0 = time.time()
         try:
             # 思考链: 默认开启 (deepseek reasoning 提升长输入覆盖完整性, 8/6 实测
@@ -315,7 +389,7 @@ class LLMClient:
                 "model": self.model,
                 "messages": [{"role": "system", "content": system}] + messages,
                 "temperature": temperature,
-                "max_tokens": self._max_tokens,
+                "max_tokens": _output_budget,
             }
             if extra:
                 call_kwargs["extra_body"] = extra
