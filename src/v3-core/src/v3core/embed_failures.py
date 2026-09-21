@@ -211,6 +211,7 @@ def record_embedding_failure(
     model: str = "",
     model_fingerprint: str = "",
     conn_factory=None,
+    commit: bool = True,
 ) -> bool:
     """Write (or bump) the durable failure marker for one entity.
 
@@ -218,6 +219,14 @@ def record_embedding_failure(
     must not be able to take down the very write path it is protecting — but a
     failure to record is logged loudly, because an unrecorded failure is exactly
     the silent hole this module exists to close.
+
+    ``commit=False`` joins the caller's transaction: the marker row is written
+    on the caller-supplied ``conn`` with no commit/rollback of its own, so a
+    derived-state commit (parent vector + sidecar children + ledger resolution)
+    can land atomically. ``commit=False`` requires a caller-supplied ``conn``
+    (opening a private connection that nobody commits would strand an open
+    transaction); without one the marker is NOT written and False is returned.
+    Default ``True`` preserves the historical standalone behavior exactly.
     """
     if isinstance(error, EmbeddingCallError):
         error_class = error.error_class.value
@@ -246,6 +255,13 @@ def record_embedding_failure(
 
     own_conn = False
     if conn is None:
+        if not commit:
+            logger.error(
+                "embedding 失败标记无法写入 (commit=False 需要调用方连接) — "
+                "这是一次**未被记录**的失败: entity=%s/%s phase=%s",
+                entity_table, entity_id, phase,
+            )
+            return False
         conn = _resolve_conn(None, conn_factory)
         own_conn = conn is not None
     if conn is None:
@@ -275,13 +291,15 @@ def record_embedding_failure(
     try:
         with conn.cursor() as cur:
             cur.execute(_UPSERT_SQL, params)
-        conn.commit()
+        if commit:
+            conn.commit()
         return True
     except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+        if commit:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         logger.error(
             "embedding 失败标记写入失败 — 这是一次**未被记录**的失败, 会产生 silent NULL: "
             "entity=%s/%s phase=%s class=%s",
@@ -299,10 +317,17 @@ def record_embedding_failure(
 
 def resolve_embedding_failure(conn=None, *, entity_table: str, entity_id: str,
                               phase: str, resolution: str = "repaired",
-                              conn_factory=None) -> bool:
-    """Mark a previously-recorded failure as resolved (e.g. by a repair pass)."""
+                              conn_factory=None, commit: bool = True) -> bool:
+    """Mark a previously-recorded failure as resolved (e.g. by a repair pass).
+
+    ``commit=False`` joins the caller's transaction (no commit/rollback of its
+    own); without a caller-supplied ``conn`` nothing is resolved and False is
+    returned. Default ``True`` preserves the historical behavior exactly.
+    """
     own_conn = False
     if conn is None:
+        if not commit:
+            return False
         conn = _resolve_conn(None, conn_factory)
         own_conn = conn is not None
     if conn is None:
@@ -316,13 +341,15 @@ def resolve_embedding_failure(conn=None, *, entity_table: str, entity_id: str,
                 "resolution": resolution,
             })
             changed = cur.rowcount
-        conn.commit()
+        if commit:
+            conn.commit()
         return changed > 0
     except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+        if commit:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         logger.warning("embedding 失败标记 resolve 失败: %s/%s",
                        entity_table, entity_id, exc_info=True)
         return False
@@ -336,7 +363,7 @@ def resolve_embedding_failure(conn=None, *, entity_table: str, entity_id: str,
 
 def resolve_embedding_failures_for_entity(conn=None, *, entity_table: str,
                                           entity_id: str, resolution: str = "repaired",
-                                          conn_factory=None) -> int:
+                                          conn_factory=None, commit: bool = True) -> int:
     """关闭**一个实体**下所有仍未解决的 failure marker，返回被关闭的行数。
 
     与 :func:`resolve_embedding_failure` 的区别只有一个：没有 ``phase`` 谓词。
@@ -347,9 +374,15 @@ def resolve_embedding_failures_for_entity(conn=None, *, entity_table: str,
     作用域严格限定在 ``(entity_table, entity_id)``：不误伤其它实体、其它表，
     也不重写已 resolved 的历史行（``resolved_at IS NULL`` 守卫）。只 UPDATE 不
     DELETE。任何异常都不得冒泡 —— 记账不能拖垮 repair。
+
+    ``commit=False`` joins the caller's transaction (no commit/rollback of its
+    own); without a caller-supplied ``conn`` nothing is resolved and 0 is
+    returned. Default ``True`` preserves the historical behavior exactly.
     """
     own_conn = False
     if conn is None:
+        if not commit:
+            return 0
         conn = _resolve_conn(None, conn_factory)
         own_conn = conn is not None
     if conn is None:
@@ -362,13 +395,15 @@ def resolve_embedding_failures_for_entity(conn=None, *, entity_table: str,
                 "resolution": resolution,
             })
             changed = cur.rowcount
-        conn.commit()
+        if commit:
+            conn.commit()
         return int(changed or 0)
     except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+        if commit:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         logger.warning("embedding 失败标记按实体 resolve 失败: %s/%s",
                        entity_table, entity_id, exc_info=True)
         return 0

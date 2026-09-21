@@ -1656,11 +1656,406 @@ def _write_observation_note(
         return new_id
 
 
+# ── Long-observation derived index v1 (docs/LONG-OBSERVATION-INDEX.md) ──
+#
+# The source row is already committed by _write_observation_note before any of
+# this runs. Derived work must never roll back (or block) the source insert.
+_OBSERVATION_CHUNK_TABLE = "observation_embedding_chunks"
+_OBSERVATION_ENTITY_TABLE = "observation_notes"
+
+
+def _is_absent_table_error(err: Exception) -> bool:
+    """仅判“表不存在”类错误 — sidecar 预迁移 legacy-start 回退用。
+
+    覆盖 psycopg2 UndefinedTable (pgcode 42P01) 与 sqlite
+    OperationalError ("no such table")。禁止 catch-all。
+    """
+    if getattr(err, "pgcode", None) == "42P01":
+        return True
+    if type(err).__name__ == "UndefinedTable":
+        return True
+    msg = str(err).lower()
+    if "no such table" in msg:
+        return True
+    if "relation" in msg and "does not exist" in msg:
+        return True
+    return False
+
+
+def _observation_sidecar_present(pg) -> bool:
+    """sidecar 表是否存在 — to_regclass 探针, 永不抛错 (报错按存在处理)。
+
+    探针本身不在派生事务里: 预迁移 schema 下直接走 legacy 回退, 不 abort
+    调用方事务 (e1 以 commit=False 复用外层事务, 一次 abort 就会毁掉 INSERT)。
+    """
+    try:
+        with pg.cursor() as cur:
+            cur.execute("SELECT to_regclass('observation_embedding_chunks')")
+            row = cur.fetchone()
+        return bool(row and row[0])
+    except Exception:
+        return True
+
+
+def _record_observation_derived_failure(pg, note_id: int, phase: str,
+                                        error: BaseException, embed_cfg: dict,
+                                        fp: str, *, commit: bool = True) -> bool:
+    """为 observation 派生失败记 durable marker — 只存分类, 永不存原文。
+
+    record_embedding_failure 只持久化 error_class / retryable / provider
+    status / model 指纹与 error 指纹 (sha256 截断), 不存 source 文本、API
+    key 或完整 provider 响应。永不抛错。
+    """
+    try:
+        from .embed_failures import record_embedding_failure
+        return bool(record_embedding_failure(
+            conn=pg,
+            entity_table=_OBSERVATION_ENTITY_TABLE,
+            entity_id=str(note_id),
+            phase=phase,
+            error=error,
+            model=(embed_cfg.get("model") or "") if embed_cfg else "",
+            model_fingerprint=fp or "",
+            commit=commit,
+        ))
+    except Exception:
+        logger.warning("observer: observation 派生失败 marker 记录异常 (note=%s phase=%s)",
+                       note_id, phase, exc_info=True)
+        return False
+
+
+def _unwrap_embedding_error(err: BaseException):
+    """沿 __cause__/__context__ 找内层 EmbeddingCallError (分类用)。"""
+    try:
+        from .embedding import EmbeddingCallError
+    except Exception:
+        return None
+    seen: set[int] = set()
+    cur: BaseException | None = err
+    depth = 0
+    while cur is not None and depth < 8 and id(cur) not in seen:
+        if isinstance(cur, EmbeddingCallError):
+            return cur
+        seen.add(id(cur))
+        nxt = cur.__cause__ if cur.__cause__ is not None else cur.__context__
+        cur = nxt if isinstance(nxt, BaseException) else None
+        depth += 1
+    return None
+
+
+def _update_observation_parent_vector(pg, note_id: int, vec: list,
+                                      fp: str, table: str, *, commit: bool) -> None:
+    """legacy parent-only UPDATE — 缺 embed_model 列时走旧 SQL。
+
+    供 planner 缺席的 legacy 路径与 short 路径的 sidecar 缺席回退复用。
+    """
+    import json as _json
+    try:
+        with pg.cursor() as cur:
+            cur.execute(
+                f"UPDATE {table} SET embedding=%s::vector, embed_model=%s WHERE id=%s",
+                (_json.dumps(vec), fp, note_id),
+            )
+        if commit:
+            pg.commit()
+        logger.info("observer: 印 id=%s embedding 已回填 (%d 维, fp=%s)",
+                    note_id, len(vec), fp)
+    except Exception as _e_ins:
+        from .pg_store import _is_undefined_column_error
+        if _is_undefined_column_error(_e_ins):
+            try:
+                pg.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "observer._backfill_note_embedding: %s 缺 embed_model 列, "
+                "走旧 SQL (DEFAULT '' 由迁移后 schema 接住): %s",
+                table, _safe_err(_e_ins)[:120],
+            )
+            with pg.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {table} SET embedding=%s::vector WHERE id=%s",
+                    (_json.dumps(vec), note_id),
+                )
+            if commit:
+                pg.commit()
+            logger.info("observer: 印 id=%s embedding 已回填 (%d 维, "
+                        "embed_model 列由 DEFAULT '' 接住)",
+                        note_id, len(vec))
+        else:
+            raise
+
+
+def _update_short_observation_note(pg, note_id: int, vec: list, fp: str,
+                                   *, notes_table: str, commit: bool) -> None:
+    """short 路径: 同一事务内清 stale sidecar 子行 + 更新 parent 向量。
+
+    sidecar 表缺席 (预迁移) 时走 parent-only legacy 回退, 不 abort 事务。
+    """
+    import json as _json
+    table = _safe_notes_table(notes_table)
+    if _observation_sidecar_present(pg):
+        with pg.cursor() as cur:
+            cur.execute(f"SELECT version FROM {table} WHERE id=%s", (note_id,))
+            _vrow = cur.fetchone()
+        _version = _vrow[0] if _vrow else None
+        try:
+            with pg.cursor() as cur:
+                if _version is not None:
+                    cur.execute(
+                        f"DELETE FROM {_OBSERVATION_CHUNK_TABLE} "
+                        "WHERE observation_id=%s AND observation_version=%s",
+                        (note_id, _version),
+                    )
+                cur.execute(
+                    f"UPDATE {table} SET embedding=%s::vector, embed_model=%s WHERE id=%s",
+                    (_json.dumps(vec), fp, note_id),
+                )
+            if commit:
+                pg.commit()
+            logger.info("observer: 印 id=%s embedding 已回填 (%d 维, fp=%s, short)",
+                        note_id, len(vec), fp)
+            return
+        except Exception as _e_tx:
+            from .pg_store import _is_undefined_column_error
+            if _is_absent_table_error(_e_tx):
+                try:
+                    pg.rollback()
+                except Exception:
+                    pass
+                if not commit:
+                    raise
+                logger.warning("observer: sidecar 表缺席, short 印走 parent-only 回退 (id=%s)",
+                               note_id)
+            elif _is_undefined_column_error(_e_tx):
+                # parent 缺 embed_model 列 (旧 schema): 重做 DELETE + 旧 parent SQL。
+                try:
+                    pg.rollback()
+                except Exception:
+                    pass
+                try:
+                    with pg.cursor() as cur:
+                        if _version is not None:
+                            cur.execute(
+                                f"DELETE FROM {_OBSERVATION_CHUNK_TABLE} "
+                                "WHERE observation_id=%s AND observation_version=%s",
+                                (note_id, _version),
+                            )
+                        cur.execute(
+                            f"UPDATE {table} SET embedding=%s::vector WHERE id=%s",
+                            (_json.dumps(vec), note_id),
+                        )
+                    if commit:
+                        pg.commit()
+                    logger.info("observer: 印 id=%s embedding 已回填 (%d 维, short, "
+                                "embed_model 列由 DEFAULT '' 接住)", note_id, len(vec))
+                    return
+                except Exception:
+                    try:
+                        pg.rollback()
+                    except Exception:
+                        pass
+                    raise
+            else:
+                try:
+                    pg.rollback()
+                except Exception:
+                    pass
+                raise
+    _update_observation_parent_vector(pg, note_id, vec, fp, table, commit=commit)
+
+
+def _backfill_long_observation_note(pg, note_id: int, content: str, plan,
+                                    embed_cfg: dict, fp: str,
+                                    *, notes_table: str, commit: bool,
+                                    target_tokens=None) -> None:
+    """long 路径: 全子行逐个 embed → 一事务内 scoped 替换 + parent 聚合。
+
+    1. plan 校验与全部 provider 调用都在派生事务之外; 任一子行失败则
+       不写 parent、不提交、不留半成品 (all-child gate)。
+    2. 提交事务只做: scoped DELETE → 全量 INSERT → parent UPDATE →
+       该实体全部 unresolved phase 的 D5 entity-level resolve — 一次提交。
+    3. 事务内任何异常都 rollback (source 行早已提交, 不受影响), 记
+       observation_long_sidecar marker 后返回, 不抛错。
+    """
+    import json as _json
+    from .embedding import embed_batch
+    from .observation_chunks import (
+        OBSERVATION_REPRESENTATION_VERSION,
+        ObservationChunkPlanError,
+        ObservationDerivedStateError,
+        build_observation_derived_state,
+        validate_observation_chunk_plan,
+    )
+    try:
+        validate_observation_chunk_plan(
+            content, plan, target_tokens, embed_cfg=embed_cfg
+        )
+    except ObservationChunkPlanError as _e_plan:
+        _record_observation_derived_failure(
+            pg, note_id, "observation_long_plan", _e_plan,
+            embed_cfg, fp, commit=commit)
+        return
+
+    def _embed_one(text: str):
+        # one provider call per planned chunk; 长 chunk 必须用完整文本
+        # key (one-chunk-one-vector 契约, 见 embed_batch collision_safe_key)。
+        _vecs = embed_batch([text], embed_cfg, retries=2,
+                            collision_safe_key=True)
+        return _vecs[0]
+
+    try:
+        derived = build_observation_derived_state(
+            plan, _embed_one, model_fingerprint=fp)
+    except ObservationDerivedStateError as _e_derived:
+        _root = _unwrap_embedding_error(_e_derived) or _e_derived
+        _phase = ("observation_long_sidecar"
+                  if "parent aggregation" in str(_e_derived)
+                  else "observation_long_child")
+        _record_observation_derived_failure(
+            pg, note_id, _phase, _root, embed_cfg, fp, commit=commit)
+        return
+
+    table = _safe_notes_table(notes_table)
+    with pg.cursor() as cur:
+        cur.execute(f"SELECT version FROM {table} WHERE id=%s", (note_id,))
+        _vrow = cur.fetchone()
+    _version = _vrow[0] if _vrow else None
+    if _version is None:
+        _record_observation_derived_failure(
+            pg, note_id, "observation_long_sidecar",
+            RuntimeError(f"observation note id={note_id} 缺失, 无法定位派生版本"),
+            embed_cfg, fp, commit=commit)
+        return
+    if not _observation_sidecar_present(pg):
+        # legacy-start: 表未迁移 — source 已持久, parent 置空, marker 可重试。
+        _record_observation_derived_failure(
+            pg, note_id, "observation_long_sidecar",
+            RuntimeError("observation_embedding_chunks 表缺席 (预迁移), "
+                         "long parent 延迟到迁移后"),
+            embed_cfg, fp, commit=commit)
+        return
+
+    _pairs = list(zip(plan.chunks, derived.child_embeddings))
+    _parent_json = _json.dumps(derived.parent_embedding)
+
+    def _run_derived_statements(include_model: bool) -> None:
+        with pg.cursor() as cur:
+            # scoped 当前版本全量替换 — 4→3 等 stale 子行在此 DELETE。
+            cur.execute(
+                f"DELETE FROM {_OBSERVATION_CHUNK_TABLE} "
+                "WHERE observation_id=%s AND observation_version=%s",
+                (note_id, _version),
+            )
+            for _chunk, _vec in _pairs:
+                if include_model:
+                    cur.execute(
+                        f"INSERT INTO {_OBSERVATION_CHUNK_TABLE} "
+                        "(observation_id, observation_version, chunk_index, "
+                        " source_start, source_end, source_sha256, chunk_sha256, "
+                        " token_count, representation_version, embedding, "
+                        " embed_model, content) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s,%s)",
+                        (note_id, _version, int(_chunk.chunk_index),
+                         int(_chunk.source_start), int(_chunk.source_end),
+                         plan.source_sha256, _chunk.source_sha256,
+                         int(_chunk.token_count),
+                         OBSERVATION_REPRESENTATION_VERSION,
+                         _json.dumps(_vec), fp, _chunk.text),
+                    )
+                else:
+                    cur.execute(
+                        f"INSERT INTO {_OBSERVATION_CHUNK_TABLE} "
+                        "(observation_id, observation_version, chunk_index, "
+                        " source_start, source_end, source_sha256, chunk_sha256, "
+                        " token_count, representation_version, embedding, "
+                        " content) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s)",
+                        (note_id, _version, int(_chunk.chunk_index),
+                         int(_chunk.source_start), int(_chunk.source_end),
+                         plan.source_sha256, _chunk.source_sha256,
+                         int(_chunk.token_count),
+                         OBSERVATION_REPRESENTATION_VERSION,
+                         _json.dumps(_vec), _chunk.text),
+                    )
+            if include_model:
+                cur.execute(
+                    f"UPDATE {table} SET embedding=%s::vector, embed_model=%s "
+                    "WHERE id=%s",
+                    (_parent_json, fp, note_id),
+                )
+            else:
+                cur.execute(
+                    f"UPDATE {table} SET embedding=%s::vector WHERE id=%s",
+                    (_parent_json, note_id),
+                )
+        # 成功派生即按 D5 entity-level 语义关闭该实体全部 unresolved phase
+        # (live_ingest / j_import / backfill …), 与上面同属一个事务。
+        from .embed_failures import resolve_embedding_failures_for_entity
+        with pg.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM embedding_failures "
+                "WHERE entity_table=%s AND entity_id=%s AND resolved_at IS NULL",
+                (_OBSERVATION_ENTITY_TABLE, str(note_id)),
+            )
+            _unresolved_before = int((cur.fetchone() or [0])[0] or 0)
+        _resolved = resolve_embedding_failures_for_entity(
+            conn=pg,
+            entity_table=_OBSERVATION_ENTITY_TABLE,
+            entity_id=str(note_id),
+            resolution="long_observation_derived",
+            commit=False,
+        )
+        if _unresolved_before and not _resolved:
+            raise RuntimeError(
+                "D5 entity-level failure resolution returned no change for "
+                f"{_unresolved_before} unresolved observation markers"
+            )
+
+    try:
+        try:
+            _run_derived_statements(True)
+        except Exception as _e_first:
+            from .pg_store import _is_undefined_column_error
+            if not _is_undefined_column_error(_e_first):
+                raise
+            try:
+                pg.rollback()
+            except Exception:
+                pass
+            _run_derived_statements(False)
+    except Exception as _e_tx:
+        try:
+            pg.rollback()
+        except Exception:
+            pass
+        _record_observation_derived_failure(
+            pg, note_id, "observation_long_sidecar", _e_tx,
+            embed_cfg, fp, commit=commit)
+        return
+    try:
+        if commit:
+            pg.commit()
+    except Exception as _e_commit:
+        try:
+            pg.rollback()
+        except Exception:
+            pass
+        _record_observation_derived_failure(
+            pg, note_id, "observation_long_sidecar", _e_commit,
+            embed_cfg, fp, commit=commit)
+        return
+    logger.info("observer: 长印 id=%s 派生已提交 (%d 子行, parent %d 维, fp=%s)",
+                note_id, len(_pairs), len(derived.parent_embedding), fp)
+
+
 def _backfill_note_embedding(pg, note_id: int, content: str,
                              notes_table: str = "observation_notes",
                              cfg: dict | None = None,
                              *,
-                             commit: bool = True) -> None:
+                             commit: bool = True,
+                             tokenizer_override=None,
+                             target_tokens: int | None = None) -> None:
     """写印后立即算 embedding 回填 — 2026-08-07 通读审查风险1修复。
 
     从 ``cfg`` (必须来自 ``build_embed_cfg`` 工厂) 拿 ``_fingerprint``, 写到
@@ -1672,8 +2067,18 @@ def _backfill_note_embedding(pg, note_id: int, content: str,
     配置 / 指纹错误.
 
     cfg 传 None 时, 自动尝试 ``resolve_config() + safe_embed_cfg`` 工厂.
+
+    Long-observation derived index v1 (docs/LONG-OBSERVATION-INDEX.md §7):
+    source 行已由调用方先行提交 — 本函数只做派生。planner 可用时按完整
+    content 判定 short/long: short 走既有单请求全量 parent 路径 (加 scoped
+    stale 子行清理, 无 sidecar 写入); long 对每个 planned 子行各发一次
+    provider 调用, 全子行成功才聚合 parent, 并与 sidecar 替换、实体级
+    ledger resolve 同一事务提交。派生失败只记 marker、不抛错 (source 不动);
+    配置类 ValueError 仍 fail-closed 上抛 (旧契约)。
+
+    ``tokenizer_override`` / ``target_tokens`` 仅供测试与运维显式覆盖;
+    生产默认 None = planner 按 embed_cfg 解析 (tokenizer 不可用则 fail-closed)。
     """
-    import json as _json
     try:
         from .config import resolve_config
         from .embedding import embed_batch, safe_embed_cfg
@@ -1693,48 +2098,77 @@ def _backfill_note_embedding(pg, note_id: int, content: str,
                 "embed_cfg 缺 _fingerprint — 必须经 build_embed_cfg(cfg) 工厂构造, "
                 "禁止手拼 dict"
             )
+        # ── planner 可用时按完整 content 判定 short/long ──
+        _plan = None
+        try:
+            from .observation_chunks import plan_observation_chunks
+            from .embed_chunks import TokenizerUnavailableError as _TokUnavail
+            try:
+                _plan = plan_observation_chunks(
+                    content, embed_cfg,
+                    tokenizer_override=tokenizer_override,
+                    target_tokens=target_tokens,
+                )
+            except _TokUnavail as _e_tok:
+                # fail-closed: 不发超窗请求; source 已持久, marker 可重试。
+                _record_observation_derived_failure(
+                    pg, note_id, "observation_long_tokenizer", _e_tok,
+                    embed_cfg, fp, commit=commit)
+                return
+            except ValueError:
+                raise
+            except Exception as _e_plan:
+                # The candidate must never fall back to a bare full-content
+                # request after the planner fails: that is the original long-
+                # observation defect. Persist the failure and leave source
+                # durable for a later retry.
+                _record_observation_derived_failure(
+                    pg, note_id, "observation_long_plan", _e_plan,
+                    embed_cfg, fp, commit=commit)
+                return
+        except ValueError:
+            raise
+        except Exception as _e_import:
+            _record_observation_derived_failure(
+                pg, note_id, "observation_long_plan", _e_import,
+                embed_cfg, fp, commit=commit)
+            return
+        if _plan is not None and _plan.is_long and (content or ""):
+            _backfill_long_observation_note(
+                pg, note_id, content, _plan, embed_cfg, fp,
+                notes_table=notes_table, commit=commit,
+                target_tokens=target_tokens)
+            return
+        if _plan is not None and not _plan.is_long and not (_plan.embed_text or ""):
+            # 空 source: 不发请求, 不编造向量。
+            return
         embs = embed_batch([content], embed_cfg, retries=2)
         if not embs or not embs[0] or not any(embs[0]):
+            if _plan is not None:
+                _record_observation_derived_failure(
+                    pg, note_id, "observation_embed",
+                    RuntimeError("embedding API 返回空向量"),
+                    embed_cfg, fp, commit=commit)
             logger.warning("observer: 印 embedding 返回空向量, 跳过回填")
             return
-        try:
-            with pg.cursor() as cur:
-                cur.execute(
-                    f"UPDATE {notes_table} SET embedding=%s::vector, embed_model=%s WHERE id=%s",
-                    (_json.dumps(embs[0]), fp, note_id),
-                )
-            if commit:
-                pg.commit()
-            logger.info("observer: 印 id=%s embedding 已回填 (%d 维, fp=%s)",
-                        note_id, len(embs[0]), fp)
-        except Exception as _e_ins:
-            # 旧 schema 兼容: 表缺 embed_model 列, 走旧 SQL
-            from .pg_store import _is_undefined_column_error
-            if _is_undefined_column_error(_e_ins):
-                # 2026-08-22 修复: psycopg2 第一条语句失败后事务已 abort,
-                # 不 rollback 直接跑兜底 UPDATE 必然报 InFailedSqlTransaction
-                # (死 fallback — 生产 8/21 v354 回填两连败实证). 先回滚再兜底.
-                try:
-                    pg.rollback()
-                except Exception:
-                    pass
-                logger.warning(
-                    "observer._backfill_note_embedding: %s 缺 embed_model 列, "
-                    "走旧 SQL (DEFAULT '' 由迁移后 schema 接住): %s",
-                    notes_table, _safe_err(_e_ins)[:120],
-                )
-                with pg.cursor() as cur:
-                    cur.execute(
-                        f"UPDATE {notes_table} SET embedding=%s::vector WHERE id=%s",
-                        (_json.dumps(embs[0]), note_id),
-                    )
-                if commit:
-                    pg.commit()
-                logger.info("observer: 印 id=%s embedding 已回填 (%d 维, "
-                            "embed_model 列由 DEFAULT '' 接住)",
-                            note_id, len(embs[0]))
-            else:
+        if _plan is not None:
+            # short: 既有单请求全量 parent 向量 + scoped stale 子行清理。
+            try:
+                _update_short_observation_note(
+                    pg, note_id, embs[0], fp,
+                    notes_table=notes_table, commit=commit)
+            except Exception as _e_short:
+                _record_observation_derived_failure(
+                    pg, note_id, "observation_embed", _e_short,
+                    embed_cfg, fp, commit=commit)
                 raise
+            return
+        try:
+            _update_observation_parent_vector(
+                pg, note_id, embs[0], fp,
+                _safe_notes_table(notes_table), commit=commit)
+        except Exception:
+            raise
     except ValueError:
         raise
     except Exception:

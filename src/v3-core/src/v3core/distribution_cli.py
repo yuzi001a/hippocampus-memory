@@ -317,13 +317,13 @@ def _doctor(args: argparse.Namespace) -> int:
 
     # 2. Packaged SQL resources present, well-formed, and the alpha
     # include marker is intact (we expand it at bootstrap time).
-    # v0.2 closing round: the packaged artifact set is FOUR files, not
-    # two — qa_embedding_chunks.sql and upgrade_v0_2.sql ship in the
-    # same package-data set and an install that is missing them cannot
-    # repair an existing install. Report every one of them.
+    # v0.2 closing round: the packaged artifact set includes both QA and
+    # long-observation derived sidecars; an install missing either artifact
+    # cannot repair an existing install. Report every one of them.
     sql_check: dict[str, Any] = {}
     for name in ("alpha_bootstrap.sql", "explicit_memories.sql",
-                 "qa_embedding_chunks.sql", "upgrade_v0_2.sql"):
+                 "qa_embedding_chunks.sql", "observation_embedding_chunks.sql",
+                 "upgrade_v0_2.sql"):
         try:
             text = _package_sql(name)
             sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -1251,6 +1251,7 @@ _UPGRADE_REQUIRED_TABLES: tuple[str, ...] = (
 # reports it as missing and apply refuses to proceed.
 _UPGRADE_OPTIONAL_TABLES: tuple[str, ...] = (
     "qa_embedding_chunks",
+    "observation_embedding_chunks",
 )
 # Column-level requirements the dry-run diff emits so the operator can
 # see exactly what `bootstrap` would (re-)add via the same ALTER ADD
@@ -1600,6 +1601,13 @@ def _upgrade_load_combined_sql(
         ).hexdigest()
     except FileNotFoundError:
         out["explicit_memories_sql_sha256"] = None
+    try:
+        observation_text = _package_sql("observation_embedding_chunks.sql")
+        out["observation_embedding_chunks_sql_sha256"] = hashlib.sha256(
+            observation_text.encode("utf-8")
+        ).hexdigest()
+    except FileNotFoundError:
+        out["observation_embedding_chunks_sql_sha256"] = None
     if not include_qa_chunks_artifact:
         return (expanded, out)
     present, qa_text, qa_sha = _package_optional_sql(
@@ -1700,6 +1708,9 @@ def _upgrade_build_plan(
         "qa_embedding_chunks_table_present": bool(
             table_presence.get("qa_embedding_chunks")
         ),
+        "observation_embedding_chunks_table_present": bool(
+            table_presence.get("observation_embedding_chunks")
+        ),
         "schema_versions_v0_2": _upgrade_schema_version_row(parsed),
     }
     plan: dict[str, Any] = {
@@ -1721,6 +1732,9 @@ def _upgrade_build_plan(
             ),
             "qa_embedding_chunks.sql": sql_meta.get(
                 "qa_embedding_chunks_sql_sha256"
+            ),
+            "observation_embedding_chunks.sql": sql_meta.get(
+                "observation_embedding_chunks_sql_sha256"
             ),
         },
         "combined_sql": {
@@ -1777,8 +1791,17 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
         table_presence["qa_embedding_chunks"] = bool(
             pre["qa_embedding_chunks_table_present"]
         )
+        table_presence["observation_embedding_chunks"] = bool(
+            pre["observation_embedding_chunks_table_present"]
+        )
         chunk_present = bool(plan["artifacts"].get("qa_embedding_chunks.sql"))
         chunk_sha = plan["artifacts"].get("qa_embedding_chunks.sql")
+        observation_artifact_present = bool(
+            plan["artifacts"].get("observation_embedding_chunks.sql")
+        )
+        observation_artifact_sha = plan["artifacts"].get(
+            "observation_embedding_chunks.sql"
+        )
         scan_clean = bool(plan["destructive_scan"]["clean"])
     else:
         # Plan build failed — fall back to independent probes for the
@@ -1789,12 +1812,15 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
         chunk_present, _, chunk_sha = _package_optional_sql(
             "qa_embedding_chunks.sql"
         )
+        observation_artifact_present, _, observation_artifact_sha = _package_optional_sql(
+            "observation_embedding_chunks.sql"
+        )
         scan_clean = False
     missing_required = [
         t for t in _UPGRADE_REQUIRED_TABLES if not table_presence.get(t)
     ]
     missing_columns_total = sum(len(v) for v in column_diff.values())
-    chunk_artifact_missing = not chunk_present
+    chunk_artifact_missing = not chunk_present or not observation_artifact_present
     # Determine the recommended operator command (always emit verbatim
     # so it can be copy-pasted).
     redacted_target = _redact_dsn(parsed)
@@ -1821,6 +1847,13 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
         "qa_embedding_chunks_artifact_sha256": chunk_sha,
         "qa_embedding_chunks_table_present": bool(
             table_presence.get("qa_embedding_chunks")
+        ),
+        "observation_embedding_chunks_artifact_present": bool(
+            observation_artifact_present
+        ),
+        "observation_embedding_chunks_artifact_sha256": observation_artifact_sha,
+        "observation_embedding_chunks_table_present": bool(
+            table_presence.get("observation_embedding_chunks")
         ),
         "would_apply": bool(
             missing_required
@@ -1866,9 +1899,10 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
         out["allow_production_read"] = True
     if chunk_artifact_missing:
         out["warning"] = (
-            "qa_embedding_chunks.sql artifact is NOT packaged in this "
-            "v3-core install. Apply mode will refuse to run; rebuild the "
-            "child-A artifact and reinstall before applying."
+            "one or more derived sidecar SQL artifacts (qa_embedding_chunks.sql or "
+            "observation_embedding_chunks.sql) is NOT packaged in this v3-core install. "
+            "Apply mode will refuse to run; rebuild the candidate artifact and reinstall "
+            "before applying."
         )
     # Plan-out side effect (must run before stdout so a write failure
     # aborts the operator-friendly output rather than hiding it after).
