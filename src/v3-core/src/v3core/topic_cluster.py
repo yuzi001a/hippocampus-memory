@@ -201,8 +201,12 @@ def scan_db_sessions(store, limit: int = 200) -> list[dict]:
 # ─── Embedding ───
 
 def compute_embedding(text: str, embed_cfg: dict) -> list[float]:
-    from v3core.embedding import call_embedding
-    return call_embedding(text[:2000], embed_cfg, cache=True)
+    from v3core.embedding import BATCH_EMBED_POLICY, call_embedding
+
+    # Cluster-building pass: a maintenance/background job over many texts, not the 8s
+    # realtime budget. Naming the batch policy keeps it from inheriting the 3s/0
+    # realtime default, which would silently drop texts from the clustering input.
+    return call_embedding(text[:2000], embed_cfg, cache=True, policy=BATCH_EMBED_POLICY)
 
 
 # ─── 聚类 ───

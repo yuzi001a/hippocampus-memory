@@ -1796,20 +1796,32 @@ class V3Core:
         _emb = None
         _embed_cfg = safe_embed_cfg(self.config)
         if _embed_cfg is not None:
-            try:
-                from .embedding import call_embedding
-                _emb = call_embedding(f"{title}\n{content}"[:2000], _embed_cfg)
-            except ValueError:
-                # 配置/调用契约错误 — 这是 contract violation, 必须抛
-                raise
-            except Exception as _e:
-                # 嵌入失败是**可选派生侧**问题, 不致命 — 仍允许无 emb
-                # 写入 topics (旧契约保留, 不视为硬失败). 但 P2a 边界:
-                # 不能 swallow, 必须让 caller 看见这条 warning, 升级
-                # status 为 DERIVED_WARNING, 不抹掉 PG 真值.
-                logger.debug("_sync_card_to_topics embedding 失败: %s", _safe_err(_e))
+            # Derived side: the card is already durable, so a failed embedding is not a
+            # hard failure — but it must be ACCOUNTED FOR, not merely warned about. A
+            # `warnings` entry lives in memory and dies with the process, so a repair pass
+            # could never find the row; the durable marker is what makes it findable. The
+            # old code also inherited call_embedding's 3s/0 realtime default here.
+            from .embedding import DURABLE_WRITE_EMBED_POLICY
+            from .embed_failures import embed_for_write
+            _out = embed_for_write(
+                f"{title}\n{content}"[:2000], _embed_cfg,
+                entity_table="topics", entity_id=_tid,
+                phase="topic_derived_sync",
+                conn_factory=getattr(self.pg, "open_side_connection", None),
+                policy=DURABLE_WRITE_EMBED_POLICY,
+            )
+            _emb = _out.vector
+            if not _out.ok:
+                logger.warning(
+                    "_sync_card_to_topics embedding %s for %s: class=%s retryable=%s "
+                    "marker_recorded=%s — topics 行仍写入 (派生侧降级)",
+                    _out.status.value, _tid, _out.error_class, _out.retryable,
+                    _out.marker_recorded,
+                )
                 warnings.append(
-                    f"topic derived sync embedding failed: {_safe_err(_e)[:200]}"
+                    f"topic derived sync embedding {_out.error_class} after "
+                    f"{_out.attempts} attempt(s); retryable={_out.retryable}; "
+                    f"durable_marker_recorded={_out.marker_recorded}"
                 )
         _emb_str = "[" + ",".join(str(x) for x in _emb) + "]" if _emb else None
         # lease 拿不到 → 抛 (派生侧问题, caller 升级为 DERIVED_WARNING).

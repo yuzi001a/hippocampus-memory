@@ -198,17 +198,28 @@ class DeepStore:
         # call_embedding 现在 fail-closed, 缺 model/endpoint → raise ValueError
         emb = None
         rel_key = f"{category}/{source_id}"
-        try:
-            if embed_cfg is not None:
-                from .embedding import call_embedding
-                ev = call_embedding(content.replace("\n", " ")[:2000], embed_cfg)
-                emb = ev if ev and len(ev) > 0 else None
-        except ValueError:
-            # 配置/调用契约错误必须 fail-closed，不能伪装成 disabled。
-            raise
-        except Exception as _emb_e:
-            logger.warning("embedding 调用失败 (非致命): %s", str(_emb_e)[:200])
-            emb = None
+        # A card's embedding is DERIVED state; the card itself is the asset. A failed
+        # request must not be swallowed into an unexplained NULL — it gets a durable
+        # marker so the card stays repairable. This path has no daemon-thread
+        # guarantee, so it names the durable-write policy explicitly instead of
+        # inheriting the 3s/0 realtime default.
+        if embed_cfg is not None:
+            from .embedding import DURABLE_WRITE_EMBED_POLICY
+            from .embed_failures import embed_for_write
+            _out = embed_for_write(
+                content.replace("\n", " ")[:2000], embed_cfg,
+                entity_table="topics", entity_id=source_id, phase="card_write",
+                conn_factory=getattr(pg, "open_side_connection", None),
+                policy=DURABLE_WRITE_EMBED_POLICY,
+            )
+            emb = _out.vector
+            if not _out.ok:
+                logger.warning(
+                    "card embedding %s: source_id=%s class=%s retryable=%s "
+                    "marker_recorded=%s — 卡本身已写入, embedding 待修复",
+                    _out.status.value, source_id, _out.error_class,
+                    _out.retryable, _out.marker_recorded,
+                )
 
         # 去重: PG 通走 PG.search, 不通走本地 _LOCAL_CARD_EMB cosine
         skipped = False
@@ -419,26 +430,34 @@ class DeepStore:
             # 与既有 legacy 写入路径一致: 有 embedding 走 embedding 通道,
             # 否则走无 embedding 通道. embed_cfg 由 V3Core 解析好传入.
             if embed_cfg is not None:
-                # 先尝试拿一次 embedding (与 write_card 同样的契约:
-                # 配置/调用契约错误 fail-closed).
-                try:
-                    from .embedding import call_embedding
-                    ev = call_embedding(
-                        content.replace("\n", " ")[:2000], embed_cfg
-                    )
-                    emb = ev if ev and len(ev) > 0 else None
-                except ValueError:
-                    raise
-                except Exception as _emb_e:
+                # Same contract as write_card: a failed request must not become an
+                # unexplained NULL. Two things change here — the durable-write policy
+                # replaces the inherited 3s/0 realtime default, and the failure is
+                # recorded DURABLY. An in-memory `warnings` entry is good UX but it is
+                # not accounting: it dies with the process, so a repair pass could
+                # never find the row.
+                from .embedding import DURABLE_WRITE_EMBED_POLICY
+                from .embed_failures import embed_for_write
+                _out = embed_for_write(
+                    content.replace("\n", " ")[:2000], embed_cfg,
+                    entity_table="topics", entity_id=source_id, phase="card_write",
+                    conn_factory=getattr(pg, "open_side_connection", None),
+                    policy=DURABLE_WRITE_EMBED_POLICY,
+                )
+                emb = _out.vector
+                if not _out.ok:
                     logger.warning(
-                        "write_card_strict embedding 失败 (走无 emb 路径, 派生侧降级): %s",
-                        str(_emb_e)[:200],
+                        "write_card_strict embedding %s (走无 emb 路径, 派生侧降级): "
+                        "class=%s retryable=%s marker_recorded=%s",
+                        _out.status.value, _out.error_class, _out.retryable,
+                        _out.marker_recorded,
                     )
                     warnings.append(
-                        f"embedding degradation: call_embedding failed "
-                        f"({_safe_err(_emb_e)[:160]}) — PG canonical row "
+                        f"embedding degradation: {_out.error_class} after "
+                        f"{_out.attempts} attempt(s) — PG canonical row "
                         f"committed without embedding vector; SQLite / cache "
-                        f"derived sinks also skipped embedding for consistency"
+                        f"derived sinks also skipped embedding for consistency; "
+                        f"durable failure marker recorded={_out.marker_recorded}"
                     )
                     emb = None
             if emb is not None:

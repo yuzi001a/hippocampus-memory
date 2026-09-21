@@ -223,9 +223,28 @@ class TopicStore:
                         "跳过自动 embedding"
                     )
                 else:
-                    emb_list = call_embedding(text[:1000], embed_cfg)
-                    if emb_list:
-                        embedding = json.dumps(emb_list, ensure_ascii=False)
+                    # A topic card's embedding is derived; the card is the asset. This is
+                    # a durable write on a non-realtime path, so name the durable policy
+                    # (it used to inherit call_embedding's 3s/0 default) and record a
+                    # durable marker instead of a log-only shrug. The historical
+                    # non-blocking semantics are preserved — the card is still written.
+                    from .embedding import DURABLE_WRITE_EMBED_POLICY
+                    from .embed_failures import embed_for_write
+                    _out = embed_for_write(
+                        text[:1000], embed_cfg,
+                        entity_table="topic_blocks", entity_id=tid,
+                        phase="topic_upsert",
+                        policy=DURABLE_WRITE_EMBED_POLICY,
+                    )
+                    if _out.vector:
+                        embedding = json.dumps(_out.vector, ensure_ascii=False)
+                    else:
+                        logger.warning(
+                            "auto-embedding %s for topic %r (卡已写入): class=%s "
+                            "retryable=%s marker_recorded=%s",
+                            _out.status.value, (title or "")[:30],
+                            _out.error_class, _out.retryable, _out.marker_recorded,
+                        )
             except ValueError:
                 # 配置/调用契约错误必须 fail-closed，不能伪装成 disabled。
                 raise

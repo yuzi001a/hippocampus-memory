@@ -1,0 +1,13 @@
+{
+  "date": "2026-09-21 Asia/Shanghai",
+  "command": "uv build --project src/v3-core --out-dir C:/Users/servi/AppData/Local/Temp/embedfix-wheel-20260921",
+  "result": "SUCCESS",
+  "artifacts": {
+    "v3_core-4.0.0-py3-none-any.whl": {"bytes": 769983, "sha256": "f6028d69fb64879fee34f4d714ed4edc4800c3f78f797cbd958abf1f4be9d3d8"},
+    "v3_core-4.0.0.tar.gz": {"bytes": 880841, "sha256": "0e10f674f1caa1ecbc2d742a9bbed07e8981d569713f79b884ef5a4a3007fe31"}
+  },
+  "wheel_contains": ["v3core/embed_failures.py", "v3core/tools/embedding_backfill.py"],
+  "migration_asset": "src/v3-core/schema/embedding_failures.sql",
+  "migration_asset_boundary": "repo-level operator SQL; applied from source tree in deploy plan, intentionally not v3core runtime package-data",
+  "production_mutations": {"migration": 0, "deploy": 0, "restart": 0, "db_backfill": 0}
+}

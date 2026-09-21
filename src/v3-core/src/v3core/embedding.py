@@ -21,7 +21,8 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field, asdict
-from typing import Any, Iterable
+from enum import Enum
+from typing import Any, Iterable, NamedTuple
 
 import requests
 
@@ -353,6 +354,215 @@ def safe_embed_cfg(cfg) -> dict | None:
 
 # ─── call_embedding / embed_batch (主调用路径) ───────────────────────
 
+# ─── Embedding SLA policies (explicit, named) ────────────────────────
+#
+# WHY NAMED POLICIES INSTEAD OF DEFAULT ARGUMENTS
+# ----------------------------------------------
+# `call_embedding` used to carry `timeout=3, retries=0` as its defaults. That is
+# the right budget for a query embedded inside the user-facing 8s realtime path,
+# and the *wrong* budget for a durable write: the production provider's p95 is
+# ~0.58s but its tail exceeds 3s, so a durable write that "forgot" to pass
+# parameters silently inherited the realtime budget and lost its embedding
+# forever. Relying on every call site remembering to pass the right numbers is
+# how the hole was created. Callers now select an explicit, named policy, and a
+# test asserts that every durable-write call site names one.
+#
+# These mirror the SLA already agreed in the project's AGENTS.md:
+#   realtime  ≈ 3s / 0 retry      (recall, prefetch, realtime injection)
+#   durable   ≈ 10s / 2 retries   (only where NOT inside the 8s budget)
+
+
+class EmbedPolicy(NamedTuple):
+    """A named timeout/retry budget. See the module comment above."""
+
+    name: str
+    timeout: float
+    retries: int
+    description: str
+
+
+#: Query embedding inside the user-facing 8s budget. Keep it short — durable-write
+#: retry behaviour must never leak into this path (see PHASE 17).
+REALTIME_EMBED_POLICY = EmbedPolicy(
+    "realtime", 3.0, 0,
+    "recall / prefetch / realtime injection — inside the 8s user budget",
+)
+
+#: Embedding an entity as part of persisting it, on a background path that is NOT
+#: inside the 8s budget. Absorbs the provider tail; failure is still explicit.
+DURABLE_WRITE_EMBED_POLICY = EmbedPolicy(
+    "durable_write", 10.0, 2,
+    "durable entity write on a background path — absorbs provider tail",
+)
+
+#: Primary attempt for the conversation_stream live writer (LiveBuffer._flush).
+#: Bounded single-shot 5s/0: covers the observed provider tail (3.488s, see
+#: evidence/outage-simulation-20260920.txt) without the head-of-line blocking
+#: a 10s/2 inline chain would cause on the single-threaded serial writer.
+#: On primary failure the source row is kept, a retryable marker is recorded,
+#: and the patient 10s/2 retry happens on the deferred repair/backfill path —
+#: NOT inline. Realtime recall must never select this policy (see guard test).
+STREAM_PRIMARY_EMBED_POLICY = EmbedPolicy(
+    "stream_primary", 5.0, 0,
+    "conversation_stream live-writer primary — bounded single shot, deferred 10s/2 repair",
+)
+
+#: Bulk import / first-run ingestion.
+BATCH_EMBED_POLICY = EmbedPolicy(
+    "batch", 10.0, 2,
+    "bulk import — many rows, no interactive deadline",
+)
+
+#: Diagnostics must never masquerade as a production data path.
+HEALTH_EMBED_POLICY = EmbedPolicy(
+    "health", 5.0, 1,
+    "health / config validation probes",
+)
+
+ALL_EMBED_POLICIES = (
+    REALTIME_EMBED_POLICY,
+    STREAM_PRIMARY_EMBED_POLICY,
+    DURABLE_WRITE_EMBED_POLICY,
+    BATCH_EMBED_POLICY,
+    HEALTH_EMBED_POLICY,
+)
+
+
+class EmbedErrorClass(str, Enum):
+    """Why an embedding request failed, and therefore whether to retry it."""
+
+    TIMEOUT = "EMBEDDING_TIMEOUT"
+    CONNECTION = "EMBEDDING_CONNECTION"
+    RATE_LIMITED = "EMBEDDING_RATE_LIMITED"
+    SERVER_ERROR = "EMBEDDING_SERVER_ERROR"
+    AUTH = "EMBEDDING_AUTH_FAILED"
+    CONFIG = "EMBEDDING_CONFIG_INVALID"
+    BAD_REQUEST = "EMBEDDING_BAD_REQUEST"
+    UNSUPPORTED_MODEL = "EMBEDDING_UNSUPPORTED_MODEL"
+    EMPTY_RESPONSE = "EMBEDDING_EMPTY_RESPONSE"
+    UNKNOWN = "EMBEDDING_UNKNOWN"
+
+    @property
+    def retryable(self) -> bool:
+        """True only for classes where the SAME request could plausibly succeed.
+
+        Auth/config/bad-request failures are deterministic: retrying them burns the
+        realtime budget and, in the worse case, hammers a provider that will never
+        say yes. They fail immediately (see ``call_embedding``).
+        """
+        return self in _RETRYABLE_CLASSES
+
+
+_RETRYABLE_CLASSES = frozenset({
+    EmbedErrorClass.TIMEOUT,
+    EmbedErrorClass.CONNECTION,
+    EmbedErrorClass.RATE_LIMITED,
+    EmbedErrorClass.SERVER_ERROR,
+    EmbedErrorClass.EMPTY_RESPONSE,  # provider glitch; a retry sometimes lands
+})
+
+
+def classify_embed_error(exc: BaseException) -> EmbedErrorClass:
+    """Map a raw exception to a stable, retry-aware failure class."""
+    if isinstance(exc, requests.Timeout):
+        return EmbedErrorClass.TIMEOUT
+    if isinstance(exc, requests.ConnectionError):
+        return EmbedErrorClass.CONNECTION
+    if isinstance(exc, requests.HTTPError):
+        resp = getattr(exc, "response", None)
+        code = getattr(resp, "status_code", None)
+        if code == 429:
+            return EmbedErrorClass.RATE_LIMITED
+        if code in (401, 403):
+            return EmbedErrorClass.AUTH
+        if code in (400, 404, 422):
+            # 404/400 from an embedding endpoint is overwhelmingly "no such model".
+            body = ""
+            try:
+                body = (resp.text or "")[:500].lower()
+            except Exception:
+                pass
+            if code in (400, 404) and ("model" in body or "not found" in body):
+                return EmbedErrorClass.UNSUPPORTED_MODEL
+            return EmbedErrorClass.BAD_REQUEST
+        if code is not None and 500 <= code < 600:
+            return EmbedErrorClass.SERVER_ERROR
+        return EmbedErrorClass.UNKNOWN
+    if isinstance(exc, requests.exceptions.JSONDecodeError):
+        # Malformed body from the provider: a glitch, worth a retry. MUST be tested
+        # before the ValueError branch below, because requests' JSONDecodeError
+        # subclasses both RequestException and ValueError — and misreading it as a
+        # config error would make it non-retryable.
+        return EmbedErrorClass.SERVER_ERROR
+    if isinstance(exc, requests.RequestException):
+        return EmbedErrorClass.CONNECTION
+    if isinstance(exc, ValueError):
+        return EmbedErrorClass.CONFIG
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return EmbedErrorClass.TIMEOUT
+    if "connection" in name or "reset" in name:
+        return EmbedErrorClass.CONNECTION
+    if isinstance(exc, requests.RequestException):
+        return EmbedErrorClass.CONNECTION
+    return EmbedErrorClass.UNKNOWN
+
+
+class EmbeddingCallError(RuntimeError):
+    """Raised when an embedding request finally fails.
+
+    Carries everything a caller needs to record a *durable, explainable* failure
+    state (see PHASE 8) without re-deriving it from a bare exception:
+
+    * ``error_class``  — stable, retry-aware class (``EmbedErrorClass``)
+    * ``attempts``     — how many attempts were actually made
+    * ``elapsed``      — wall-clock seconds spent
+    * ``policy``       — the named policy that governed timeout/retries
+    * ``model`` / ``fingerprint`` — provider/model identity, for mixed-model audits
+    * ``status``       — HTTP status if the failure came from a response
+    * ``retryable``    — whether a later repair pass should try again
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: EmbedErrorClass,
+        attempts: int,
+        elapsed: float,
+        policy: EmbedPolicy,
+        model: str = "",
+        fingerprint: str = "",
+        status: int | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_class = error_class
+        self.attempts = attempts
+        self.elapsed = elapsed
+        self.policy = policy
+        self.model = model
+        self.fingerprint = fingerprint
+        self.status = status
+        self.retryable = error_class.retryable
+        if cause is not None:
+            self.__cause__ = cause
+
+    def as_dict(self) -> dict:
+        """Evidence-safe projection. Contains no credentials and no input text."""
+        return {
+            "error_class": self.error_class.value,
+            "attempts": self.attempts,
+            "elapsed_ms": round(self.elapsed * 1000, 1),
+            "policy": self.policy.name,
+            "timeout": self.policy.timeout,
+            "max_retries": self.policy.retries,
+            "model": self.model,
+            "fingerprint": self.fingerprint,
+            "status": self.status,
+            "retryable": self.retryable,
+        }
+
 
 def _validate_for_call(embed_cfg: dict) -> tuple[str, str, str, str, str]:
     """集中校验 — 在 cache 命中前调用, 避免历史 cache 命中遮蔽 400 错误.
@@ -390,24 +600,38 @@ def call_embedding(
     text: str,
     embed_cfg: dict,
     cache: bool = True,
-    timeout: float = 3,
-    retries: int = 0,
+    timeout: float | None = None,
+    retries: int | None = None,
+    policy: EmbedPolicy | None = None,
+    stats: dict | None = None,
 ) -> list[float]:
     """调 bge 远程 embedding API (OpenAI 兼容格式).
 
-    timeout: 单次请求超时。prefetch 实时链路保持 3s（8s 预算内）；
-             批量导入场景传 10s（代理在持续高频连接下偶发慢，3s 太紧）。
-    retries: 失败重试次数（指数退避 1s/2s/4s...）。导入等后台批量传 2；
-             实时链路保持 0。
+    **Budget selection — pass a named ``policy``.** Do not rely on the defaults:
+    they resolve to the REALTIME budget, and a durable write that inherits them
+    loses its embedding to the provider tail (that is exactly the production hole
+    this hotfix closes). ``timeout`` / ``retries`` are still accepted, and an
+    explicit value always beats the policy, for callers whose budget is genuinely
+    dynamic (e.g. a prefetch deadline that shrinks as the request proceeds).
 
     **阶段1 契约**:
     * **校验发生在 cache 命中前** — 历史已经踩过"cache 命中遮蔽 400"的坑.
-    * 失败重试耗尽 → raise last_err, **绝不**返回空向量 / partial 结果.
+    * 失败重试耗尽 → raise ``EmbeddingCallError``, **绝不**返回空向量 / partial 结果.
+    * **确定性失败不重试** (401/403/400/model 不存在/config 非法): 重试它们只会烧掉
+      实时预算, 并不断敲打一个永远不会答应的服务端. 见 ``EmbedErrorClass.retryable``.
     """
     import time as _t
 
     # 1. 校验必须发生在 cache 命中前 — 这是阶段1 的核心修复
     endpoint, model, api_key, proxy, fp = _validate_for_call(embed_cfg)
+
+    # Resolve the effective budget. An explicit value beats the policy; with neither,
+    # fall back to the realtime budget (the historical default) so an un-migrated
+    # caller keeps today's behaviour instead of silently gaining a longer timeout
+    # inside the 8s path.
+    eff_policy = policy or REALTIME_EMBED_POLICY
+    eff_timeout = float(timeout) if timeout is not None else float(eff_policy.timeout)
+    eff_retries = int(retries) if retries is not None else int(eff_policy.retries)
 
     if cache:
         now = _t.time()
@@ -422,11 +646,17 @@ def call_embedding(
     body = {"model": model, "input": text}
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
+    started = _t.time()
     last_err: Exception | None = None
-    for attempt in range(retries + 1):
+    last_class = EmbedErrorClass.UNKNOWN
+    last_status: int | None = None
+    attempts_made = 0
+
+    for attempt in range(eff_retries + 1):
+        attempts_made = attempt + 1
         try:
             resp = requests.post(
-                endpoint, json=body, headers=headers, proxies=proxies, timeout=timeout
+                endpoint, json=body, headers=headers, proxies=proxies, timeout=eff_timeout
             )
             resp.raise_for_status()
             data = resp.json()
@@ -438,6 +668,21 @@ def call_embedding(
                 if len(_EMBED_CACHE) > 256:
                     oldest = min(_EMBED_CACHE.items(), key=lambda x: x[1][0])
                     _EMBED_CACHE.pop(oldest[0], None)
+            if stats is not None:
+                # Report what actually happened even on success — "how hard did this
+                # take?" is exactly the question a caller cannot answer from a bare
+                # vector, and a hardcoded attempts=0 on the success path would be a
+                # misleading number in the failure accounting.
+                stats.update({
+                    "attempts": attempts_made,
+                    "elapsed": _t.time() - started,
+                    "error_class": None,
+                    "policy": eff_policy.name,
+                    "timeout": eff_timeout,
+                    "retries": eff_retries,
+                    "model": model,
+                    "fingerprint": fp,
+                })
             return emb
         except requests.HTTPError as e:
             # 403 可能是缺 apiKey
@@ -456,18 +701,48 @@ def call_embedding(
                 len(text), _resp_body,
             )
             last_err = e
+            last_class = classify_embed_error(e)
+            last_status = getattr(getattr(e, "response", None), "status_code", None)
+        except RuntimeError as e:
+            # The empty-response guard just above. Provider-side glitch: retryable.
+            last_err = e
+            last_class = EmbedErrorClass.EMPTY_RESPONSE
+            last_status = None
         except Exception as e:
             last_err = e
-        if attempt < retries:
+            last_class = classify_embed_error(e)
+            last_status = getattr(getattr(e, "response", None), "status_code", None)
+
+        # Deterministic failures (auth / config / bad request / unknown model) must
+        # NOT be retried. The same request cannot start succeeding, so retrying only
+        # burns the budget — and inside the 8s realtime path it burns the user's —
+        # while hammering a provider that will never say yes.
+        if not last_class.retryable:
+            logger.error(
+                "embedding 确定性失败, 不重试: class=%s fp=%s model=%s err=%s",
+                last_class.value, fp, model, str(last_err)[:200],
+            )
+            break
+        if attempt < eff_retries:
             _t.sleep(2 ** attempt)  # 指数退避 1s/2s/4s
-    # 阶段1 契约: **不再返回空向量兜底**, raise 真实错误
+    # 阶段1 契约: **不再返回空向量兜底**, raise 真实错误 (现在携带完整失败上下文)
     logger.error(
-        "embedding 调用失败 (重试%d次后 raise, 不再静默): fp=%s model=%s err=%s",
-        retries, fp, model, str(last_err)[:200],
+        "embedding 调用失败 (重试%d次后 raise, 不再静默): fp=%s model=%s class=%s err=%s",
+        eff_retries, fp, model, last_class.value, str(last_err)[:200],
     )
-    if last_err is not None:
-        raise last_err
-    raise RuntimeError("embedding 调用失败 (无 last_err 上下文)")
+    raise EmbeddingCallError(
+        f"embedding 调用失败: class={last_class.value} attempts={attempts_made} "
+        f"elapsed={(_t.time() - started):.2f}s policy={eff_policy.name} "
+        f"err={str(last_err)[:200]}",
+        error_class=last_class,
+        attempts=attempts_made,
+        elapsed=_t.time() - started,
+        policy=eff_policy,
+        model=model,
+        fingerprint=fp,
+        status=last_status,
+        cause=last_err,
+    )
 
 
 def embed_batch(

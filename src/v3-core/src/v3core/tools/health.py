@@ -400,14 +400,16 @@ def handle_v3_health(args: dict, **kw) -> str:
         result["checks"]["y"] = {"error": _safe_err(e)[:200]}
     # 5. Embed
     try:
-        from ..embedding import call_embedding, safe_embed_cfg
+        from ..embedding import call_embedding, safe_embed_cfg, HEALTH_EMBED_POLICY
         ec = safe_embed_cfg(cfg)
         ep = ec.get("endpoint", "") if ec is not None else ""
         ak = (ec.get("apiKey", "") or ec.get("api_key", "")) if ec is not None else ""
         result["checks"]["embed"] = {"configured": ec is not None, "endpoint": ep[:60] if ep else "(未配置)", "has_key": bool(ak)}
         if ec is not None:
             t0 = time.time()
-            emb = call_embedding("health check", ec)
+            # A diagnostic probe must declare its own budget instead of inheriting the
+            # realtime default — and it must never masquerade as a production data path.
+            emb = call_embedding("health check", ec, policy=HEALTH_EMBED_POLICY)
             dt = time.time() - t0
             result["checks"]["embed"]["reachable"] = bool(emb and len(emb) > 0)
             result["checks"]["embed"]["latency_ms"] = round(dt * 1000) if emb and len(emb) > 0 else None

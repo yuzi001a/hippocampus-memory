@@ -1,0 +1,1 @@
+{"scope": "disposable 127.0.0.1:5440/v3embedfix_e2e", "read_only": "on", "ledger": "present", "short_parent_8001_in_top100": true, "long_parent_8002_in_top100": true, "top_parent_ids": [8003, 8001, 8002, 8005], "repaired_sidecar_rows_for_long_parent_8002": 3, "top_chunk_rows": [[8002, 0], [8002, 1], [8002, 2]], "writes": 0}

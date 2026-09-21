@@ -54,10 +54,26 @@ def main():
             continue
         
         try:
-            emb = call_embedding(text, embed_cfg, cache=True)
+            # Backfill path: batch policy + durable failure accounting. Without a marker a
+            # failed backfill row is indistinguishable from one that was never attempted —
+            # which is exactly how a "successful" backfill run can silently leave holes.
+            from .embedding import BATCH_EMBED_POLICY
+            from .embed_failures import embed_for_write
+            _out = embed_for_write(
+                text, embed_cfg,
+                entity_table="topic_blocks", entity_id=str(t['id']),
+                phase="topic_backfill",
+                policy=BATCH_EMBED_POLICY,
+            )
+            if not _out.ok:
+                print(f"  [{i+1}/{len(topics)}] {t['title']}: {_out.status.value} "
+                      f"class={_out.error_class} retryable={_out.retryable} "
+                      f"marker={_out.marker_recorded}")
+                fail += 1
+                continue
             store.conn.execute(
                 "UPDATE topic_blocks SET embedding=? WHERE id=?",
-                (json.dumps(emb), t['id'])
+                (json.dumps(_out.vector), t['id'])
             )
             success += 1
             if (i+1) % 20 == 0:

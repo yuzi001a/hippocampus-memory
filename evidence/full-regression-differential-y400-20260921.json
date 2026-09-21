@@ -1,0 +1,43 @@
+{
+  "date": "2026-09-21 Asia/Shanghai",
+  "machine": "y400 dedicated Win10 test machine",
+  "python": "C:\\hp-testbed\\hippocampus-memory\\.venv\\Scripts\\python.exe",
+  "test_command": "python -m pytest tests -q -p no:cacheprovider",
+  "baseline": {
+    "identity": "v0.2.1 / 0bd9e1ee7f42f0184f83aff367000a6656a06dcd",
+    "passed": 585,
+    "failed": 4,
+    "skipped": 4,
+    "duration": "347.84s",
+    "failed_tests": [
+      "tests/test_first_run_install_contract.py::test_reused_container_password_is_adopted",
+      "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+      "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+      "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+    ]
+  },
+  "candidate": {
+    "identity": "fix/embedding-write-reliability + STREAM_PRIMARY_EMBED_POLICY 5s/0",
+    "source_archive_sha256": "907ff9e311d2215266127173d6d35bb4ee24a332cd07f84cf806d746b3ee4805",
+    "passed": 640,
+    "failed": 4,
+    "skipped": 4,
+    "duration": "390.58s",
+    "failed_tests": [
+      "tests/test_first_run_install_contract.py::test_reused_container_password_is_adopted",
+      "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+      "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+      "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+    ]
+  },
+  "differential": {
+    "new_candidate_tests_passed": 55,
+    "inherited_failure_count": 4,
+    "candidate_minus_baseline_failures": [],
+    "new_regression_count": 0,
+    "skip_count_delta": 0,
+    "verdict": "PASS_NEW_REGRESSION_0"
+  },
+  "baseline_failures_note": "All four are inherited: exact test identities match baseline and candidate. No failure was repaired or reclassified in this hotfix round.",
+  "invalid_prior_run": "The earlier 636 passed / 6 failed / 6 skipped candidate run is excluded because its archive omitted the sibling src/v3-hermes-plugin tree; corrected full-repository candidate archive was rerun and is the only candidate result above."
+}
