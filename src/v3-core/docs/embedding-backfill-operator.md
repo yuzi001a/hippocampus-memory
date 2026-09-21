@@ -100,11 +100,24 @@ marker 关闭）放在 `eval/` 下的一次性库脚本里，因为 `tests/conft
 
 ```bash
 python -m v3core.tools.embedding_backfill --table conversation_stream          # 先 dry-run
-PGOPTIONS='-c default_transaction_read_only=on' \
 python -m v3core.tools.embedding_backfill --table conversation_stream --apply --limit 10
 ```
 
-- `PGOPTIONS=-c default_transaction_read_only=on` 让每条连接都落在只读事务里：
-  dry-run 若真的想写会直接报错，而不是悄悄改生产。
 - 先 `--limit` 小批量验证，再考虑全量。
 - `topics` 在 canonical 表示被证明与活写入者 byte-identical 之前不要 `--apply`。
+
+### 不要指望用 `PGOPTIONS` 强制只读
+
+试过用 `PGOPTIONS='-c default_transaction_read_only=on'` 把每条连接压进只读事务，
+**结果是 5 张表全部 rc=3**：`PgEmbedStore` 在建立连接时会执行 `CREATE EXTENSION`
+（pgvector 类型注册），而 PostgreSQL 拒绝在只读事务里执行 DDL —— 被挡掉的是**连接
+本身**，不是写入。
+
+推论有两条，都是真实约束：
+
+1. 这个 CLI **无法**在 `default_transaction_read_only` 硬化过的库或角色上运行。
+   部署时若做了这层硬化，backfill 会整个不可用。
+2. dry-run 的安全性不来自"强制只读"，而来自 `--apply` 是显式 opt-in，
+   加上 dry-run 在写循环之前就返回。验证零写要靠 `pg_stat_user_tables` 的
+   ins/upd/del 增量 + 行数/NULL 数对账，不要靠 `PGOPTIONS`。
+
