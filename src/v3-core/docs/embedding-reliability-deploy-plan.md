@@ -6,7 +6,7 @@ pending explicit approval.
 
 Production baseline: P0 HEAD `7808b89239787ba09eee7915c69392981a8ca911`
 Embedding source: `b344b801bac06e3dad0f68f47d243930d57ab07f`
-Integration branch: `integration/p0-embedding-reliability` (validated source HEAD `4a7f496170c23fc0ee57be8286e65c31ade51546`)
+Integration branch: `integration/p0-embedding-reliability` (validated product source HEAD `4a7f496170c23fc0ee57be8286e65c31ade51546`; artifact build source HEAD `8c1a50f62e086c7139924696050650a376e2fc4a`)
 Common baseline (merge base): tag `v0.2.1` = `0bd9e1ee7f42f0184f83aff367000a6656a06dcd`
 
 Historical note: this plan was first written against tag `v0.2.1` on branch

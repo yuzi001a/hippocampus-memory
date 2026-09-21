@@ -9,7 +9,7 @@
   "embedding_source_commit": "b344b801bac06e3dad0f68f47d243930d57ab07f",
   "generated_after_code_cherry_pick_before_formal_validation": false,
   "integration_branch": "integration/p0-embedding-reliability",
-  "integration_head": "4a7f496170c23fc0ee57be8286e65c31ade51546",
+  "integration_head": "8c1a50f62e086c7139924696050650a376e2fc4a",
   "merge_base": "0bd9e1ee7f42f0184f83aff367000a6656a06dcd",
   "metadata_only_changes": [
     {
@@ -90,7 +90,7 @@
   },
   "wheel_level_gate": {
     "wheel_filename": "v3_core-4.0.0-py3-none-any.whl",
-    "wheel_sha256": "c6687ab3690206686ae704ed10d89b649fbddd020c8c68aeefe04e55a6ea87da",
+    "wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88",
     "p0_targeted": "123 passed / 1 skipped",
     "embedding_targeted": "58 passed / 0 skipped",
     "combined_disposable_smoke": "PASS"
@@ -103,5 +103,7 @@
     "decision": "DECISION_REQUIRED"
   },
   "validated_source_head": "4a7f496170c23fc0ee57be8286e65c31ade51546",
-  "validation_note": "The source/tree and wheel gates are bound to integration source HEAD 4a7f496...; subsequent commits may contain evidence/metadata only."
+  "validation_note": "Product source was validated at 4a7f496...; final wheel was built from branch HEAD 8c1a50f...; later commits are metadata/evidence only.",
+  "wheel_built_from_head": "8c1a50f62e086c7139924696050650a376e2fc4a",
+  "artifact_build_source_head": "8c1a50f62e086c7139924696050650a376e2fc4a"
 }

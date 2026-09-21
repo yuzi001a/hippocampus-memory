@@ -11,7 +11,9 @@
     "merge_base": "0bd9e1ee7f42f0184f83aff367000a6656a06dcd",
     "common_modified_files": [
       "src/v3-core/src/v3core/__init__.py"
-    ]
+    ],
+    "wheel_built_from_head": "8c1a50f62e086c7139924696050650a376e2fc4a",
+    "artifact_build_source_head": "8c1a50f62e086c7139924696050650a376e2fc4a"
   },
   "source_overlap_gate": {
     "p0_protected_git_blob_drift": [],
@@ -23,7 +25,7 @@
     "machine": "y400 / DESKTOP-EQP3OBU (dedicated Win10)",
     "python": "C:/hp-testbed/hippocampus-memory/.venv/Scripts/python.exe (Python 3.13.15)",
     "full_suite_command": "python -m pytest tests -q -p no:cacheprovider -p no:randomly",
-    "integration_source_archive_sha256": "1048ce8a4d05c79bd517f0eb20cf691f0454ae9582d01f11aa82bb58102f4404",
+    "integration_source_archive_sha256": "bcf664b64969dc3e5278c660153bb1cd0e364942d0a50f91ac3caca1b5d4db08",
     "integration_full_suite": {
       "passed": 763,
       "failed": 4,
@@ -134,19 +136,28 @@
     "critical_path_wheel": {
       "passed": 16,
       "total": 16,
-      "log_sha256": "1d0db827a9ea7fac9facb6962c30ac2f96ce539f37c4d25278a91057bd444d51"
+      "log_sha256": "1eb91bb1c3c35355dd5883c7e0cc2189bba2eb2425d343159583cc32994cf3e9",
+      "wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88"
     },
     "wheel_p0_targeted": {
       "passed": 123,
       "failed": 0,
       "skipped": 1,
-      "log_sha256": "382aef2ebb90d6cf8bcf17d0ed0b1a870dd1490cd4547c34d7082da878f0a3df"
+      "log_sha256": "f29989c67be78df2287242c8fdf9cfe4627d5dabbdc79d4e62f0464ab273dd68",
+      "wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88"
     },
     "wheel_embedding_extended_targeted": {
       "passed": 58,
       "failed": 0,
       "skipped": 0,
       "log_sha256": "416623b8aab00eefde58b79dbc33b95846de42e7b97519985b2cf6147c06b338"
+    },
+    "wheel_embedding_exact_targeted": {
+      "passed": 33,
+      "failed": 0,
+      "skipped": 0,
+      "log_sha256": "c5f56d5b0c5bd8b89c944f3b852a627e1ea49c7d328461139df163e04f0ef7b9",
+      "wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88"
     }
   },
   "inherited_failures": [
@@ -169,7 +180,7 @@
   ],
   "wheel_level": {
     "filename": "v3_core-4.0.0-py3-none-any.whl",
-    "sha256": "c6687ab3690206686ae704ed10d89b649fbddd020c8c68aeefe04e55a6ea87da",
+    "sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88",
     "bytes": 784503,
     "member_count": 112,
     "protected_member_hashes": {
@@ -190,16 +201,20 @@
         "sha256": "21f4e55b5e78d9b0ab896c0bd44135a19134cf43b3cc882bc95d330b2ae3dfbb"
       }
     },
-    "member_hash_manifest": "integration-wheel-build.final.json"
+    "member_hash_manifest": "integration-wheel-build.final.json",
+    "member_hashes_equal_to_preclosure_tested_wheel": true
   },
   "disposable_wheel_smoke": {
-    "wheel_site": "C:/Users/servi/workspace/artifacts/p0-embedding-integration-wheel-site-4a7f496",
+    "wheel_filename": "v3_core-4.0.0-py3-none-any.whl",
+    "wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88",
+    "wheel_site": "C:/Users/servi/workspace/artifacts/p0-embedding-integration-final-wheel-site-8c1a50f",
     "p0_bad_candidate": "REJECT",
     "p0_reader_fail_closed": "PASS",
     "embedding_failure_ledger_forward_e2e": "38/38 PASS",
     "long_qa_sidecar_repair": "PASS (3 sidecar chunks)",
     "backfill_safety_e2e": "32/32 PASS",
-    "backfill_e2e_log": "C:/Users/servi/workspace/artifacts/integration-wheel-backfill-e2e-4a7f496.log",
+    "smoke_log_sha256": "c192cfef67777d26c7b09979ebabdffc982e25f685af74653a0d57b2cb9e1144",
+    "backfill_log_sha256": "1c0cbe463ae9522623d7f7bd272578d1ad583ac2f7ef1c3d3b7a15668c3e6635",
     "combined_smoke": "PASS"
   },
   "inherited_embedding_evidence": {

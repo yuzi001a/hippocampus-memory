@@ -1,15 +1,15 @@
 {
   "artifact_status": "PRODUCTION_DEPLOYMENT_ARTIFACT",
   "branch": "integration/p0-embedding-reliability",
-  "validated_source_head": "4a7f496170c23fc0ee57be8286e65c31ade51546",
-  "full_head_at_build": "4a7f496170c23fc0ee57be8286e65c31ade51546",
+  "full_head_at_build": "8c1a50f62e086c7139924696050650a376e2fc4a",
+  "validated_product_source_head": "4a7f496170c23fc0ee57be8286e65c31ade51546",
   "code_cherry_pick_head": "5c4fba03cddbbfda8b8dcd8c80821d665d29e3a4",
   "merge_base": "0bd9e1ee7f42f0184f83aff367000a6656a06dcd",
   "p0_parent": "7808b89239787ba09eee7915c69392981a8ca911",
   "embedding_source_commit": "b344b801bac06e3dad0f68f47d243930d57ab07f",
   "worktree_clean_at_build": true,
   "wheel_filename": "v3_core-4.0.0-py3-none-any.whl",
-  "wheel_sha256": "c6687ab3690206686ae704ed10d89b649fbddd020c8c68aeefe04e55a6ea87da",
+  "wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88",
   "wheel_bytes": 784503,
   "wheel_member_count": 112,
   "wheel_member_hashes": {
@@ -462,8 +462,27 @@
       "sha256": "e796e14dcdc5f826917f391b1f3610e53621b81a4322dd4505e005a1c2150c32"
     }
   },
-  "source_archive_filename": "p0-embedding-integration-source-4a7f496.zip",
-  "source_archive_sha256": "1048ce8a4d05c79bd517f0eb20cf691f0454ae9582d01f11aa82bb58102f4404",
+  "protected_member_hashes": {
+    "v3core/e1.py": {
+      "bytes": 78736,
+      "sha256": "0c47b943fdf60200dbd5f1131586bb71e8067dc32b06c81f3dcc89b219e4bab5"
+    },
+    "v3core/llm.py": {
+      "bytes": 21272,
+      "sha256": "1365376950fc1c64bd1d5855ad845a39d1369b06590f9cbcf579e24bcd9b4e4c"
+    },
+    "v3core/__init__.py": {
+      "bytes": 223207,
+      "sha256": "4e1d4a845a38db973740d8c16ee80715aab8fca6061aab515dec362121cefe7b"
+    },
+    "v3core/generated_context_contract.py": {
+      "bytes": 26641,
+      "sha256": "21f4e55b5e78d9b0ab896c0bd44135a19134cf43b3cc882bc95d330b2ae3dfbb"
+    }
+  },
+  "source_archive_filename": "p0-embedding-integration-final-source-8c1a50f.zip",
+  "source_archive_sha256": "bcf664b64969dc3e5278c660153bb1cd0e364942d0a50f91ac3caca1b5d4db08",
+  "source_archive_full_head": "8c1a50f62e086c7139924696050650a376e2fc4a",
   "production_install_allowed": false,
-  "note": "Built from the P0-preserving integration source. This is the first artifact eligible for a future production decision; it was not installed in production."
+  "note": "Final integration wheel built from the final branch HEAD after metadata/evidence closure. It has not been installed in production."
 }
