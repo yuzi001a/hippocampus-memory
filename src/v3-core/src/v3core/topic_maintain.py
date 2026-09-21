@@ -104,7 +104,12 @@ def _try_seed_from_buffer(dry_run: bool = False, config=None) -> dict:
         for row in buffers:
             text = (row[2] or "")[:300] or (row[3] or "")[:300]
             if text.strip():
-                emb = call_embedding(text[:1000], embed_cfg)
+                # Analysis-time embedding for in-memory clustering: it is never persisted
+                # as an entity's vector, so there is no durable NULL to explain and no
+                # marker is written. The batch policy still matters — inheriting the 3s/0
+                # realtime default silently shrank the candidate set.
+                from .embedding import BATCH_EMBED_POLICY
+                emb = call_embedding(text[:1000], embed_cfg, policy=BATCH_EMBED_POLICY)
                 if emb:
                     items.append({"id": row[0], "text": text, "turn_id": row[1], "emb": np.array(emb)})
 
@@ -248,7 +253,11 @@ def cluster_orphans(dry_run: bool = False, config=None) -> dict:
             valid_ids = []
             for t, bid in zip(texts, ids):
                 if t.strip():
-                    emb = call_embedding(t[:1000], embed_cfg)
+                    # Same rationale as _try_seed_from_buffer: analysis-time only, not a
+                    # persisted entity vector, so no marker — but it must not inherit the
+                    # realtime 3s/0 default.
+                    from .embedding import BATCH_EMBED_POLICY
+                    emb = call_embedding(t[:1000], embed_cfg, policy=BATCH_EMBED_POLICY)
                     if emb:
                         embs.append(emb)
                         valid_texts.append(t)

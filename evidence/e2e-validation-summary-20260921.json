@@ -1,0 +1,9 @@
+{
+  "date": "2026-09-21 Asia/Shanghai",
+  "target": "disposable loopback PostgreSQL 127.0.0.1:5440 / v3embedfix_e2e",
+  "production_target_excluded": "127.0.0.1:5433 / v3embeddings",
+  "provider": "stubbed; no external embedding API",
+  "embedfix_e2e": {"passed": 38, "failed": 0, "scope": ["failure ledger classification", "retryable repair", "long-QA sidecar 3 chunks", "source preservation", "unexplained NULL discovery and repair"]},
+  "embedfix_backfill_e2e": {"passed": 32, "failed": 0, "scope": ["dry-run no-op", "canonical source selection", "long-QA repair", "idempotency", "permanent failure skip"]},
+  "production_mutations": {"migration": 0, "deploy": 0, "restart": 0, "db_backfill": 0}
+}

@@ -1,0 +1,34 @@
+{
+  "date": "2026-09-21 Asia/Shanghai",
+  "scope": "production read-only backfill dry-run / candidate census",
+  "branch": "fix/embedding-write-reliability",
+  "head": "0bd9e1ee7f42f0184f83aff367000a6656a06dcd",
+  "p0_branch_excluded": true,
+  "production_mutations": {
+    "migration": 0,
+    "deploy": 0,
+    "restart": 0,
+    "db_backfill": 0
+  },
+  "connection_guard": {
+    "database": "v3embeddings",
+    "transaction_read_only": "on",
+    "embedding_failures_relation": null,
+    "writes": "none"
+  },
+  "tool_attempt": {
+    "command_mode": "backfill_table(apply=False)",
+    "result": "BLOCKED_BEFORE_SELECTION",
+    "reason": "public.embedding_failures does not exist; current selector references it to exclude unresolved non-retryable markers",
+    "no_schema_change": true
+  },
+  "ledger_independent_read_only_census": {
+    "note": "These are NULL/non-empty upper-bound candidates before ledger filtering; they are not an apply selection count.",
+    "conversation_stream": {"total": 12221, "embedding_null": 1074, "null_nonempty_source": 1074},
+    "observation_notes": {"total": 742, "embedding_null": 3, "null_nonempty_source": 3},
+    "yin_paragraphs": {"total": 1231, "embedding_null": 8, "null_nonempty_source": 8, "yin_e1_null": 0, "yin_pool_null": 8},
+    "qa_pairs": {"total": 13938, "embedding_null": 12, "null_nonempty_source": 12, "long_by_char_proxy_gt_10000": 12},
+    "topics": {"total": 343, "embedding_null": 1, "null_nonempty_source": 1}
+  },
+  "honest_boundary": "Production backfill dry-run cannot be called tool-level complete before additive ledger migration; no migration was performed in this validation round. The read-only census is evidence for the later DECISION_REQUIRED gate, not authorization to repair."
+}

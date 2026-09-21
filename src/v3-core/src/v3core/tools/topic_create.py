@@ -78,7 +78,29 @@ def handle_v2_topic_create(args: dict, **kw) -> str:
 
         # 仅在 embedding 显式启用时计算；disabled 不手拼空配置。
         vec_text = f"{title} {summary} {' '.join(keywords)}"[:1000]
-        emb = call_embedding(vec_text, embed_cfg) if embed_cfg is not None else None
+        emb = None
+        if embed_cfg is not None:
+            # Derived state; the card is the asset. Name the durable policy and record a
+            # durable marker rather than letting a failure become an unexplained NULL.
+            # The id is derived exactly as upsert_topic will derive it — same helper,
+            # same already-truncated title — so the marker keys on the row that lands.
+            from ..embedding import DURABLE_WRITE_EMBED_POLICY
+            from ..embed_failures import embed_for_write
+            _out = embed_for_write(
+                vec_text, embed_cfg,
+                entity_table="topic_blocks",
+                entity_id=store._topic_id(title[:50]),
+                phase="topic_create",
+                policy=DURABLE_WRITE_EMBED_POLICY,
+            )
+            emb = _out.vector
+            if not _out.ok:
+                logger.warning(
+                    "topic_create embedding %s for %r: class=%s retryable=%s "
+                    "marker_recorded=%s",
+                    _out.status.value, title[:30], _out.error_class,
+                    _out.retryable, _out.marker_recorded,
+                )
 
         # embedding 需要序列化为 JSON 字符串才能写 SQLite
         import json as _json

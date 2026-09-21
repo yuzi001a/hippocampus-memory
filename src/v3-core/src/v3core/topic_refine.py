@@ -721,15 +721,32 @@ def _sync_card_to_db(topic_id: int, topic_name: str, matcher: TopicMatcher):
                     emb_list = json.loads(topic_emb_json)
             if not emb_list:
                 # 自动算
-                from .embedding import call_embedding, safe_embed_cfg
+                from .embedding import BATCH_EMBED_POLICY, safe_embed_cfg
+                from .embed_failures import embed_for_write
                 from .config import resolve_config, _resolve_data_dir
                 cfg = resolve_config()
                 embed_cfg = safe_embed_cfg(cfg)
                 if embed_cfg is None:
                     emb_list = None
                 else:
+                    # Derived state; the card row is the asset. This is a maintenance/
+                    # sync path, not the 8s realtime budget, so it takes the batch policy
+                    # and records a durable marker instead of only a warning.
                     text = f"{title}. {summary}".strip()[:1000]
-                    emb_list = call_embedding(text, embed_cfg)
+                    _out = embed_for_write(
+                        text, embed_cfg,
+                        entity_table="topic_blocks", entity_id=str(topic_id),
+                        phase="card_sync",
+                        policy=BATCH_EMBED_POLICY,
+                    )
+                    emb_list = _out.vector
+                    if not _out.ok:
+                        logger.warning(
+                            "sync_card embedding %s for %s: class=%s retryable=%s "
+                            "marker_recorded=%s",
+                            _out.status.value, str(topic_id)[:12], _out.error_class,
+                            _out.retryable, _out.marker_recorded,
+                        )
             if emb_list:
                 emb_blob = _emb_to_blob(emb_list)
         except ValueError:

@@ -509,9 +509,14 @@ def _write_candidates(pg_conn, candidates, dry_run, embed_cfg, trigger, source_l
                     # dry-run 只统计配对, 不调 embedding API (避免全量统计跑数小时)
                     stats["embedded"] += 1
                     continue
+                # Batch import path: express the budget as the named policy rather than
+                # as loose literals, so there is one source of truth for 10s/2 (the old
+                # literals happened to match BATCH_EMBED_POLICY, which is why this site
+                # was already correct — but nothing enforced that).
+                from ..embedding import BATCH_EMBED_POLICY
                 embedding = call_embedding(
                     candidate["question"][:1000], embed_cfg, cache=True,
-                    timeout=10, retries=2,
+                    policy=BATCH_EMBED_POLICY,
                 )
                 if not embedding:
                     raise RuntimeError("embedding 返回空向量")
@@ -981,12 +986,26 @@ def handle_v3_import_seed(args: dict, **kw) -> str:
                             source_id = f"y/{category}/{filename}"
                             emb = None
                             if embed_cfg is not None:
-                                try:
-                                    emb = call_embedding(text[:2000], embed_cfg, cache=True)
-                                except ValueError:
-                                    raise
-                                except Exception as e:
-                                    logger.warning("seed import embedding 失败 (%s): %s", source_id, _safe_err(e)[:120])
+                                # Durable card write on a batch import path. Name the batch
+                                # policy and record a durable marker; the seed import used
+                                # to leave an unexplained NULL behind a warning.
+                                from ..embedding import BATCH_EMBED_POLICY
+                                from ..embed_failures import embed_for_write
+                                _out = embed_for_write(
+                                    text[:2000], embed_cfg,
+                                    entity_table="topics", entity_id=source_id,
+                                    phase="seed_import",
+                                    conn_factory=getattr(pg, "open_side_connection", None),
+                                    policy=BATCH_EMBED_POLICY,
+                                )
+                                emb = _out.vector
+                                if not _out.ok:
+                                    logger.warning(
+                                        "seed import embedding %s (%s): class=%s "
+                                        "retryable=%s marker_recorded=%s",
+                                        _out.status.value, source_id, _out.error_class,
+                                        _out.retryable, _out.marker_recorded,
+                                    )
                             pg.insert_card(
                                 source_id=source_id,
                                 title=title,

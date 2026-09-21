@@ -114,7 +114,26 @@ def handle_v2_topic_edit(args: dict, **kw) -> str:
             summary = row2[0] or ""
             body = (row2[1] or "")[:200]
             vec_text = f"{new_content} {summary} {body}"[:1000]
-            emb = call_embedding(vec_text, embed_cfg) if embed_cfg is not None else None
+            emb = None
+            if embed_cfg is not None:
+                # Derived state; the card edit is the asset. Name the durable policy and
+                # record a durable marker instead of an unexplained NULL.
+                from ..embedding import DURABLE_WRITE_EMBED_POLICY
+                from ..embed_failures import embed_for_write
+                _out = embed_for_write(
+                    vec_text, embed_cfg,
+                    entity_table="topic_blocks", entity_id=raw_id,
+                    phase="topic_edit",
+                    policy=DURABLE_WRITE_EMBED_POLICY,
+                )
+                emb = _out.vector
+                if not _out.ok:
+                    logger.warning(
+                        "topic_edit embedding %s for %s: class=%s retryable=%s "
+                        "marker_recorded=%s — 编辑已落盘, 向量待修复",
+                        _out.status.value, raw_id, _out.error_class,
+                        _out.retryable, _out.marker_recorded,
+                    )
             if emb is not None:
                 store.conn.execute(
                     "UPDATE topic_blocks SET embedding=? WHERE id=?",
