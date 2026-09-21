@@ -157,6 +157,26 @@ UPDATE public.embedding_failures
    AND resolved_at IS NULL
 """
 
+# 按**实体**关闭，而不是按 (实体, phase) 关闭。
+#
+# 为什么必须有这一条：live 写入失败时记录的 phase 是 live_ingest / j_import 等，
+# 而 repair 走的是 backfill。向量恢复后只关掉 backfill 那一行，真实的历史 marker
+# 仍然挂着 —— 那就是**假 backlog**：账面上还有失败，实际数据已经修好了。
+# 一个实体的 canonical embedding 只有一个派生状态，恢复即该实体全部 unresolved
+# phase 同时失效。
+#
+# 边界：不碰其它 entity、不碰其它 table、不碰已 resolved 的历史记录。只 UPDATE
+# 不 DELETE，历史保留可审计。
+_RESOLVE_ENTITY_SQL = """
+UPDATE public.embedding_failures
+   SET resolved_at = now(),
+       resolution  = %(resolution)s,
+       updated_at  = now()
+ WHERE entity_table = %(entity_table)s
+   AND entity_id    = %(entity_id)s
+   AND resolved_at IS NULL
+"""
+
 
 def _resolve_conn(conn, conn_factory):
     """Get a connection for the marker write, without disturbing pool semantics.
@@ -306,6 +326,52 @@ def resolve_embedding_failure(conn=None, *, entity_table: str, entity_id: str,
         logger.warning("embedding 失败标记 resolve 失败: %s/%s",
                        entity_table, entity_id, exc_info=True)
         return False
+    finally:
+        if own_conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def resolve_embedding_failures_for_entity(conn=None, *, entity_table: str,
+                                          entity_id: str, resolution: str = "repaired",
+                                          conn_factory=None) -> int:
+    """关闭**一个实体**下所有仍未解决的 failure marker，返回被关闭的行数。
+
+    与 :func:`resolve_embedding_failure` 的区别只有一个：没有 ``phase`` 谓词。
+    repair 成功意味着该实体的 canonical embedding 已经恢复，那么挂在它名下的
+    每一个 unresolved phase（live_ingest / j_import / backfill …）都不再成立；
+    只关 backfill 会留下悬空的历史 marker，在 operator 账面上表现为**假 backlog**。
+
+    作用域严格限定在 ``(entity_table, entity_id)``：不误伤其它实体、其它表，
+    也不重写已 resolved 的历史行（``resolved_at IS NULL`` 守卫）。只 UPDATE 不
+    DELETE。任何异常都不得冒泡 —— 记账不能拖垮 repair。
+    """
+    own_conn = False
+    if conn is None:
+        conn = _resolve_conn(None, conn_factory)
+        own_conn = conn is not None
+    if conn is None:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_RESOLVE_ENTITY_SQL, {
+                "entity_table": entity_table,
+                "entity_id": str(entity_id),
+                "resolution": resolution,
+            })
+            changed = cur.rowcount
+        conn.commit()
+        return int(changed or 0)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.warning("embedding 失败标记按实体 resolve 失败: %s/%s",
+                       entity_table, entity_id, exc_info=True)
+        return 0
     finally:
         if own_conn:
             try:

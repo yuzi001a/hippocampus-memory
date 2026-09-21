@@ -164,7 +164,11 @@ def _row_text(table: str, row: dict) -> str:
                 kw = [kw]
         if isinstance(kw, list):
             parts.append(" ".join(str(x) for x in kw))
-        return f"{parts[0]}. {parts[1]} {parts[2]} {parts[3]}".strip()
+        # live writer (topic_store.upsert_topic) builds the FULL canonical text first and
+        # only then slices it. Truncating the body alone is NOT equivalent: for the 173
+        # production cards longer than 1000 chars it would embed a different string than
+        # the live path, silently putting repair vectors in a second semantic space.
+        return f"{parts[0]}. {parts[1]} {parts[2]} {parts[3]}".strip()[:1000]
     if table == "conversation_stream":
         return (row.get("content") or "")[:2000]
     if table == "observation_notes":
@@ -229,7 +233,7 @@ def _select_sql(spec: dict, include_nonretryable: bool, table: str) -> str:
 
 def backfill_table(conn, table: str, *, embed_cfg: dict, apply: bool,
                    limit: int | None, include_nonretryable: bool = False) -> BackfillStats:
-    from v3core.embed_failures import embed_for_write, resolve_embedding_failure
+    from v3core.embed_failures import embed_for_write, resolve_embedding_failures_for_entity
 
     if table not in CANONICAL_TABLES:
         raise SystemExit(
@@ -281,11 +285,12 @@ def backfill_table(conn, table: str, *, embed_cfg: dict, apply: bool,
             ok = _repair_plain_row(conn, r, spec, table, embed_cfg, st, marker_id)
 
         if ok:
-            # Resolve the marker for the phase we actually repaired. A row repaired by the
-            # backfill must leave the "unexplained NULL" set without erasing an unrelated
-            # unresolved marker from another phase.
-            resolve_embedding_failure(conn, entity_table=table, entity_id=str(marker_id),
-                                      phase="backfill")
+            # 关闭该实体**全部** unresolved phase，而不只是 backfill。
+            # 向量已恢复 → 该实体不再处于派生失败状态；只关 backfill 会留下
+            # live_ingest / j_import 的悬空 marker，在 operator 账面上制造假 backlog。
+            # 作用域严格限定在 (entity_table, entity_id)，不误伤其它实体/表/历史。
+            resolve_embedding_failures_for_entity(
+                conn, entity_table=table, entity_id=str(marker_id))
 
     conn.commit()
     st.elapsed_s = time.time() - t0
@@ -436,20 +441,49 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None, help="write stats JSON here")
     args = ap.parse_args(argv)
 
-    from v3core.pg_store import PGStore
     from v3core.config import resolve_config
+    from v3core.embedding import safe_embed_cfg
+    from v3core.pg_store import PgEmbedStore
 
     cfg = resolve_config()
-    embed_cfg = cfg.get("embedding") or cfg.get("embed") or {}
-    if not embed_cfg.get("model"):
-        print("refused: no embedding model configured (fail-closed)", file=sys.stderr)
+
+    # 唯一 embed_cfg 入口 —— 禁止手拼 dict，也禁止读 cfg["embedding"]：
+    # resolve_config() 返回 typed V3Config，那条路径从写出第一天就是错的
+    # （"embedding" 是 None，"embed" 是 EmbedConfig 对象，没有 .get()）。
+    # 配置非法时 fail-closed，绝不把配置错误伪装成 disabled。
+    try:
+        embed_cfg = safe_embed_cfg(cfg)
+    except ValueError as exc:
+        print(f"refused: embedding configuration invalid ({exc}) (fail-closed)",
+              file=sys.stderr)
+        return 2
+    if not embed_cfg:
+        print("refused: no embedding configured (fail-closed)", file=sys.stderr)
+        return 2
+    _missing = [k for k in ("model", "endpoint", "_fingerprint") if not embed_cfg.get(k)]
+    if _missing:
+        print(f"refused: embedding config missing {_missing} (fail-closed)", file=sys.stderr)
         return 2
 
-    pg = PGStore(cfg)
-    conn = getattr(pg, "_conn", None) or pg.conn
-    print(f"backfill table={args.table} apply={args.apply} limit={args.limit}")
-    st = backfill_table(conn, args.table, embed_cfg=embed_cfg, apply=args.apply,
-                        limit=args.limit, include_nonretryable=args.include_nonretryable)
+    # PgEmbedStore 只有 lease() 一条合法取连接路径；既没有 PGStore，也没有 .conn。
+    # 遗留模式下 _connect() 失败会**返回 None 而不抛**，所以必须显式 fail-closed，
+    # 否则后面的 cursor() 会以 AttributeError 的形式伪装成崩溃。
+    pg = PgEmbedStore(cfg)
+    try:
+        with pg.lease() as conn:
+            if conn is None:
+                print("refused: could not obtain a PostgreSQL connection (fail-closed)",
+                      file=sys.stderr)
+                return 3
+            print(f"backfill table={args.table} apply={args.apply} limit={args.limit}")
+            st = backfill_table(conn, args.table, embed_cfg=embed_cfg, apply=args.apply,
+                                limit=args.limit,
+                                include_nonretryable=args.include_nonretryable)
+    finally:
+        try:
+            pg.close()
+        except Exception:
+            pass
     print(json.dumps(st.as_dict(), indent=2, ensure_ascii=False))
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:

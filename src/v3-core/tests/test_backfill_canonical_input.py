@@ -197,3 +197,119 @@ def test_case7b_yin_paragraphs_none_values_do_not_raise():
 
     assert got == ". "
     assert _yin_writer_kind({"yin_version": None, "section": None}) == "yin_pool"
+
+# ── topics：D4 canonical 表示（完整拼接后再截断） ──────────────────────────────
+#
+# 活写入者 ``topic_store.upsert_topic`` 的真实语义是：
+#     text = f"{title}. {summary} {(body or '')[:800]} {kw_str}".strip()
+#     embed(text[:1000])
+# 即：**先拼出完整 canonical text，再对最终结果截断**。
+# 修复前 backfill 只把 body 截到 800，却漏掉了最后的 [:1000] —— 对生产库中
+# 173 张超过 1000 字的卡，它会 embed 一个活路径从未产生过的字符串，把修复向量
+# 写进第二个语义空间（召回行为与活写入的行不一致，且事后不可察）。
+
+
+def _live_topic_text(title, summary, body, keywords) -> str:
+    """活写入者 upsert_topic 的逐字复刻（截断前的完整文本）。
+
+    title 也走 ``or ""``：DB 列可为 NULL，活路径同样不能把 None 拼进 f-string
+    （否则会得到字面量 "None"）。这里与实现的容错保持一致。
+    """
+    kw_str = " ".join(str(x) for x in keywords) if isinstance(keywords, list) else ""
+    return f"{title or ''}. {summary or ''} {(body or '')[:800]} {kw_str}".strip()
+
+
+def _topic_row(title, summary, body, keywords):
+    return {"id": 1, "title": title, "summary": summary, "body": body, "keywords": keywords}
+
+
+def test_topics_final_text_under_1000_is_returned_unchanged():
+    """final text < 1000：必须原样返回，且与活写入者逐字节一致。"""
+    row = _topic_row("短标题", "短摘要", "短正文", ["a", "b"])
+
+    got = _row_text("topics", row)
+
+    full = _live_topic_text("短标题", "短摘要", "短正文", ["a", "b"])
+    assert len(full) < 1000
+    assert got == full
+
+
+def test_topics_final_text_exactly_at_boundary():
+    """final text 恰好 1000：截断是 no-op，不得吃掉字符。"""
+    body = "B" * 796
+    row = _topic_row("T", "S" * 200, body, [])
+
+    got = _row_text("topics", row)
+
+    full = _live_topic_text("T", "S" * 200, body, [])
+    assert len(full) == 1000
+    assert got == full
+    assert len(got) == 1000
+
+
+def test_topics_final_text_just_over_boundary():
+    """final text 略超 1000：结果必须恰好是完整文本的前 1000 字符。"""
+    body = "B" * 2000
+    row = _topic_row("T", "S" * 200, body, [])
+
+    got = _row_text("topics", row)
+
+    full = _live_topic_text("T", "S" * 200, body, [])
+    assert len(full) > 1000
+    assert len(got) == 1000
+    assert got == full[:1000]
+
+
+def test_topics_long_card_is_byte_identical_to_live_writer():
+    """>1000 的长卡：backfill 文本必须与活写入者 byte-identical。
+
+    这是 D4 的核心回归 —— 修复前这里会返回未截断的完整文本（长度 > 1000），
+    断言立刻失败。
+    """
+    row = _topic_row("长标题", "S" * 300, "B" * 3000, ["碑", "迹", "印"])
+
+    got = _row_text("topics", row)
+
+    full = _live_topic_text("长标题", "S" * 300, "B" * 3000, ["碑", "迹", "印"])
+    assert len(full) > 1000
+    assert got == full[:1000]
+    assert got != full                      # 修复前这里会是 full（未截断）
+    assert len(got) == 1000
+
+
+def test_topics_truncation_applies_to_final_string_not_to_body():
+    """截断作用在**最终字符串**上，不是 body 上。
+
+    body 1200 字（>800），但拼出的完整文本只有 804 字（<1000）——
+    若实现误把 [:1000] 作用在 body 上、或按 body 长度判断，本用例会失败。
+    """
+    row = _topic_row("T", "", "B" * 1200, [])
+
+    got = _row_text("topics", row)
+
+    full = _live_topic_text("T", "", "B" * 1200, [])
+    assert len(full) < 1000
+    assert got == full
+    assert len(got) == len(full)
+
+
+def test_topics_keywords_json_string_is_tolerated():
+    """keywords 以 JSON 字符串到达时（旧行/中间层）仍需产出与活路径一致的结果。"""
+    row = _topic_row("T", "S", "B" * 2000, '["碑", "迹"]')
+
+    got = _row_text("topics", row)
+
+    full = _live_topic_text("T", "S", "B" * 2000, ["碑", "迹"])
+    assert got == full[:1000]
+
+
+def test_topics_none_fields_do_not_raise():
+    """全 NULL 字段必须安全降级为空串，而不是 TypeError。
+
+    注意结果是 ``"."`` 而不是 ``". "``：活写入者最后会 ``.strip()``，尾随空格被去掉。
+    """
+    got = _row_text("topics", {"id": 1, "title": None, "summary": None,
+                               "body": None, "keywords": None})
+
+    assert got == "."
+    assert got == _live_topic_text(None, None, None, None)
