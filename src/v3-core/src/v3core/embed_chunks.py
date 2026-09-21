@@ -852,6 +852,44 @@ def _char_estimate_offsets(
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
+# ── Generic single-field span API ──────────────────────────────────────────
+
+
+def split_text_into_token_safe_spans(
+    field_name: str,
+    field_text: str,
+    embed_cfg: Optional[Dict[str, Any]],
+    *,
+    tokenizer_override: Optional[Any] = None,
+    target_tokens: Optional[int] = None,
+    starting_chunk_index: int = 0,
+) -> List[EmbedChunk]:
+    """Split one free-text field into token-safe non-overlapping spans.
+
+    Thin seam over :func:`_encode_field_offsets` +
+    :func:`_split_field_with_offsets` — no tokenizer algorithm is
+    duplicated here. The long-QA path
+    (:func:`split_into_token_safe_chunks`) and the long-observation
+    planner (``v3core.observation_chunks``) share this entry so both
+    stay byte-identical in split semantics.
+    """
+    if target_tokens is None:
+        target_tokens = safe_token_target(embed_cfg)
+    if not (field_text or ""):
+        return []
+    offsets, is_real = _encode_field_offsets(
+        field_text, embed_cfg, tokenizer_override=tokenizer_override
+    )
+    return _split_field_with_offsets(
+        field_name,
+        field_text,
+        offsets=offsets,
+        is_real=is_real,
+        target_tokens=target_tokens,
+        starting_chunk_index=starting_chunk_index,
+    )
+
+
 def split_into_token_safe_chunks(
     question: str,
     answer: str,
