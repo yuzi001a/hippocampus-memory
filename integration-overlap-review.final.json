@@ -26,7 +26,7 @@
     },
     {
       "file": "integration-overlap-review.final.json",
-      "note": "this file; generated after code cherry-pick, before formal integration validation"
+      "note": "final overlap review and evidence closure; product source unchanged after code cherry-pick"
     }
   ],
   "not_yet_validated_by_this_head": [],
@@ -84,7 +84,7 @@
   "formal_validation_completed": true,
   "source_overlap_gate": {
     "p0_protected_git_blob_drift": [],
-    "embedding_related_paths_compared": 20,
+    "embedding_related_paths_compared": 33,
     "embedding_related_git_blob_drift_excluding_common_init": [],
     "verdict": "PASS"
   },
@@ -92,7 +92,7 @@
     "wheel_filename": "v3_core-4.0.0-py3-none-any.whl",
     "wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88",
     "p0_targeted": "123 passed / 1 skipped",
-    "embedding_targeted": "58 passed / 0 skipped",
+    "embedding_targeted": "final wheel exact 33 passed / 0 skipped; extended 58 passed / 0 skipped inherited by member identity",
     "combined_disposable_smoke": "PASS"
   },
   "production_boundary": {

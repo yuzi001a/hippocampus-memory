@@ -13,8 +13,8 @@
 ## Integration validation
 
 - P0 protected Git-blob drift relative to the P0 parent: `0`.
-- Embedding-related product/eval/schema/test paths compared: `20`; drift excluding common `__init__.py`: `0`.
-- y400 integration full suite: `763 passed / 4 failed / 5 skipped`.
+- Embedding-related product/eval/schema/test paths compared: `33`; drift excluding common `__init__.py`: `0`.
+- y400 integration full suite (tested at product source HEAD `4a7f496…`): `763 passed / 4 failed / 5 skipped`; final branch additions after that point are metadata/evidence only.
 - `INTEGRATION_NEW_REGRESSION = 0`; the four failures are the inherited baseline set.
 - P0 targeted integration-source scope: `123 passed / 1 skipped`.
 - Final wheel P0 targeted scope: `123 passed / 1 skipped`.

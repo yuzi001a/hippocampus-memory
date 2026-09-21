@@ -19,13 +19,13 @@
     "p0_protected_git_blob_drift": [],
     "embedding_related_paths_compared": 33,
     "embedding_related_git_blob_drift_excluding_common_init": [],
-    "verdict": "PASS"
+    "verdict": "PASS",
+    "note": "33 embedding-branch product/eval/schema/test paths were compared; source full suite ran at 4a7f496, while 8c1a50f adds metadata/evidence only."
   },
   "y400": {
     "machine": "y400 / DESKTOP-EQP3OBU (dedicated Win10)",
     "python": "C:/hp-testbed/hippocampus-memory/.venv/Scripts/python.exe (Python 3.13.15)",
     "full_suite_command": "python -m pytest tests -q -p no:cacheprovider -p no:randomly",
-    "integration_source_archive_sha256": "bcf664b64969dc3e5278c660153bb1cd0e364942d0a50f91ac3caca1b5d4db08",
     "integration_full_suite": {
       "passed": 763,
       "failed": 4,
@@ -150,7 +150,8 @@
       "passed": 58,
       "failed": 0,
       "skipped": 0,
-      "log_sha256": "416623b8aab00eefde58b79dbc33b95846de42e7b97519985b2cf6147c06b338"
+      "log_sha256": "416623b8aab00eefde58b79dbc33b95846de42e7b97519985b2cf6147c06b338",
+      "evidence_basis": "source 58/0 plus all 112 final-wheel members byte-identical to the pre-closure tested wheel; final wheel exact 33/0 was rerun independently"
     },
     "wheel_embedding_exact_targeted": {
       "passed": 33,
@@ -158,7 +159,10 @@
       "skipped": 0,
       "log_sha256": "c5f56d5b0c5bd8b89c944f3b852a627e1ea49c7d328461139df163e04f0ef7b9",
       "wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88"
-    }
+    },
+    "tested_source_archive_sha256": "1048ce8a4d05c79bd517f0eb20cf691f0454ae9582d01f11aa82bb58102f4404",
+    "tested_full_suite_source_head": "4a7f496170c23fc0ee57be8286e65c31ade51546",
+    "final_source_archive_sha256": "bcf664b64969dc3e5278c660153bb1cd0e364942d0a50f91ac3caca1b5d4db08"
   },
   "inherited_failures": [
     {
