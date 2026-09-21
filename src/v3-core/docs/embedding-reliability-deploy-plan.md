@@ -1,11 +1,17 @@
 # Embedding Reliability — Migration / Deploy / Rollback Plan
 
-**Status: PLAN ONLY — NOT EXECUTED. `DECISION_REQUIRED`.**
+**Status: PLAN ONLY — NOT EXECUTED.**
 Nothing in this document has been applied to production. Production is read-only
 pending explicit approval.
 
-Baseline: tag `v0.2.1` = `0bd9e1ee7f42f0184f83aff367000a6656a06dcd`
-Branch: `fix/embedding-write-reliability`
+Production baseline: P0 HEAD `7808b89239787ba09eee7915c69392981a8ca911`
+Embedding source: `b344b801bac06e3dad0f68f47d243930d57ab07f`
+Integration branch: `integration/p0-embedding-reliability` (current HEAD `5c4fba03cddbbfda8b8dcd8c80821d665d29e3a4`)
+Common baseline (merge base): tag `v0.2.1` = `0bd9e1ee7f42f0184f83aff367000a6656a06dcd`
+
+Historical note: this plan was first written against tag `v0.2.1` on branch
+`fix/embedding-write-reliability`. Those identifiers below are historical
+context, not the current integration candidate.
 
 ---
 
@@ -310,11 +316,17 @@ Rows are distinguishable by writer:
 All 8 NULL rows are the **yin_pool** kind, so they need
 `f"{section}. {content[:1500]}"`.
 
-**Defect found during this dry-run:** the backfill tool's `_row_text` currently returns
-bare `content` for `yin_paragraphs`, which is **neither** representation — it drops the
-`"{section}. "` prefix. Repairing with the tool as-is would write embeddings with
-different semantics than the live path. **Must be fixed before any production repair.**
-(The `observation_notes` and `conversation_stream` entries are correct as written.)
+**Historical finding, now repaired in source (not yet applied to production):**
+during the original dry-run, the backfill tool's `_row_text` returned bare
+`content` for `yin_paragraphs`, which was **neither** representation — it dropped
+the `"{section}. "` prefix. Repairing with the tool as-it-was would have written
+embeddings with different semantics than the live path. That defect was fixed by
+embedding source commit `b344b801...` (yin dual-writer canonical repair) and is
+retained in integration HEAD `5c4fba0...`; it is covered by
+`tests/test_backfill_canonical_input.py` and existing evidence. Production still
+runs the old code, so no production repair may run until the fixed code is
+deployed.
+(The `observation_notes` and `conversation_stream` entries were correct as written.)
 
 ---
 
