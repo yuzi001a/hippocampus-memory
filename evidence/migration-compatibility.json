@@ -1,0 +1,11 @@
+{
+  "old_runtime_import": "C:\\Users\\servi\\workspace\\backups\\operator-env\\Lib\\site-packages\\v3core\\__init__.py",
+  "migration": {
+    "table_count": 1,
+    "index_count": 4,
+    "constraint_count": 5,
+    "source_tables_unchanged_by_migration": true
+  },
+  "only_additive": true,
+  "idempotent_second_run": true
+}

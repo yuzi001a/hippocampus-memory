@@ -1,0 +1,230 @@
+{
+  "table": "observation_notes",
+  "selected": 6,
+  "repaired": 0,
+  "already_ok": 0,
+  "failed_retryable": 0,
+  "failed_permanent": 0,
+  "skipped_nonretryable": 0,
+  "sidecar_written": 0,
+  "plans": [
+    {
+      "id": 634,
+      "version": "v634",
+      "source_sha256": "02b47ae49db3a0fa5d863fd0e6d2aab2918a0f78d23b9052be42f71f8df1a4fb",
+      "chars": 26002,
+      "bytes": 33582,
+      "tokens": 10963,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        3284
+      ],
+      "source_offsets": [
+        [
+          0,
+          18114
+        ],
+        [
+          18114,
+          26002
+        ]
+      ],
+      "estimated_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "existing_chunks": {
+        "present": false,
+        "count": 0
+      },
+      "current_parent_vector": false,
+      "current_embed_model": ""
+    },
+    {
+      "id": 726,
+      "version": "v726",
+      "source_sha256": "5851a2da31549680ef4737f68de87042b538c5c4337ae0e358381d0ca4f0e17b",
+      "chars": 16168,
+      "bytes": 24518,
+      "tokens": 8907,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        1228
+      ],
+      "source_offsets": [
+        [
+          0,
+          13946
+        ],
+        [
+          13946,
+          16168
+        ]
+      ],
+      "estimated_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "existing_chunks": {
+        "present": false,
+        "count": 0
+      },
+      "current_parent_vector": false,
+      "current_embed_model": ""
+    },
+    {
+      "id": 732,
+      "version": "v732",
+      "source_sha256": "62ed033513c08743f381201769f323b9fc77724386e207c34cf444919728bdc7",
+      "chars": 22228,
+      "bytes": 32452,
+      "tokens": 11629,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        3950
+      ],
+      "source_offsets": [
+        [
+          0,
+          14516
+        ],
+        [
+          14516,
+          22228
+        ]
+      ],
+      "estimated_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "existing_chunks": {
+        "present": false,
+        "count": 0
+      },
+      "current_parent_vector": false,
+      "current_embed_model": ""
+    },
+    {
+      "id": 743,
+      "version": "v743",
+      "source_sha256": "a5e5e0e4fcbea35d7c0f5b6d0df9a9f689600a138fadf034e9bb232586396414",
+      "chars": 23326,
+      "bytes": 31756,
+      "tokens": 11026,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        3347
+      ],
+      "source_offsets": [
+        [
+          0,
+          16247
+        ],
+        [
+          16247,
+          23326
+        ]
+      ],
+      "estimated_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "existing_chunks": {
+        "present": false,
+        "count": 0
+      },
+      "current_parent_vector": false,
+      "current_embed_model": ""
+    },
+    {
+      "id": 746,
+      "version": "v745",
+      "source_sha256": "7693c7787800cf8af72a43ed8f680b2009a9ce0117adae6749f1635c22516c97",
+      "chars": 21699,
+      "bytes": 31563,
+      "tokens": 11072,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        3393
+      ],
+      "source_offsets": [
+        [
+          0,
+          14848
+        ],
+        [
+          14848,
+          21699
+        ]
+      ],
+      "estimated_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "existing_chunks": {
+        "present": false,
+        "count": 0
+      },
+      "current_parent_vector": false,
+      "current_embed_model": ""
+    },
+    {
+      "id": 759,
+      "version": "v759",
+      "source_sha256": "9adee801b4d5a9860b0ea78cd1fd5c7d432c03902e6c3c1e81f319ec969d7838",
+      "chars": 16282,
+      "bytes": 24738,
+      "tokens": 8512,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        833
+      ],
+      "source_offsets": [
+        [
+          0,
+          14844
+        ],
+        [
+          14844,
+          16282
+        ]
+      ],
+      "estimated_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "existing_chunks": {
+        "present": false,
+        "count": 0
+      },
+      "current_parent_vector": false,
+      "current_embed_model": ""
+    }
+  ],
+  "elapsed_s": 3.93,
+  "errors": []
+}

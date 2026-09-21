@@ -1,51 +1,53 @@
-# P0 + Embedding Reliability Integration — CURRENT
+# Hippocampus — long observation index
 
-**Status:** `DECISION_REQUIRED`
-**Branch:** `integration/p0-embedding-reliability`
-**Validated product source HEAD:** `4a7f496170c23fc0ee57be8286e65c31ade51546`
-**Artifact build source HEAD:** `8c1a50f62e086c7139924696050650a376e2fc4a`
-**Code cherry-pick HEAD:** `5c4fba03cddbbfda8b8dcd8c80821d665d29e3a4`
-**P0 source parent:** `7808b89239787ba09eee7915c69392981a8ca911`
-**Embedding source commit:** `b344b801bac06e3dad0f68f47d243930d57ab07f`
-**Merge base / common baseline:** `0bd9e1ee7f42f0184f83aff367000a6656a06dcd` (`v0.2.1`)
-**Common modified file:** `src/v3-core/src/v3core/__init__.py` — semantically reviewed, not resolved by ours/theirs.
+Status: `DECISION_REQUIRED`
 
-## Integration validation
+## Candidate
 
-- P0 protected Git-blob drift relative to the P0 parent: `0`.
-- Embedding-related product/eval/schema/test paths compared: `33`; drift excluding common `__init__.py`: `0`.
-- y400 integration full suite (tested at product source HEAD `4a7f496…`): `763 passed / 4 failed / 5 skipped`; final branch additions after that point are metadata/evidence only.
-- `INTEGRATION_NEW_REGRESSION = 0`; the four failures are the inherited baseline set.
-- P0 targeted integration-source scope: `123 passed / 1 skipped`.
-- Final wheel P0 targeted scope: `123 passed / 1 skipped`.
-- Embedding exact policy/reliability two-file scope: `33 passed / 0 skipped` from source and final wheel.
-- Extended embedding policy/reliability/ledger/yin/backfill scope: `58 passed / 0 skipped`.
-- Critical path: source `16/16`, final wheel `16/16`.
-- Final wheel disposable integration smoke: P0 reader/boundary `PASS`; embedding failure-ledger forward E2E `38/38`; backfill safety E2E `32/32`.
+- Branch: `feature/long-observation-index-v1`
+- Base: `9c4d191017620e9edbd81ca8fd85d232f4faf23c`
+- Implementation commits: `12a2bce`, `f20c668`, `2f23e34`
+- Candidate wheel: `C:\\hp-testbed\\artifacts\\long-observation-candidate\\v3_core-4.0.0-py3-none-any.whl`
+- Candidate wheel SHA256: `9bb82c792a0d1ccbd62ed1511b3b5502afc8f751a8273397c7beb60629544d4a`
+- Status: integration candidate only; not production-authorized.
 
-The previously reported embedding-branch `46 passed / 2 skipped` line is not used as the integration result because its exact command artifact was not preserved. The exact current scopes and logs are recorded above and under `evidence/`.
+## Production freeze result
 
-## Artifact
+Production was used only for SELECT/schema introspection/source hashes/token census and the observation dry-run. No production migration, INSERT, UPDATE, DELETE, real backfill, live venv reinstall, gateway restart, or serve restart was performed by this task.
 
-The old embedding-only wheel is `SUPERSEDED_FOR_PRODUCTION_INTEGRATION` and must not be installed in production.
+Final production facts:
 
-The final integration wheel is the only candidate artifact:
+- provider/model: SiliconFlow `BAAI/bge-m3`
+- fingerprint: `bf32771ecbd1`
+- provider hard window: `8192`
+- safe planner target: `7680`
+- `observation_notes` NULL parent vectors: `6`
+- NULL IDs: `634, 726, 732, 743, 746, 759`
+- all six are long/unembeddable on the old single-request path
+- all six dry-run plans are valid, two children each, no child above `7680`
+- total planned historical child calls: `12`
+- observation sidecar in production: absent
+- observation failure ledger: `total=0, unresolved=0`
+- production source hashes are recorded in the private-safe plan evidence.
 
-- built from branch HEAD: `8c1a50f62e086c7139924696050650a376e2fc4a`
-- filename: `v3_core-4.0.0-py3-none-any.whl`
-- SHA256: `8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88`
-- artifact record: `evidence/integration-wheel-build.final.json`
-- production file comparison: `evidence/production-current-vs-integration-artifact.final.json`
+Live package manifest remained unchanged from the frozen production wheel. Process observation found two gateway and two serve processes; this task issued no lifecycle command. The process observation is retained separately rather than treating PID history as a restart claim.
 
-## Production boundary
+## Validation
 
-Production remains P0-only. No embedding migration, wheel install, restart, or database backfill has occurred:
+- RED evidence retained before implementation.
+- Targeted preservation gates: `229 passed`.
+- Full candidate suite: `854 passed, 3 inherited importer fixture failures, 4 skipped`.
+- Baseline: `801 passed, 4 inherited importer fixture failures, 4 skipped`.
+- Original-only differential: `NEW_REGRESSION=0`.
+- Disposable PostgreSQL E2E: short, 10k, 20k, retry, permanent failure, sidecar failure, idempotent rerun, and stale 4→3 replacement all passed.
+- Real non-production provider: 10k and 20k sources passed; every child <=7680, dimension 1024, fingerprint correct.
+- Final wheel imported from isolated `wheel-env`; P0 identity validator, forward embedding imports, long-QA, observation short/long planner, parent merge, D5 commit boundary, and backfill CLI entrypoint passed.
 
-```text
-migration = 0
-deploy    = 0
-restart   = 0
-db_backfill = 0
-```
+## Remaining production actions
 
-The deployment/rollback plan remains plan-only. Any production action requires a separate decision; this branch is now stopped at `DECISION_REQUIRED`.
+1. Decide whether to apply the additive migration in production.
+2. If migration is approved, run a separately authorized production dry-run/repair gate.
+3. Authorize a production observation backfill batch; no batch was applied tonight.
+4. Decide separately whether the static audit's 18 potentially-unbounded non-observation call sites need follow-up. No additional product scope was changed tonight.
+
+Evidence root: `C:\\hp-testbed\\evidence\\`

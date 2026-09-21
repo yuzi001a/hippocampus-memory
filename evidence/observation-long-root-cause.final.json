@@ -1,0 +1,85 @@
+{
+  "status": "PRODUCT_DEFECT",
+  "severity": "P1-HIGH",
+  "classification": "OBSERVATION_LONG_INPUT_UNEMBEDDABLE",
+  "captured_from": "phase0-checkpoint.json",
+  "production_writes": 0,
+  "target": {
+    "host": "localhost",
+    "port": 5433,
+    "database": "v3embeddings",
+    "user": "v3user",
+    "current_database": "v3embeddings",
+    "current_user": "v3user",
+    "transaction_read_only": "on"
+  },
+  "embed_contract": {
+    "embed_model": "BAAI/bge-m3",
+    "embed_fingerprint": "bf32771ecbd1",
+    "max_input_tokens": 8192,
+    "chunk_safety_margin": 512,
+    "safe_token_target": 7680
+  },
+  "eligible_null_rows": 6,
+  "all_rows_over_safe_target": true,
+  "all_rows_over_provider_hard_window": true,
+  "source_truth_statement": "observation_notes.content is the complete immutable source; only its derived embedding is absent",
+  "live_canonical_input": {
+    "expression": "observation_notes.content",
+    "writer_behavior": "observer writer passes complete content to the single embedding call; no safe chunk planner is present on this path",
+    "source_hash_is_canonical_hash": true,
+    "bounded": false
+  },
+  "call_chain": [
+    "observation source content is inserted into public.observation_notes",
+    "observer._write_observation_note commits source before derived embedding work",
+    "observer._backfill_note_embedding uses the complete observation content as the canonical text",
+    "embedding.embed_batch/call_embedding sends that text as one provider request",
+    "the parent vector and embed_model are written to public.observation_notes only on success",
+    "recall._anchor_expand currently searches the parent observation vector lane; no observation child sidecar lane exists"
+  ],
+  "why_short_is_healthy": "short observations fit the configured provider safe target, so the existing full-content single-vector request is valid and preserves current semantics",
+  "why_long_fails": "long observations are sent unsliced in one request; 8192 provider tokens is a hard ceiling and the 7680 safe target leaves the configured margin, so all six current rows are over both bounds",
+  "required_fix": "retain complete source; plan tokenizer-safe derived chunks; require all children before aggregate parent; recall child hits back to complete parent",
+  "source_references": {
+    "observer_writer": {
+      "path": "src/v3-core/src/v3core/observer.py",
+      "sha256": "8b9ab1953e2a96def18393c62de0f9addd6647f1956222bf51ced3332422e662",
+      "symbols": {
+        "def _write_observation_note": 1568,
+        "def _backfill_note_embedding": 1659
+      }
+    },
+    "embedding": {
+      "path": "src/v3-core/src/v3core/embedding.py",
+      "sha256": "78b97e55161a9d31eec38b4e2a93e59ebceaed988e36064e1d41fb7b3678b81f",
+      "symbols": {
+        "def call_embedding": 599,
+        "def embed_batch": 748
+      }
+    },
+    "embed_chunks": {
+      "path": "src/v3-core/src/v3core/embed_chunks.py",
+      "sha256": "fc3cbfdfeddbb7de8d4079800381f2e46025a921d131b37d42b3d3afc64ca645",
+      "symbols": {
+        "def build_qa_embedding_representation": 1027,
+        "def aggregate_parent_embedding": 952
+      }
+    },
+    "failure_ledger": {
+      "path": "src/v3-core/src/v3core/embed_failures.py",
+      "sha256": "534ba91a097d2be6230efbafc9593f3f66495ab45d48efa40e770fbd86a646d0",
+      "symbols": {
+        "def embed_for_write": 383,
+        "def resolve_embedding_failures_for_entity": 337
+      }
+    },
+    "recall": {
+      "path": "src/v3-core/src/v3core/__init__.py",
+      "sha256": "4e1d4a845a38db973740d8c16ee80715aab8fca6061aab515dec362121cefe7b",
+      "symbols": {
+        "def _anchor_expand": 2854
+      }
+    }
+  }
+}
