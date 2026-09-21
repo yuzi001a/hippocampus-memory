@@ -72,8 +72,8 @@ CANONICAL_TABLES: dict[str, dict] = {
         "vec_col": "embedding",
         "model_col": "embed_model",
         "text_col": "content",
-        "mode": "plain",
-        "note": "印 note text",
+        "mode": "observation_chunked",
+        "note": "full source; short parent vector or v1-long-observation sidecar",
     },
     "yin_paragraphs": {
         "pk": "id",
@@ -102,6 +102,7 @@ class BackfillStats:
     failed_permanent: int = 0
     skipped_nonretryable: int = 0
     sidecar_written: int = 0
+    plans: list[dict] = field(default_factory=list)
     elapsed_s: float = 0.0
     errors: list = field(default_factory=list)
 
@@ -231,6 +232,70 @@ def _select_sql(spec: dict, include_nonretryable: bool, table: str) -> str:
                pk=spec["pk"], skip=skip)
 
 
+def _observation_ledger_state(conn, entity_id: object) -> dict:
+    """Read unresolved ledger phases without exposing source text."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COALESCE(array_agg(DISTINCT phase ORDER BY phase), ARRAY[]::text[]) AS phases
+                  FROM public.embedding_failures
+                 WHERE entity_table=%s AND entity_id=%s::text AND resolved_at IS NULL
+                """,
+                ("observation_notes", str(entity_id)),
+            )
+            row = cur.fetchone()
+        return {"unresolved": int(row[0] or 0), "phases": list(row[1] or [])}
+    except Exception as exc:  # a dry-run must surface, not hide, ledger drift
+        return {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+def _observation_sidecar_count(conn, observation_id: object) -> dict:
+    """Read current sidecar state; absence is explicit for old schemas."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.observation_embedding_chunks')")
+            if cur.fetchone()[0] is None:
+                return {"present": False, "count": 0}
+            cur.execute(
+                "SELECT COUNT(*) FROM public.observation_embedding_chunks WHERE observation_id=%s",
+                (observation_id,),
+            )
+            return {"present": True, "count": int(cur.fetchone()[0] or 0)}
+    except Exception as exc:
+        return {"present": False, "count": 0, "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+
+
+def _observation_plan_metadata(conn, row: dict, embed_cfg: dict) -> dict:
+    """Return private-safe dry-run metadata for one observation row."""
+    from v3core.observation_chunks import plan_observation_chunks, validate_observation_chunk_plan
+    observation_id = row.get("id")
+    content = row.get("content") or ""
+    plan = plan_observation_chunks(content, embed_cfg)
+    validate_observation_chunk_plan(content, plan, embed_cfg=embed_cfg)
+    sidecar = _observation_sidecar_count(conn, observation_id)
+    calls = len(plan.chunks) if plan.is_long else (1 if content else 0)
+    return {
+        "id": observation_id,
+        "version": row.get("version") or "",
+        "source_sha256": plan.source_sha256,
+        "chars": len(content),
+        "bytes": len(content.encode("utf-8")),
+        "tokens": plan.token_count,
+        "is_long": plan.is_long,
+        "representation_version": plan.representation_version,
+        "chunk_count": len(plan.chunks),
+        "child_tokens": [c.token_count for c in plan.chunks],
+        "source_offsets": [[c.source_start, c.source_end] for c in plan.chunks],
+        "estimated_calls": calls,
+        "current_ledger": _observation_ledger_state(conn, observation_id),
+        "existing_chunks": sidecar,
+        "current_parent_vector": row.get("embedding") is not None,
+        "current_embed_model": row.get("embed_model") or "",
+    }
+
+
 def backfill_table(conn, table: str, *, embed_cfg: dict, apply: bool,
                    limit: int | None, include_nonretryable: bool = False) -> BackfillStats:
     from v3core.embed_failures import embed_for_write, resolve_embedding_failures_for_entity
@@ -258,12 +323,32 @@ def backfill_table(conn, table: str, *, embed_cfg: dict, apply: bool,
         return st
 
     if not apply:
-        for r in rows[:5]:
-            txt = _row_text(table, r)
-            print(f"    [dry-run] {spec['pk']}={r.get(spec['pk'])} "
-                  f"text_len={len(txt)} head={txt[:60]!r}")
-        if len(rows) > 5:
-            print(f"    [dry-run] ... and {len(rows) - 5} more")
+        if table == "observation_notes":
+            for r in rows:
+                try:
+                    st.plans.append(_observation_plan_metadata(conn, r, embed_cfg))
+                except Exception as exc:
+                    st.failed_retryable += 1
+                    st.errors.append(
+                        f"observation_notes:{r.get(spec['pk'])} plan {type(exc).__name__}: {str(exc)[:160]}"
+                    )
+                    print(
+                        f"    [dry-run] id={r.get(spec['pk'])} PLAN_ERROR="
+                        f"{type(exc).__name__}: {str(exc)[:160]}"
+                    )
+            for plan in st.plans:
+                print(
+                    f"    [dry-run] id={plan['id']} tokens={plan['tokens']} "
+                    f"is_long={plan['is_long']} chunks={plan['chunk_count']} "
+                    f"calls={plan['estimated_calls']} source_sha={plan['source_sha256']}"
+                )
+        else:
+            for r in rows[:5]:
+                txt = _row_text(table, r)
+                print(f"    [dry-run] {spec['pk']}={r.get(spec['pk'])} "
+                      f"text_len={len(txt)} head={txt[:60]!r}")
+            if len(rows) > 5:
+                print(f"    [dry-run] ... and {len(rows) - 5} more")
         st.elapsed_s = time.time() - t0
         return st
 
@@ -281,6 +366,8 @@ def backfill_table(conn, table: str, *, embed_cfg: dict, apply: bool,
 
         if spec["mode"] == "qa_chunked":
             ok = _repair_qa_row(conn, r, spec, embed_cfg, st, marker_id)
+        elif spec["mode"] == "observation_chunked":
+            ok = _repair_observation_row(conn, r, spec, embed_cfg, st, marker_id)
         else:
             ok = _repair_plain_row(conn, r, spec, table, embed_cfg, st, marker_id)
 
@@ -418,6 +505,145 @@ def _repair_qa_row(conn, row, spec, embed_cfg, st, marker_id) -> bool:
                 st.sidecar_written += 1
     st.repaired += 1
     return True
+
+
+def _repair_observation_row(conn, row, spec, embed_cfg, st, marker_id) -> bool:
+    """Repair one observation with the live short/long representation contract."""
+    from v3core.embedding import embed_batch
+    from v3core.embed_chunks import TokenizerUnavailableError, aggregate_parent_embedding
+    from v3core.observation_chunks import (
+        plan_observation_chunks,
+        validate_observation_chunk_plan,
+    )
+    from v3core.pg_store import _resolve_embed_cfg
+
+    observation_id = row.get("id")
+    content = row.get("content") or ""
+    version = str(row.get("version") or "")
+    phase = "embedding"
+    pending_chunks = []
+    try:
+        plan = plan_observation_chunks(content, embed_cfg)
+        validate_observation_chunk_plan(content, plan, embed_cfg=embed_cfg)
+        if plan.is_long:
+            phase = "chunk_embedding"
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.observation_embedding_chunks')")
+                if cur.fetchone()[0] is None:
+                    raise RuntimeError(
+                        "observation_embedding_chunks schema is absent; refusing long parent-only repair"
+                    )
+            child_vecs = []
+            for child_index, chunk in enumerate(plan.chunks):
+                try:
+                    one = embed_batch(
+                        [chunk.embed_text],
+                        embed_cfg,
+                        collision_safe_key=True,
+                    )
+                    if len(one) != 1 or not one[0]:
+                        raise RuntimeError(
+                            f"observation child {child_index} returned no vector"
+                        )
+                    child_vecs.append(one[0])
+                except Exception as child_exc:
+                    raise RuntimeError(
+                        f"observation child {child_index} embedding failed: "
+                        f"{type(child_exc).__name__}: {str(child_exc)[:120]}"
+                    ) from child_exc
+            if len(child_vecs) != len(plan.chunks):
+                raise RuntimeError(
+                    f"observation child vector count mismatch: {len(child_vecs)}/{len(plan.chunks)}"
+                )
+            parent_vec = aggregate_parent_embedding(child_vecs)
+            pending_chunks = list(zip(plan.chunks, child_vecs))
+        else:
+            vecs = embed_batch([plan.embed_text], embed_cfg)
+            parent_vec = vecs[0] if vecs else None
+        if not parent_vec or not any(float(x) != 0.0 for x in parent_vec):
+            raise RuntimeError("embedding API returned an empty observation vector")
+    except TokenizerUnavailableError as exc:
+        st.failed_retryable += 1
+        st.errors.append(f"observation_notes:{observation_id} tokenizer unavailable: {exc}")
+        _mark(conn, "observation_notes", marker_id, exc, phase="tokenizer")
+        return False
+    except Exception as exc:
+        st.failed_retryable += 1
+        st.errors.append(
+            f"observation_notes:{observation_id} {type(exc).__name__}: {str(exc)[:160]}"
+        )
+        _mark(conn, "observation_notes", marker_id, exc, phase=phase)
+        return False
+
+    try:
+        fingerprint, _ = _resolve_embed_cfg(embed_cfg)
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.observation_embedding_chunks')")
+            sidecar_present = cur.fetchone()[0] is not None
+            if pending_chunks and not sidecar_present:
+                raise RuntimeError("observation_embedding_chunks schema disappeared before persist")
+            if sidecar_present:
+                # Scoped replacement is what removes stale index 3 when a planner
+                # changes a parent from four children to three.
+                cur.execute(
+                    "DELETE FROM public.observation_embedding_chunks "
+                    "WHERE observation_id=%s AND observation_version=%s",
+                    (observation_id, version),
+                )
+            cur.execute(
+                "UPDATE public.observation_notes SET embedding=%s::vector, embed_model=%s WHERE id=%s",
+                (_vec_literal(parent_vec), fingerprint, observation_id),
+            )
+            for chunk, child_vec in pending_chunks:
+                cur.execute(
+                    """
+                    INSERT INTO public.observation_embedding_chunks
+                        (observation_id, observation_version, chunk_index,
+                         source_start, source_end, source_sha256, chunk_sha256,
+                         token_count, representation_version, embedding,
+                         embed_model, content, created_at, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector,%s,%s,NOW(),NOW())
+                    ON CONFLICT (observation_id, observation_version, chunk_index) DO UPDATE SET
+                        source_start=EXCLUDED.source_start,
+                        source_end=EXCLUDED.source_end,
+                        source_sha256=EXCLUDED.source_sha256,
+                        chunk_sha256=EXCLUDED.chunk_sha256,
+                        token_count=EXCLUDED.token_count,
+                        representation_version=EXCLUDED.representation_version,
+                        embedding=EXCLUDED.embedding,
+                        embed_model=EXCLUDED.embed_model,
+                        content=EXCLUDED.content,
+                        updated_at=NOW()
+                    """,
+                    (
+                        observation_id,
+                        version,
+                        chunk.chunk_index,
+                        chunk.source_start,
+                        chunk.source_end,
+                        plan.source_sha256,
+                        chunk.source_sha256,
+                        chunk.token_count,
+                        chunk.representation_version,
+                        _vec_literal(child_vec),
+                        fingerprint,
+                        chunk.text,
+                    ),
+                )
+                st.sidecar_written += 1
+        st.repaired += 1
+        return True
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        st.failed_retryable += 1
+        st.errors.append(
+            f"observation_notes:{observation_id} sidecar {type(exc).__name__}: {str(exc)[:160]}"
+        )
+        _mark(conn, "observation_notes", marker_id, exc, phase="sidecar")
+        return False
 
 
 def _mark(conn, table, entity_id, exc, phase) -> None:
