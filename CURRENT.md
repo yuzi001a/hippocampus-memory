@@ -1,40 +1,49 @@
-# Embedding Reliability Hotfix — CURRENT
+# P0 + Embedding Reliability Integration — CURRENT
 
-**Status:** `PRODUCTION_INTEGRATION_VALIDATION`
+**Status:** `DECISION_REQUIRED`
 **Branch:** `integration/p0-embedding-reliability`
-**Validation base:** P0 HEAD `7808b89239787ba09eee7915c69392981a8ca911`
-**P0 source parent:** `7808b89239787ba09eee7915c69392981a8ca911` (retained as integration parent)
+**Validated source HEAD:** `4a7f496170c23fc0ee57be8286e65c31ade51546`
+**Code cherry-pick HEAD:** `5c4fba03cddbbfda8b8dcd8c80821d665d29e3a4`
+**P0 source parent:** `7808b89239787ba09eee7915c69392981a8ca911`
 **Embedding source commit:** `b344b801bac06e3dad0f68f47d243930d57ab07f`
-**Cherry-pick integration HEAD:** `5c4fba03cddbbfda8b8dcd8c80821d665d29e3a4` (cherry-pick of embedding source onto P0 parent)
 **Merge base / common baseline:** `0bd9e1ee7f42f0184f83aff367000a6656a06dcd` (`v0.2.1`)
-**P0 isolation:** P0 branch `hotfix/e1-generated-context-boundary` (HEAD `7808b892...`) is retained as the integration parent; P0 generated-context boundary logic is preserved in this tree.
+**Common modified file:** `src/v3-core/src/v3core/__init__.py` — semantically reviewed, not resolved by ours/theirs.
 
-## Verified in this round
+## Integration validation
 
-- Dedicated y400 targeted suite: `46 passed, 2 skipped`.
-- Dedicated y400 baseline: `585 passed, 4 failed, 4 skipped`.
-- Dedicated y400 corrected candidate: `640 passed, 4 failed, 4 skipped`.
-- Differential: 55 new candidate tests passed; 4 failures are exact inherited baseline failures; `NEW_REGRESSION=0`.
-- Critical-path harness: `16/16 passed` with UTF-8 console encoding; caller path remains off-thread.
-- Outage simulation: 12/12 cells passed isolation/ledger invariants; evidence-selected stream primary is 5s/0.
-- Disposable E2E: `38/38` passed; backfill E2E: `32/32` passed.
-- Disposable read-only vector check: repaired long-QA parent and all 3 sidecar chunks are in the top-100 vector candidate set.
-- Production read-only census completed; production migration/deploy/restart/backfill remain `0`.
+- P0 protected Git-blob drift relative to the P0 parent: `0`.
+- Embedding-related product/eval/schema/test paths compared: `20`; drift excluding common `__init__.py`: `0`.
+- y400 integration full suite: `763 passed / 4 failed / 5 skipped`.
+- `INTEGRATION_NEW_REGRESSION = 0`; the four failures are the inherited baseline set.
+- P0 targeted integration-source scope: `123 passed / 1 skipped`.
+- Wheel-level P0 targeted scope: `123 passed / 1 skipped`.
+- Embedding exact policy/reliability two-file scope: `33 passed / 0 skipped` from source and wheel.
+- Extended embedding policy/reliability/ledger/yin/backfill scope: `58 passed / 0 skipped`.
+- Critical path: source `16/16`, wheel `16/16`.
+- Disposable integration wheel smoke: P0 reader/boundary `PASS`; embedding failure-ledger forward E2E `38/38`; backfill safety E2E `32/32`.
 
-> Note: the verification numbers above were recorded against the pre-integration
-> embedding branch state. Integration HEAD `5c4fba0...` has NOT yet completed
-> its own validation round; no wheel/tests claim is made for it here.
+The previously reported embedding-branch `46 passed / 2 skipped` line is not used as the integration result because its exact command artifact was not preserved. The exact current scopes and logs are recorded above and under `evidence/`.
 
-## Current policies
+## Artifact
 
-- `conversation_stream`: `STREAM_PRIMARY_EMBED_POLICY = 5s / 0 retries`.
-- Deferred/batch repair: `10s / 2 retries` remains separate from the stream primary path.
-- Realtime recall remains on its own `3s / 0` policy.
+The old embedding-only wheel is `SUPERSEDED_FOR_PRODUCTION_INTEGRATION` and must not be installed in production.
+
+The new integration wheel is the only candidate artifact:
+
+- filename: `v3_core-4.0.0-py3-none-any.whl`
+- SHA256: `c6687ab3690206686ae704ed10d89b649fbddd020c8c68aeefe04e55a6ea87da`
+- artifact record: `evidence/integration-wheel-build.final.json`
+- production file comparison: `evidence/production-current-vs-integration-artifact.final.json`
 
 ## Production boundary
 
-`embedding_failures` is absent in production, so the tool-level backfill selector cannot yet run its ledger-aware dry-run. A ledger-independent, read-only upper-bound census is recorded in `evidence/production-backfill-dry-run-20260921.json`. No migration, deploy, restart, or DB backfill has occurred.
+Production remains P0-only. No embedding migration, wheel install, restart, or database backfill has occurred:
 
-## Release gate
+```text
+migration = 0
+deploy    = 0
+restart   = 0
+db_backfill = 0
+```
 
-Integration validation on HEAD `5c4fba0...` is still pending. No production migration/deploy/backfill is authorized by this file.
+The deployment/rollback plan remains plan-only. Any production action requires a separate decision; this branch is now stopped at `DECISION_REQUIRED`.

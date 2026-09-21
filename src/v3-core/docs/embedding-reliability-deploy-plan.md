@@ -1,12 +1,12 @@
 # Embedding Reliability — Migration / Deploy / Rollback Plan
 
-**Status: PLAN ONLY — NOT EXECUTED.**
+**Status: VALIDATED CANDIDATE — DECISION_REQUIRED; PLAN ONLY — NOT EXECUTED.**
 Nothing in this document has been applied to production. Production is read-only
 pending explicit approval.
 
 Production baseline: P0 HEAD `7808b89239787ba09eee7915c69392981a8ca911`
 Embedding source: `b344b801bac06e3dad0f68f47d243930d57ab07f`
-Integration branch: `integration/p0-embedding-reliability` (current HEAD `5c4fba03cddbbfda8b8dcd8c80821d665d29e3a4`)
+Integration branch: `integration/p0-embedding-reliability` (validated source HEAD `4a7f496170c23fc0ee57be8286e65c31ade51546`)
 Common baseline (merge base): tag `v0.2.1` = `0bd9e1ee7f42f0184f83aff367000a6656a06dcd`
 
 Historical note: this plan was first written against tag `v0.2.1` on branch
@@ -322,10 +322,9 @@ during the original dry-run, the backfill tool's `_row_text` returned bare
 the `"{section}. "` prefix. Repairing with the tool as-it-was would have written
 embeddings with different semantics than the live path. That defect was fixed by
 embedding source commit `b344b801...` (yin dual-writer canonical repair) and is
-retained in integration HEAD `5c4fba0...`; it is covered by
-`tests/test_backfill_canonical_input.py` and existing evidence. Production still
-runs the old code, so no production repair may run until the fixed code is
-deployed.
+retained in validated integration source HEAD `4a7f496...`; it is covered by
+`tests/test_backfill_canonical_input.py` and the integration evidence. Production still
+runs the old code, so no production repair may run until the fixed code is deployed.
 (The `observation_notes` and `conversation_stream` entries were correct as written.)
 
 ---

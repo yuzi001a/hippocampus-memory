@@ -1,0 +1,90 @@
+{
+  "production_current_head": "7808b89239787ba09eee7915c69392981a8ca911",
+  "production_runtime_package": "C:/Users/servi/AppData/Local/hermes/hermes-agent/venv/Lib/site-packages/v3core",
+  "integration_branch": "integration/p0-embedding-reliability",
+  "integration_validated_source_head": "4a7f496170c23fc0ee57be8286e65c31ade51546",
+  "integration_wheel_filename": "v3_core-4.0.0-py3-none-any.whl",
+  "integration_wheel_sha256": "c6687ab3690206686ae704ed10d89b649fbddd020c8c68aeefe04e55a6ea87da",
+  "files": [
+    {
+      "file": "e1.py",
+      "current_production_exists": true,
+      "current_production_sha256": "0c47b943fdf60200dbd5f1131586bb71e8067dc32b06c81f3dcc89b219e4bab5",
+      "integration_wheel_sha256": "0c47b943fdf60200dbd5f1131586bb71e8067dc32b06c81f3dcc89b219e4bab5",
+      "expected_change_reason": "P0 generated-context file; must remain unchanged byte-for-byte",
+      "p0_preservation_verdict": "PASS"
+    },
+    {
+      "file": "llm.py",
+      "current_production_exists": true,
+      "current_production_sha256": "1365376950fc1c64bd1d5855ad845a39d1369b06590f9cbcf579e24bcd9b4e4c",
+      "integration_wheel_sha256": "1365376950fc1c64bd1d5855ad845a39d1369b06590f9cbcf579e24bcd9b4e4c",
+      "expected_change_reason": "P0 generated-context file; must remain unchanged byte-for-byte",
+      "p0_preservation_verdict": "PASS"
+    },
+    {
+      "file": "__init__.py",
+      "current_production_exists": true,
+      "current_production_sha256": "6065d7c50900e1c74feef6ba1c82218782dac27010909fdbdf9735f03fd83afb",
+      "integration_wheel_sha256": "4e1d4a845a38db973740d8c16ee80715aab8fca6061aab515dec362121cefe7b",
+      "expected_change_reason": "Common-file semantic overlay: retain P0 readers/validators and add embedding wiring",
+      "p0_preservation_verdict": "FAIL"
+    },
+    {
+      "file": "generated_context_contract.py",
+      "current_production_exists": true,
+      "current_production_sha256": "21f4e55b5e78d9b0ab896c0bd44135a19134cf43b3cc882bc95d330b2ae3dfbb",
+      "integration_wheel_sha256": "21f4e55b5e78d9b0ab896c0bd44135a19134cf43b3cc882bc95d330b2ae3dfbb",
+      "expected_change_reason": "P0 generated-context file; must remain unchanged byte-for-byte",
+      "p0_preservation_verdict": "PASS"
+    },
+    {
+      "file": "embedding.py",
+      "current_production_exists": true,
+      "current_production_sha256": "5e871aaf3ce603be8e12207c557f1c2abf19dbc2bb20b736f3fa680415f2ed79",
+      "integration_wheel_sha256": "78b97e55161a9d31eec38b4e2a93e59ebceaed988e36064e1d41fb7b3678b81f",
+      "expected_change_reason": "Embedding reliability product addition/update; production currently has old or missing implementation",
+      "p0_preservation_verdict": "PASS"
+    },
+    {
+      "file": "ingest.py",
+      "current_production_exists": true,
+      "current_production_sha256": "c388251adee8957f7c6aad600b583a1890625a82c26567d106fb25e29343132d",
+      "integration_wheel_sha256": "beee6ea303a8bbd8ca8086f6ae7fcf4bf9c22e92c380a1949f68d0520dedc5b7",
+      "expected_change_reason": "Embedding reliability product addition/update; production currently has old or missing implementation",
+      "p0_preservation_verdict": "PASS"
+    },
+    {
+      "file": "embed_failures.py",
+      "current_production_exists": false,
+      "current_production_sha256": null,
+      "integration_wheel_sha256": "5090c5bc7dc1ee0080a575ce24761f2259f7b74d1e0c467af2b916d14a783bef",
+      "expected_change_reason": "Embedding reliability product addition/update; production currently has old or missing implementation",
+      "p0_preservation_verdict": "PASS"
+    },
+    {
+      "file": "tools/embedding_backfill.py",
+      "current_production_exists": false,
+      "current_production_sha256": null,
+      "integration_wheel_sha256": "cea59a2eaeaf7ba3c0028be8530bfb11239aabe03c153b478702b10c81b78592",
+      "expected_change_reason": "Embedding reliability product addition/update; production currently has old or missing implementation",
+      "p0_preservation_verdict": "PASS"
+    },
+    {
+      "file": "embed_chunks.py",
+      "current_production_exists": true,
+      "current_production_sha256": "dc2e2c7c6ded3bce9d68208ba17f38eb4b2b7dd57e0ba75dc910b3fe0dc34fb3",
+      "integration_wheel_sha256": "dc2e2c7c6ded3bce9d68208ba17f38eb4b2b7dd57e0ba75dc910b3fe0dc34fb3",
+      "expected_change_reason": "Embedding reliability product addition/update; production currently has old or missing implementation",
+      "p0_preservation_verdict": "PASS"
+    }
+  ],
+  "overall_p0_preservation": "FAIL",
+  "production_actions_performed": {
+    "migration": 0,
+    "deploy": 0,
+    "restart": 0,
+    "db_backfill": 0
+  },
+  "note": "Current production remains P0-only. The wheel comparison is read-only; no package patch or install was performed."
+}

@@ -1,0 +1,230 @@
+{
+  "date": "2026-09-21 Asia/Shanghai",
+  "artifact_status": "PRODUCTION_DEPLOYMENT_ARTIFACT",
+  "production_deployment_executed": false,
+  "integration": {
+    "branch": "integration/p0-embedding-reliability",
+    "validated_source_head": "4a7f496170c23fc0ee57be8286e65c31ade51546",
+    "code_cherry_pick_head": "5c4fba03cddbbfda8b8dcd8c80821d665d29e3a4",
+    "p0_parent": "7808b89239787ba09eee7915c69392981a8ca911",
+    "embedding_source_commit": "b344b801bac06e3dad0f68f47d243930d57ab07f",
+    "merge_base": "0bd9e1ee7f42f0184f83aff367000a6656a06dcd",
+    "common_modified_files": [
+      "src/v3-core/src/v3core/__init__.py"
+    ]
+  },
+  "source_overlap_gate": {
+    "p0_protected_git_blob_drift": [],
+    "embedding_related_paths_compared": 33,
+    "embedding_related_git_blob_drift_excluding_common_init": [],
+    "verdict": "PASS"
+  },
+  "y400": {
+    "machine": "y400 / DESKTOP-EQP3OBU (dedicated Win10)",
+    "python": "C:/hp-testbed/hippocampus-memory/.venv/Scripts/python.exe (Python 3.13.15)",
+    "full_suite_command": "python -m pytest tests -q -p no:cacheprovider -p no:randomly",
+    "integration_source_archive_sha256": "1048ce8a4d05c79bd517f0eb20cf691f0454ae9582d01f11aa82bb58102f4404",
+    "integration_full_suite": {
+      "passed": 763,
+      "failed": 4,
+      "skipped": 5,
+      "failed_tests": [
+        "tests/test_first_run_install_contract.py::test_reused_container_password_is_adopted",
+        "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+        "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+        "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+      ],
+      "log_sha256": "1f1a6538cd5c22a2aaae909621736653de10abf61276031cc9715bd3a2431d0d"
+    },
+    "baseline_v0_2_1": {
+      "identity": "v0.2.1 / 0bd9e1ee7f42f0184f83aff367000a6656a06dcd",
+      "passed": 585,
+      "failed": 4,
+      "skipped": 4,
+      "failed_tests": [
+        "tests/test_first_run_install_contract.py::test_reused_container_password_is_adopted",
+        "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+        "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+        "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+      ]
+    },
+    "p0_candidate": {
+      "identity": "P0 candidate 7808b89239787ba09eee7915c69392981a8ca911",
+      "passed": 708,
+      "failed": 4,
+      "skipped": 5,
+      "failed_tests": [
+        "tests/test_first_run_install_contract.py::test_reused_container_password_is_adopted",
+        "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+        "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+        "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+      ]
+    },
+    "embedding_candidate": {
+      "identity": "Embedding candidate b344b801bac06e3dad0f68f47d243930d57ab07f",
+      "passed": 640,
+      "failed": 4,
+      "skipped": 4,
+      "failed_tests": [
+        "tests/test_first_run_install_contract.py::test_reused_container_password_is_adopted",
+        "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+        "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+        "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+      ],
+      "source_archive_sha256": "907ff9e311d2215266127173d6d35bb4ee24a332cd07f84cf806d746b3ee4805"
+    },
+    "differential": {
+      "integration_failure_set_minus_baseline": [],
+      "integration_new_regression_count": 0,
+      "p0_new_regression_count": 0,
+      "embedding_new_regression_count": 0,
+      "inherited_failure_count": 4,
+      "skip_delta_vs_baseline": 1,
+      "verdict": "INTEGRATION_NEW_REGRESSION_0"
+    },
+    "p0_targeted_from_integration_source": {
+      "files": [
+        "test_e1_generated_context_contract.py",
+        "test_e1_identity_block_boundary.py",
+        "test_e1_output_budget.py"
+      ],
+      "passed": 123,
+      "failed": 0,
+      "skipped": 1,
+      "log_sha256": "c9fbb4d0641e6f7800fb6787e5b413bdf89852850e1a44c8b3bd8167c2ef9b19",
+      "p0_new_regression": 0
+    },
+    "embedding_targeted_exact_two_file_scope_source": {
+      "files": [
+        "test_embedding_policy_guard.py",
+        "test_embedding_write_reliability.py"
+      ],
+      "passed": 33,
+      "failed": 0,
+      "skipped": 0,
+      "log_sha256": "a864b0d7e9195cdfec88a39c4dd8237ceaa818040ce23f8617e6e69ba72394c9"
+    },
+    "embedding_targeted_exact_two_file_scope_wheel": {
+      "files": [
+        "test_embedding_policy_guard.py",
+        "test_embedding_write_reliability.py"
+      ],
+      "passed": 33,
+      "failed": 0,
+      "skipped": 0,
+      "log_sha256": "4a87add5820484f51003ce6e771f2bfeb428a8ba5fc710d9dd55fcfc4227de7c"
+    },
+    "embedding_targeted_extended_source": {
+      "files": [
+        "test_embedding_policy_guard.py",
+        "test_embedding_write_reliability.py",
+        "test_qa_failure_accounting.py",
+        "test_backfill_canonical_input.py"
+      ],
+      "passed": 58,
+      "failed": 0,
+      "skipped": 0,
+      "log_sha256": "3ccb7e0df005e420b38604f0db3ef8f9fc104f2df2412bd4b2f05c63a07f02f0"
+    },
+    "critical_path_source": {
+      "passed": 16,
+      "total": 16,
+      "log_sha256": "8e5e4aaeb4946b0e0b85df3f69e9be7ca8164ee60b0144c9bb72c8750e8d6a08"
+    },
+    "critical_path_wheel": {
+      "passed": 16,
+      "total": 16,
+      "log_sha256": "1d0db827a9ea7fac9facb6962c30ac2f96ce539f37c4d25278a91057bd444d51"
+    },
+    "wheel_p0_targeted": {
+      "passed": 123,
+      "failed": 0,
+      "skipped": 1,
+      "log_sha256": "382aef2ebb90d6cf8bcf17d0ed0b1a870dd1490cd4547c34d7082da878f0a3df"
+    },
+    "wheel_embedding_extended_targeted": {
+      "passed": 58,
+      "failed": 0,
+      "skipped": 0,
+      "log_sha256": "416623b8aab00eefde58b79dbc33b95846de42e7b97519985b2cf6147c06b338"
+    }
+  },
+  "inherited_failures": [
+    {
+      "test": "tests/test_first_run_install_contract.py::test_reused_container_password_is_adopted",
+      "root_cause": "existing Docker/container-contract environment behavior; Docker unavailable to y400 test process"
+    },
+    {
+      "test": "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+      "root_cause": "empty synthetic state.db fixture has no messages-like table"
+    },
+    {
+      "test": "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+      "root_cause": "same empty synthetic state.db fixture"
+    },
+    {
+      "test": "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows",
+      "root_cause": "same fixture yields sessions=1 while contract expects >=2"
+    }
+  ],
+  "wheel_level": {
+    "filename": "v3_core-4.0.0-py3-none-any.whl",
+    "sha256": "c6687ab3690206686ae704ed10d89b649fbddd020c8c68aeefe04e55a6ea87da",
+    "bytes": 784503,
+    "member_count": 112,
+    "protected_member_hashes": {
+      "v3core/e1.py": {
+        "bytes": 78736,
+        "sha256": "0c47b943fdf60200dbd5f1131586bb71e8067dc32b06c81f3dcc89b219e4bab5"
+      },
+      "v3core/llm.py": {
+        "bytes": 21272,
+        "sha256": "1365376950fc1c64bd1d5855ad845a39d1369b06590f9cbcf579e24bcd9b4e4c"
+      },
+      "v3core/__init__.py": {
+        "bytes": 223207,
+        "sha256": "4e1d4a845a38db973740d8c16ee80715aab8fca6061aab515dec362121cefe7b"
+      },
+      "v3core/generated_context_contract.py": {
+        "bytes": 26641,
+        "sha256": "21f4e55b5e78d9b0ab896c0bd44135a19134cf43b3cc882bc95d330b2ae3dfbb"
+      }
+    },
+    "member_hash_manifest": "integration-wheel-build.final.json"
+  },
+  "disposable_wheel_smoke": {
+    "wheel_site": "C:/Users/servi/workspace/artifacts/p0-embedding-integration-wheel-site-4a7f496",
+    "p0_bad_candidate": "REJECT",
+    "p0_reader_fail_closed": "PASS",
+    "embedding_failure_ledger_forward_e2e": "38/38 PASS",
+    "long_qa_sidecar_repair": "PASS (3 sidecar chunks)",
+    "backfill_safety_e2e": "32/32 PASS",
+    "backfill_e2e_log": "C:/Users/servi/workspace/artifacts/integration-wheel-backfill-e2e-4a7f496.log",
+    "combined_smoke": "PASS"
+  },
+  "inherited_embedding_evidence": {
+    "outage_simulation": "12/12 inherited; all embedding/eval/schema/harness paths except common __init__.py Git-blob identical",
+    "recall_after_repair": "inherited from b344 validation; no core embedding product path drift detected"
+  },
+  "production_boundary": {
+    "current_production_product_head": "7808b89239787ba09eee7915c69392981a8ca911",
+    "migration": 0,
+    "deploy": 0,
+    "restart": 0,
+    "db_backfill": 0,
+    "read_only_transaction_check": "on (explicit BEGIN TRANSACTION READ ONLY)",
+    "current_counts": {
+      "conversation_stream": 12516,
+      "qa_pairs": 13952,
+      "topics": 345,
+      "yin_paragraphs": 1243
+    },
+    "embedding_failures_relation": "null (absent)"
+  },
+  "metadata_cleanup": {
+    "CURRENT_status": "DECISION_REQUIRED",
+    "yin_stale_finding": "rewritten as repaired by b344 and retained in integration; production unapplied",
+    "historical_dry_run_head_fields": "production_baseline_head / candidate_head / integration_candidate_head"
+  },
+  "remaining_risk": "No production migration, wheel install, restart, or backfill has been executed. Final operator decision is still required."
+}

@@ -39,5 +39,8 @@
     "verdict": "PASS_NEW_REGRESSION_0"
   },
   "baseline_failures_note": "All four are inherited: exact test identities match baseline and candidate. No failure was repaired or reclassified in this hotfix round.",
-  "invalid_prior_run": "The earlier 636 passed / 6 failed / 6 skipped candidate run is excluded because its archive omitted the sibling src/v3-hermes-plugin tree; corrected full-repository candidate archive was rerun and is the only candidate result above."
+  "invalid_prior_run": "The earlier 636 passed / 6 failed / 6 skipped candidate run is excluded because its archive omitted the sibling src/v3-hermes-plugin tree; corrected full-repository candidate archive was rerun and is the only candidate result above.",
+  "artifact_status": "VALID_EMBEDDING_BRANCH_EVIDENCE_SUPERSEDED_FOR_PRODUCTION_INTEGRATION",
+  "production_use": "not a production deployment candidate; retained as inherited embedding validation evidence",
+  "superseded_by": "evidence/integration-validation.final.json"
 }
