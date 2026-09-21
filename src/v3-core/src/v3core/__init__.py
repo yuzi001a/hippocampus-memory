@@ -33,6 +33,7 @@ from .types import CardResult
 from .llm import LLMClient
 from .generated_context_contract import (
     GeneratedContextError,
+    validate_identity_block,
     validate_situation_overview,
 )
 from .scheduler import E1Scheduler
@@ -1511,7 +1512,21 @@ class V3Core:
         保留作向后兼容，新代码请调用 build_memory_context('')。
 
         身份块由 E1 每天写时生成（identity_block.md），本方法纯读；
-        文件缺失时截断最新印兜底。
+        文件缺失时截断最新印兜底 —— 但**兜底也必须通过输出契约校验**。
+
+        P0 (2026-09-21): ``identity_block.md`` 与 ``situation_overview.md`` 是同一
+        缺陷类的两个注入面（同一写路径、同一 provider、同样被逐字注入每个新
+        session）。读侧与写侧共用
+        ``generated_context_contract.validate_identity_block`` 做**同一份**校验 ——
+        校验在内容被返回（即将注入）之前进行。
+
+        fail-closed 语义：
+          * 校验失败 → 返回 ""，绝不返回原文；
+          * mtime 缓存只可能持有**通过校验**的值；
+          * 磁盘上是"更新但非法"的文件 → 返回 ""，绝不回退到更旧的缓存块；
+          * 读异常不再无条件回退缓存 —— 缓存值必须在**本次调用**同样通过校验
+            才允许返回；
+          * 缺文件的 legacy 印截断兜底走同一个校验器：兜底不得绕过注入边界。
         """
         base_path = self._get_base_path()
         identity_path = base_path / "identity_block.md"
@@ -1524,21 +1539,39 @@ class V3Core:
                     self._identity_block is not None
                     and identity_mtime <= self._identity_block_mtime
                 ):
+                    # 缓存只可能持有通过校验的成品（见下方写入缓存的唯一位置）。
                     return self._identity_block
 
                 block = identity_path.read_text(
                     encoding="utf-8", errors="replace"
                 ).strip()
-                self._identity_block = block
+                if not block:
+                    return ""
+
+                # ── 输出契约闸门（读/注入侧，P0 2026-09-21）──
+                # 校验失败 → ""，绝不注入原文；也绝不回退到更旧的缓存块。
+                try:
+                    validated = validate_identity_block(block)
+                except GeneratedContextError as _contract_e:
+                    logger.warning(
+                        "身份核心未通过输出契约，已拒绝注入 (来源=%s, reason=%s, "
+                        "chars=%d, detail=%s)",
+                        identity_path.name, _contract_e.reason, len(block),
+                        _contract_e.detail,
+                    )
+                    return ""
+
+                self._identity_block = validated
                 self._identity_block_mtime = identity_mtime
                 logger.info("身份核心已读取 (来源=%s)", identity_path.name)
-                return block
+                return validated
             except Exception as e:
                 logger.warning("身份块读取失败: %s", _safe_err(e))
-                return self._identity_block or ""
+                return self._validated_identity_cache()
 
+        # 文件缺失：缓存若已存在，也必须在**本次调用**通过校验才允许返回。
         if self._identity_block is not None:
-            return self._identity_block
+            return self._validated_identity_cache()
 
         logger.warning("E1 未生成身份块，用截断兜底")
         y_dir = base_path / "y"
@@ -1566,13 +1599,42 @@ class V3Core:
                     cut = cut[:boundary + 1]
                 block = cut.rstrip() + "\n（截断自印原文，500 字以内）"
 
+            # ── 兜底也必须过同一道闸门（P0 2026-09-21）──
+            # 缺文件不等于可以绕过注入边界：截断自印原文同样是"将被逐字注入"
+            # 的内容，校验不通过就返回 ""（宁可不注入，也不注入未校验内容）。
+            try:
+                block = validate_identity_block(block)
+            except GeneratedContextError as _fallback_e:
+                logger.warning(
+                    "身份核心兜底（截断自印原文）未通过输出契约，拒绝注入 "
+                    "(来源=%s, reason=%s, chars=%d, detail=%s)",
+                    latest.name, _fallback_e.reason, len(block), _fallback_e.detail,
+                )
+                return ""
+
             self._identity_block = block
             self._identity_block_mtime = 0.0
             logger.info("身份核心使用截断兜底 (%d 字, 来源=%s)", len(block), latest.name)
             return block
         except Exception as e:
             logger.warning("身份核心截断兜底失败: %s", _safe_err(e))
-            return self._identity_block or ""
+            return self._validated_identity_cache()
+
+    def _validated_identity_cache(self) -> str:
+        """退化路径：缓存值必须在**本次调用**通过校验才允许返回。
+
+        不允许把"读到坏东西"降级成"继续用可能也是坏的东西" —— 缓存校验失败即
+        清空缓存并返回 ""（fail-closed）。
+        """
+        cached = self._identity_block
+        if cached:
+            try:
+                validate_identity_block(cached)
+                return cached
+            except Exception:
+                self._identity_block = None
+                self._identity_block_mtime = 0.0
+        return ""
 
     # ── 系统态势总览（手帐机制 C） ──
     # 态势总览由 E1 写印后顺带生成（situation_overview.md），本方法纯读。

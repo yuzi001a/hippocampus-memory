@@ -56,6 +56,20 @@ LLM generation overrun
 
 契约**一直写在 prompt 里**（三段固定顺序、300–500 字、第三人称）。它从未被执行。**契约在散文里，不在代码里。**
 
+### 同一缺陷链在 `identity_block.md` 上完整存在
+
+`identity_block.md` 与 `situation_overview.md` 是同一写路径（`e1.synthesize_yin`）、同一 provider、同一 chat 模板产出的两个注入面。事故当时它具备**每一步**相同的缺口：
+
+```
+identity call 无 per-call 预算（走 provider 默认 131072）
+→ 写入闸门同样只有 `if not identity_content: raise`
+→ os.replace 原子替换 —— 坏候选销毁上一份好身份块
+→ _compress_yin_to_identity() 读到什么返回什么（逐字注入）
+→ 文件缺失时的 legacy 印截断兜底同样零校验
+```
+
+它**没有**在本次事故里被触发（被污染的是态势总览），但形状相同 —— 所以按"同一缺陷类一并修"处理，不等它真被污染。
+
 ---
 
 ## 决定
@@ -111,6 +125,21 @@ LLM generation overrun
 | read/injection-side validation | `_read_situation_overview()` 注入前走**同一个**校验器；失败返回空串 |
 | 同一缺陷类一并修 | `identity_block.md` 同结构、同缺口，同批修复（不等它真被污染） |
 | 源不可变 | `y_*.md`、历史对话、PG 历史：本次 0 修改 |
+
+### `identity_block.md` 的落地（同批补齐）
+
+| 层 | 落地 |
+|---|---|
+| bounded generation | identity 调用带 `max_output_tokens=IDENTITY_BLOCK_MAX_OUTPUT_TOKENS`（1024：契约 500 字 ≈559 token 的 1.83 倍余量，生产实测合法 616 字 ≈700 token 的 1.46 倍余量；provider 默认 131072 不变） |
+| write-side validation | `validate_identity_block()`；失败整体拒绝、不写文件、上一份已验证文件逐字节保留 |
+| read/injection-side validation | `_compress_yin_to_identity()` 返回前校验；缓存只存通过校验的值；"更新但非法" → `""`，不回退旧缓存；读异常时缓存须在**本次调用**同样通过校验 |
+| 兜底不得绕过边界 | 文件缺失时的 legacy 印截断兜底**同样**过 `validate_identity_block()`，不过则返回 `""` |
+
+**契约差异（刻意的，不是漏做）**：身份块是**自由第一人称散文**，prompt 从未规定标题，生产实测合法产物是五段无标题中文（约 616 字 / 1695 B）。因此：
+
+- **不套用三段标题契约** —— 拿态势总览的标题要求去卡身份块会把合法产物全部拒掉；
+- **不设 300–500 字下限** —— 合法产物本身已超出该窗口（616 字），任何按窗口卡的下限都会把**当前生产文件**判为非法，读侧会把合法身份块从注入里摘掉；
+- **裸"我是 <拉丁名>"不算越界** —— 身份块的主题就是"我是谁"，裸自述是合法语义；只拦**模型身份声明**（问候 + 自报，或自报 + 模型类别词）。
 
 ---
 
