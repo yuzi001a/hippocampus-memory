@@ -1,0 +1,101 @@
+{
+  "historical_long_null_parents": 0,
+  "null_ids": [],
+  "all_six_have_vectors": true,
+  "per_id": {
+    "634": {
+      "source_sha_unchanged": true,
+      "has_vector": true,
+      "dim": 1024,
+      "model": "bf32771ecbd1"
+    },
+    "726": {
+      "source_sha_unchanged": true,
+      "has_vector": true,
+      "dim": 1024,
+      "model": "bf32771ecbd1"
+    },
+    "732": {
+      "source_sha_unchanged": true,
+      "has_vector": true,
+      "dim": 1024,
+      "model": "bf32771ecbd1"
+    },
+    "743": {
+      "source_sha_unchanged": true,
+      "has_vector": true,
+      "dim": 1024,
+      "model": "bf32771ecbd1"
+    },
+    "746": {
+      "source_sha_unchanged": true,
+      "has_vector": true,
+      "dim": 1024,
+      "model": "bf32771ecbd1"
+    },
+    "759": {
+      "source_sha_unchanged": true,
+      "has_vector": true,
+      "dim": 1024,
+      "model": "bf32771ecbd1"
+    }
+  },
+  "sidecar_total": 12,
+  "sidecar_by_parent": [
+    [
+      "634",
+      "v634",
+      "2",
+      "0",
+      "1"
+    ],
+    [
+      "726",
+      "v726",
+      "2",
+      "0",
+      "1"
+    ],
+    [
+      "732",
+      "v732",
+      "2",
+      "0",
+      "1"
+    ],
+    [
+      "743",
+      "v743",
+      "2",
+      "0",
+      "1"
+    ],
+    [
+      "746",
+      "v745",
+      "2",
+      "0",
+      "1"
+    ],
+    [
+      "759",
+      "v759",
+      "2",
+      "0",
+      "1"
+    ]
+  ],
+  "every_parent_two_children": true,
+  "all_source_hashes_unchanged": true,
+  "unresolved_failures": 0,
+  "failures_total": 0,
+  "observation_total": 779,
+  "observation_null": 0,
+  "parents_with_wrong_model": 0,
+  "children_with_wrong_model_or_version": 0,
+  "new_unexplained_null_12h": 0,
+  "latest_observation": [
+    "779",
+    "2026-09-22 17:38:12.552406+00:00"
+  ]
+}

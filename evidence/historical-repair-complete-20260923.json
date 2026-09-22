@@ -1,0 +1,117 @@
+{
+  "artifact": "LONG_OBSERVATION_PRODUCTION_CANDIDATE",
+  "round": "final 5-row historical long-observation repair (746 last)",
+  "state": "DECISION_REQUIRED",
+  "verdicts": {
+    "LONG_OBSERVATION_PRODUCTION_CANARY": "PASS",
+    "LONG_OBSERVATION_HISTORICAL_REPAIR": "COMPLETE",
+    "743": "LONG_OBSERVATION_INDEX_PASS / FINAL_RECALL_POLICY_SUPPRESSED",
+    "746": "LONG_OBSERVATION_INDEX_PASS / FINAL_RECALL_PASS"
+  },
+  "no_code_change": {
+    "code_changed_this_round": false,
+    "wheel_rebuilt": false,
+    "runtime_restarted": false,
+    "recall_policy_touched": false,
+    "other_tables_backfilled": false
+  },
+  "precheck_746": {
+    "source_sha256": "7693c7787800cf8af72a43ed8f680b2009a9ce0117adae6749f1635c22516c97",
+    "source_sha_matches_freeze": true,
+    "parent_embedding_null": true,
+    "sidecar_rows": 0,
+    "ledger_unresolved": 0,
+    "plan_is_long": true,
+    "plan_chunk_count": 2,
+    "child_tokens": [7680, 3393],
+    "source_offsets": [[0, 14848], [14848, 21699]],
+    "representation_version": "v1-long-observation",
+    "status": "PASS"
+  },
+  "repair_746": {
+    "selector": "shipped CLI --apply --limit 1 (only 746 was NULL; DB delta confirms 746)",
+    "null_before": [746],
+    "null_after": [],
+    "cli_verdict": "BACKFILL_OK",
+    "sidecar_written": 2,
+    "elapsed_s": 6.2
+  },
+  "structural_746": {
+    "source_sha_before_equals_after": true,
+    "parent_has_vector": true,
+    "parent_dim": 1024,
+    "parent_fingerprint": "bf32771ecbd1",
+    "child_count": 2,
+    "indexes_dense": true,
+    "offsets_contiguous": true,
+    "coverage_complete": true,
+    "children_source_sha_ok": true,
+    "children_chunk_sha_ok": true,
+    "representation_version_ok": true,
+    "ledger_unresolved": 0,
+    "status": "PASS"
+  },
+  "recall_746": {
+    "layer_a_indexing_retrieval": {
+      "tail_query_unique": true,
+      "child_candidate_present": true,
+      "best_child_cosine": 0.613344669342041,
+      "parent_cosine_in_parent_lane": 0.601540768054679,
+      "child_lifts_over_parent": true,
+      "child_candidate_maps_to_full_parent": true,
+      "child_candidate_content_chars": 21699,
+      "child_candidate_content_sha256": "7693c7787800cf8af72a43ed8f680b2009a9ce0117adae6749f1635c22516c97",
+      "status": "PASS"
+    },
+    "layer_b_final_recall_policy": {
+      "merged_hit_found": true,
+      "merged_rank": 1,
+      "merged_cosine": 0.613344669342041,
+      "merged_content_is_full_parent": true,
+      "merged_content_chars": 21699,
+      "verdict": "FINAL_RECALL_PASS"
+    }
+  },
+  "final_census": {
+    "historical_long_null_parents": 0,
+    "all_six_have_vectors": true,
+    "sidecar_rows": 12,
+    "sidecar_parents": [634, 726, 732, 743, 746, 759],
+    "every_parent_two_children": true,
+    "all_source_hashes_unchanged": true,
+    "all_fingerprints": "bf32771ecbd1",
+    "parents_with_wrong_model": 0,
+    "children_with_wrong_model_or_version": 0,
+    "unresolved_failures": 0,
+    "failures_total": 0,
+    "observation_total": 779,
+    "observation_null": 0,
+    "new_unexplained_null_12h": 0,
+    "forward_writer": "healthy (LiveBuffer flush + observer running, latest observation id 779)",
+    "live_runtime": {
+      "gateway": [3772, 5252],
+      "serve": [2864, 19988],
+      "unchanged_since_rollout": true,
+      "heartbeat_fresh": true
+    }
+  },
+  "design_debt_unchanged": {
+    "id": "OBSERVATION_SAME_DAY_DEDUPE_CAN_SUPPRESS_RELEVANT_PARENT_HIT",
+    "classification": "P2 / RECALL_POLICY_DESIGN",
+    "status": "RECORDED_ONLY",
+    "daily_dedupe_suppression_is_not_a_repair_stop_condition": true
+  },
+  "untouched_other_tables": {
+    "conversation_stream_null": 1072,
+    "qa_pairs_null": 11,
+    "yin_paragraphs_null": 7,
+    "topics_null": 0
+  },
+  "branch_head": "7c396d3",
+  "evidence_paths": [
+    "C:/hp-testbed/evidence/production-canary-20260922.json",
+    "C:/hp-testbed/evidence/historical-repair-partial-20260923.json",
+    "C:/hp-testbed/evidence/design-debt/OBSERVATION_SAME_DAY_DEDUPE_CAN_SUPPRESS_RELEVANT_PARENT_HIT.md",
+    "C:/Users/servi/workspace/backups/long-observation-canary-20260922/"
+  ]
+}

@@ -22,12 +22,10 @@ Status: `DECISION_REQUIRED`
 
 ```text
 LONG_OBSERVATION_PRODUCTION_CANARY     = PASS          (id 759)
-LONG_OBSERVATION_HISTORICAL_REPAIR     = PARTIAL
-completed_ids                          = 634, 726, 732, 743
-blocked_at_id                          = 743 (tail recall only)
-not_attempted_ids                      = 746
-observation_notes NULL parents         = 5 -> 1
-sidecar rows                           = 10 (5 parents x 2 children, indexes 0..1)
+LONG_OBSERVATION_HISTORICAL_REPAIR     = COMPLETE
+repaired_ids                           = 759 (canary), 634, 726, 732, 743, 746
+observation_notes NULL parents         = 6 -> 0
+sidecar rows                           = 12 (6 parents x 2 children, indexes 0..1)
 source hashes                          = unchanged for all 6 historical long rows
 embed model fingerprint                = bf32771ecbd1 uniform; 0 wrong-model parents
 embedding_failures                     = 0 / 0 unresolved
@@ -36,20 +34,28 @@ new unexplained NULL (12h)             = 0
 
 Structural acceptance (children count/dense indexes/contiguous offsets/100% coverage/
 per-child token window/source+chunk sha/representation version/parent vector/ledger)
-passed for all four completed rows. The single blocker is the read-path gate:
+passed for all six rows.
 
-- 743 tail-only query: its tail child candidate was present and highest on its day
-  (0.6776 > 743's own parent 0.6753), but same-day observation 754 (`v752-compressed`)
-  scored 0.6805 and won the pre-existing one-note-per-day cap.
+Recall acceptance was split into two layers:
+
+- Layer A (indexing retrieval, must pass): passed for every row — the tail-only query
+  surfaced the row's child candidate and the candidate mapped back to the full parent
+  observation.
+- Layer B (final recall policy): `746` returned the full 21699-char parent at rank 1
+  (`FINAL_RECALL_PASS`). `743` was suppressed by the pre-existing one-note-per-day cap:
+  its tail child scored 0.6776 (above 743's own parent 0.6753) but same-day observation
+  754 (`v752-compressed`) scored 0.6805 and won the day
+  (`FINAL_RECALL_POLICY_SUPPRESSED`, not a repair failure).
 - Registered as design debt `OBSERVATION_SAME_DAY_DEDUPE_CAN_SUPPRESS_RELEVANT_PARENT_HIT`
   (`P2 / RECALL_POLICY_DESIGN`) — `evidence/design-debt/`. No ranking/dedupe code changed.
 
 ## Remaining production actions
 
-1. Decide on `746` (the last historical long row; still NULL, not attempted).
-2. Decide whether the same-day dedupe design debt gets a follow-up comparison.
-3. Decide whether the static audit's 18 potentially-unbounded non-observation call sites need follow-up.
-4. Other NULL backfills (`conversation_stream` 1072, `qa_pairs` 11, `yin_paragraphs` 7) remain untouched and unauthorized.
+1. Decide whether the same-day dedupe design debt gets a follow-up comparison
+   (one-per-day / top-N-per-day / strong-relevance exemption / relevance-first then diversity).
+2. Decide whether the static audit's 18 potentially-unbounded non-observation call sites need follow-up.
+3. Other NULL backfills (`conversation_stream` 1072, `qa_pairs` 11, `yin_paragraphs` 7) remain untouched and unauthorized.
+
 
 Evidence root: `C:\hp-testbed\evidence\`
 Production canary + repair evidence: `C:\Users\servi\workspace\backups\long-observation-canary-20260922\`
