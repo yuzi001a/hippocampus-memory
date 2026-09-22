@@ -1,39 +1,35 @@
 {
-  "artifact": "LONG_OBSERVATION_CANDIDATE",
-  "wheel": "C:\\hp-testbed\\artifacts\\long-observation-candidate\\v3_core-4.0.0-py3-none-any.whl",
-  "sha256": "9bb82c792a0d1ccbd62ed1511b3b5502afc8f751a8273397c7beb60629544d4a",
-  "source_head": "9c4d191017620e9edbd81ca8fd85d232f4faf23c",
-  "member_count": 114,
-  "members": [
-    {
-      "name": "v3_core-4.0.0.dist-info/METADATA",
-      "size": 10667,
-      "sha256": "e882a0de29a2e599740e0d1f522d11e8dc59fba97c267539d6dc636025dd112e"
-    },
-    {
-      "name": "v3_core-4.0.0.dist-info/RECORD",
-      "size": 9224,
-      "sha256": "27a6fddf8897ade4a45f1af535dbf9d7f2d17845130e64299b2e3c5535e3a65d"
-    },
-    {
-      "name": "v3_core-4.0.0.dist-info/WHEEL",
-      "size": 91,
-      "sha256": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1"
-    },
-    {
-      "name": "v3_core-4.0.0.dist-info/entry_points.txt",
-      "size": 92,
-      "sha256": "6d5e85d5f8880d7fd87f0ae28d95d6c1c00f2dfd6a25746bc99dd9b78cc673d2"
-    },
+  "artifact": "LONG_OBSERVATION_PRODUCTION_CANDIDATE",
+  "branch": "feature/long-observation-index-v1",
+  "product_code_head": "2f23e34574880e3c61ed0e9a2d73ded4e685edac",
+  "artifact_build_head": "75e7d1297927fa932bf766fddbf06407660f23d2",
+  "final_documentation_head_at_build": "75e7d1297927fa932bf766fddbf06407660f23d2",
+  "product_code_commits": [
+    "12a2bce0f499a86f8ee55c8d9ef5e859ef9bfaf2",
+    "f20c668bac91bee457e7ffd7191b2d0702e26999",
+    "2f23e34574880e3c61ed0e9a2d73ded4e685edac"
+  ],
+  "product_code_diff_to_artifact_build_head": {
+    "status": "DOCS_EVIDENCE_ONLY",
+    "code_path_count": 0,
+    "paths": []
+  },
+  "worktree_clean_at_build": true,
+  "provenance_root_cause": {
+    "previous_manifest": "evidence/wheel-manifest.json",
+    "previous_source_head": "9c4d191017620e9edbd81ca8fd85d232f4faf23c",
+    "classification": "ARTIFACT_BLOBS_CORRECT_PROVENANCE_METADATA_STALE",
+    "resolution": "REBUILT_FROM_CLEAN_FINAL_BRANCH_HEAD"
+  },
+  "wheel_filename": "v3_core-4.0.0-py3-none-any.whl",
+  "wheel_sha256": "25a3bb46296b4aae261e8eed686b9d0fcd96e6bda1761343af75979d4d67fc5c",
+  "wheel_bytes": 801993,
+  "wheel_member_count": 114,
+  "wheel_member_hashes": [
     {
       "name": "v3_core-4.0.0.dist-info/licenses/LICENSE",
       "size": 35184,
       "sha256": "e0eedba615d5cd1b986afb6c5b3a4b1ae33713e7e9dc74d19daec5e3221f9d2e"
-    },
-    {
-      "name": "v3_core-4.0.0.dist-info/top_level.txt",
-      "size": 7,
-      "sha256": "0525152d14095360b40411c8f85a3137627c1dcccb838be410b39e4653774974"
     },
     {
       "name": "v3core/__init__.py",
@@ -191,31 +187,6 @@
       "sha256": "e439437b55671032fffc96fe5087a4d588a8812858456c87209742da25ecc3a9"
     },
     {
-      "name": "v3core/importers/__init__.py",
-      "size": 30570,
-      "sha256": "e1b56565eeaa5f3123d450cf1faa18b9dbe27423b8b411fc2e920db98912d6b4"
-    },
-    {
-      "name": "v3core/importers/hermes_sessions.py",
-      "size": 17610,
-      "sha256": "ef9b20797fc79f342ca5e212122ee4fab5a4354b1069ad2d1011ad6c33644fa8"
-    },
-    {
-      "name": "v3core/importers/hindsight.py",
-      "size": 2540,
-      "sha256": "7b6dfad6c2fade66b0464299cfff5f1a46729548fb0695bd4133d413a83ff576"
-    },
-    {
-      "name": "v3core/importers/memory_md.py",
-      "size": 7467,
-      "sha256": "24bfe4c6d270b782ebbbea9c185b9a692f3c7bd2513c2b5915ad38fcdabc4cb6"
-    },
-    {
-      "name": "v3core/importers/openclaw.py",
-      "size": 3226,
-      "sha256": "4817f5d14285be67cf9877457138ff7049adedb2f45215e5f9c4ad7ad885ff07"
-    },
-    {
       "name": "v3core/ingest.py",
       "size": 51120,
       "sha256": "beee6ea303a8bbd8ca8086f6ae7fcf4bf9c22e92c380a1949f68d0520dedc5b7"
@@ -296,31 +267,6 @@
       "sha256": "8891b84f3fd67db6eb37ea2eefb02505d7f1905caefbe7b230d34d17c6d3d48d"
     },
     {
-      "name": "v3core/recall_v2/__init__.py",
-      "size": 1998,
-      "sha256": "e533fe5440ecf0d5cb56f22a3a6ae48e5ccfd76f7ed31c3ef5f5cfa6e3aa9eff"
-    },
-    {
-      "name": "v3core/recall_v2/adapters.py",
-      "size": 10517,
-      "sha256": "9ea9d75989033e6f553669c67a9815763b44c8fad61371bece29f67e0966db0c"
-    },
-    {
-      "name": "v3core/recall_v2/contracts.py",
-      "size": 29800,
-      "sha256": "c30e6484c75a01979ab6374374f1962d22442af03bb5a705f1734b441f646bc2"
-    },
-    {
-      "name": "v3core/recall_v2/engine.py",
-      "size": 59011,
-      "sha256": "a49584d5bd2a001ef612e55384f71dbd2e5ed9c36d381bac9786f45f32ffed14"
-    },
-    {
-      "name": "v3core/recall_v2/trace.py",
-      "size": 23474,
-      "sha256": "989a925d0017b0c356c2fd5994acd5975283707e828e9b74f68c972422c58cae"
-    },
-    {
       "name": "v3core/rerank.py",
       "size": 2864,
       "sha256": "66731bf667e38f32ccdf836079483becb371298c0ae4f1ca67c77b34e1af1d87"
@@ -339,36 +285,6 @@
       "name": "v3core/scheduler.py",
       "size": 13388,
       "sha256": "5845077c1f05622bc16196ad5e4d66765d2f93809a14b1b4574ca39f63499a1e"
-    },
-    {
-      "name": "v3core/schema/__init__.py",
-      "size": 68,
-      "sha256": "90d164a20cfad0310c8c16405e048a0a1624b29fefcc921371dd2d9f971cdaf3"
-    },
-    {
-      "name": "v3core/schema/alpha_bootstrap.sql",
-      "size": 15944,
-      "sha256": "26bdfd9fab365a30ade2e07b6d0af176188b2ac8d9d65cc485ab9a96f511c9d7"
-    },
-    {
-      "name": "v3core/schema/explicit_memories.sql",
-      "size": 6188,
-      "sha256": "a15c620f50c86a5b3d7457f6ec76634259246460626e36dd973b8636213ad37a"
-    },
-    {
-      "name": "v3core/schema/observation_embedding_chunks.sql",
-      "size": 1923,
-      "sha256": "4f9dd8925255c9e094ae5f35aa5b49e139a0a911cccff71460f3c8b0d31b2998"
-    },
-    {
-      "name": "v3core/schema/qa_embedding_chunks.sql",
-      "size": 1677,
-      "sha256": "bccf8839ba8ea372e3e7aa179de2934a25eb1d261125d82613bca1409b7b4592"
-    },
-    {
-      "name": "v3core/schema/upgrade_v0_2.sql",
-      "size": 7176,
-      "sha256": "2dc26d46531c6a21470905e3e98288103de2c6ac6ba018a5cef3701e3a0a2e6e"
     },
     {
       "name": "v3core/serve.py",
@@ -399,6 +315,141 @@
       "name": "v3core/tokenizer.py",
       "size": 3201,
       "sha256": "4aa06dc3280c1d8c3fdc2da2014937dc0ff7a48c403eb99af46c7cd09530f90d"
+    },
+    {
+      "name": "v3core/topic_cluster.py",
+      "size": 24409,
+      "sha256": "fde6193d91c6eec1271fa4f5c7c99dc1f60f6214f0a38264ed92bb02e0d99252"
+    },
+    {
+      "name": "v3core/topic_fusion.py",
+      "size": 10015,
+      "sha256": "73fc6f4a6ea55bc55d3d4e44be3d8423321c9b1e3dbd9d5ecaf5b8487552fa8e"
+    },
+    {
+      "name": "v3core/topic_maintain.py",
+      "size": 24854,
+      "sha256": "b82a84b539935e6436c5f4d9f39d8f970bc0ae27e7dd87c94295caef7e31ea2f"
+    },
+    {
+      "name": "v3core/topic_radar.py",
+      "size": 7133,
+      "sha256": "6b019197901ed8632314e96aeb58c88ebe4c8ac1fb25cbfeb7280498a569f1ce"
+    },
+    {
+      "name": "v3core/topic_recall.py",
+      "size": 34022,
+      "sha256": "7dd6f70bf61e28e4e12ea953a45b7b31fd765ea9e0ee908c3942084d3ef2a736"
+    },
+    {
+      "name": "v3core/topic_recall_cache.py",
+      "size": 9915,
+      "sha256": "465acadb3eb97c9f5d95bfeb9ec109ede248a8c9142a4f2431ab5bc24bf69cc1"
+    },
+    {
+      "name": "v3core/topic_refine.py",
+      "size": 33169,
+      "sha256": "b4ecf3aa473b3301c036d74d260860f4f0fdbf686b8c6614b1484628c229da4e"
+    },
+    {
+      "name": "v3core/topic_store.py",
+      "size": 40865,
+      "sha256": "c6a72e0d40b73905c489e0c4dfad6766e825174adfa02c5cb64d6271e9c0cfe4"
+    },
+    {
+      "name": "v3core/turn_schema.py",
+      "size": 5038,
+      "sha256": "3f8fd6f9de9f68dce872ade0a6f6915949a9608bf8976a3f3beb9fa7105b2b72"
+    },
+    {
+      "name": "v3core/types.py",
+      "size": 6077,
+      "sha256": "d0212a67459c0a3ffdc046ff656512049ea92a021e46cfd3b94177a92a80f714"
+    },
+    {
+      "name": "v3core/yin_pool.py",
+      "size": 9602,
+      "sha256": "e796e14dcdc5f826917f391b1f3610e53621b81a4322dd4505e005a1c2150c32"
+    },
+    {
+      "name": "v3core/importers/__init__.py",
+      "size": 30570,
+      "sha256": "e1b56565eeaa5f3123d450cf1faa18b9dbe27423b8b411fc2e920db98912d6b4"
+    },
+    {
+      "name": "v3core/importers/hermes_sessions.py",
+      "size": 17610,
+      "sha256": "ef9b20797fc79f342ca5e212122ee4fab5a4354b1069ad2d1011ad6c33644fa8"
+    },
+    {
+      "name": "v3core/importers/hindsight.py",
+      "size": 2540,
+      "sha256": "7b6dfad6c2fade66b0464299cfff5f1a46729548fb0695bd4133d413a83ff576"
+    },
+    {
+      "name": "v3core/importers/memory_md.py",
+      "size": 7467,
+      "sha256": "24bfe4c6d270b782ebbbea9c185b9a692f3c7bd2513c2b5915ad38fcdabc4cb6"
+    },
+    {
+      "name": "v3core/importers/openclaw.py",
+      "size": 3226,
+      "sha256": "4817f5d14285be67cf9877457138ff7049adedb2f45215e5f9c4ad7ad885ff07"
+    },
+    {
+      "name": "v3core/recall_v2/__init__.py",
+      "size": 1998,
+      "sha256": "e533fe5440ecf0d5cb56f22a3a6ae48e5ccfd76f7ed31c3ef5f5cfa6e3aa9eff"
+    },
+    {
+      "name": "v3core/recall_v2/adapters.py",
+      "size": 10517,
+      "sha256": "9ea9d75989033e6f553669c67a9815763b44c8fad61371bece29f67e0966db0c"
+    },
+    {
+      "name": "v3core/recall_v2/contracts.py",
+      "size": 29800,
+      "sha256": "c30e6484c75a01979ab6374374f1962d22442af03bb5a705f1734b441f646bc2"
+    },
+    {
+      "name": "v3core/recall_v2/engine.py",
+      "size": 59011,
+      "sha256": "a49584d5bd2a001ef612e55384f71dbd2e5ed9c36d381bac9786f45f32ffed14"
+    },
+    {
+      "name": "v3core/recall_v2/trace.py",
+      "size": 23474,
+      "sha256": "989a925d0017b0c356c2fd5994acd5975283707e828e9b74f68c972422c58cae"
+    },
+    {
+      "name": "v3core/schema/__init__.py",
+      "size": 68,
+      "sha256": "90d164a20cfad0310c8c16405e048a0a1624b29fefcc921371dd2d9f971cdaf3"
+    },
+    {
+      "name": "v3core/schema/alpha_bootstrap.sql",
+      "size": 15944,
+      "sha256": "26bdfd9fab365a30ade2e07b6d0af176188b2ac8d9d65cc485ab9a96f511c9d7"
+    },
+    {
+      "name": "v3core/schema/explicit_memories.sql",
+      "size": 6188,
+      "sha256": "a15c620f50c86a5b3d7457f6ec76634259246460626e36dd973b8636213ad37a"
+    },
+    {
+      "name": "v3core/schema/observation_embedding_chunks.sql",
+      "size": 1923,
+      "sha256": "4f9dd8925255c9e094ae5f35aa5b49e139a0a911cccff71460f3c8b0d31b2998"
+    },
+    {
+      "name": "v3core/schema/qa_embedding_chunks.sql",
+      "size": 1677,
+      "sha256": "bccf8839ba8ea372e3e7aa179de2934a25eb1d261125d82613bca1409b7b4592"
+    },
+    {
+      "name": "v3core/schema/upgrade_v0_2.sql",
+      "size": 7176,
+      "sha256": "2dc26d46531c6a21470905e3e98288103de2c6ac6ba018a5cef3701e3a0a2e6e"
     },
     {
       "name": "v3core/tools/__init__.py",
@@ -521,120 +572,94 @@
       "sha256": "504d9a101423ff98441d2eb2f6d97361dd264635650dc97b067e9920ae03476d"
     },
     {
-      "name": "v3core/topic_cluster.py",
-      "size": 24409,
-      "sha256": "fde6193d91c6eec1271fa4f5c7c99dc1f60f6214f0a38264ed92bb02e0d99252"
+      "name": "v3_core-4.0.0.dist-info/METADATA",
+      "size": 10667,
+      "sha256": "e882a0de29a2e599740e0d1f522d11e8dc59fba97c267539d6dc636025dd112e"
     },
     {
-      "name": "v3core/topic_fusion.py",
-      "size": 10015,
-      "sha256": "73fc6f4a6ea55bc55d3d4e44be3d8423321c9b1e3dbd9d5ecaf5b8487552fa8e"
+      "name": "v3_core-4.0.0.dist-info/WHEEL",
+      "size": 91,
+      "sha256": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1"
     },
     {
-      "name": "v3core/topic_maintain.py",
-      "size": 24854,
-      "sha256": "b82a84b539935e6436c5f4d9f39d8f970bc0ae27e7dd87c94295caef7e31ea2f"
+      "name": "v3_core-4.0.0.dist-info/entry_points.txt",
+      "size": 92,
+      "sha256": "6d5e85d5f8880d7fd87f0ae28d95d6c1c00f2dfd6a25746bc99dd9b78cc673d2"
     },
     {
-      "name": "v3core/topic_radar.py",
-      "size": 7133,
-      "sha256": "6b019197901ed8632314e96aeb58c88ebe4c8ac1fb25cbfeb7280498a569f1ce"
+      "name": "v3_core-4.0.0.dist-info/top_level.txt",
+      "size": 7,
+      "sha256": "0525152d14095360b40411c8f85a3137627c1dcccb838be410b39e4653774974"
     },
     {
-      "name": "v3core/topic_recall.py",
-      "size": 34022,
-      "sha256": "7dd6f70bf61e28e4e12ea953a45b7b31fd765ea9e0ee908c3942084d3ef2a736"
-    },
-    {
-      "name": "v3core/topic_recall_cache.py",
-      "size": 9915,
-      "sha256": "465acadb3eb97c9f5d95bfeb9ec109ede248a8c9142a4f2431ab5bc24bf69cc1"
-    },
-    {
-      "name": "v3core/topic_refine.py",
-      "size": 33169,
-      "sha256": "b4ecf3aa473b3301c036d74d260860f4f0fdbf686b8c6614b1484628c229da4e"
-    },
-    {
-      "name": "v3core/topic_store.py",
-      "size": 40865,
-      "sha256": "c6a72e0d40b73905c489e0c4dfad6766e825174adfa02c5cb64d6271e9c0cfe4"
-    },
-    {
-      "name": "v3core/turn_schema.py",
-      "size": 5038,
-      "sha256": "3f8fd6f9de9f68dce872ade0a6f6915949a9608bf8976a3f3beb9fa7105b2b72"
-    },
-    {
-      "name": "v3core/types.py",
-      "size": 6077,
-      "sha256": "d0212a67459c0a3ffdc046ff656512049ea92a021e46cfd3b94177a92a80f714"
-    },
-    {
-      "name": "v3core/yin_pool.py",
-      "size": 9602,
-      "sha256": "e796e14dcdc5f826917f391b1f3610e53621b81a4322dd4505e005a1c2150c32"
+      "name": "v3_core-4.0.0.dist-info/RECORD",
+      "size": 9224,
+      "sha256": "27a6fddf8897ade4a45f1af535dbf9d7f2d17845130e64299b2e3c5535e3a65d"
     }
   ],
-  "changed_source_manifest": [
-    "CURRENT.md",
-    "src/v3-core/pyproject.toml",
-    "src/v3-core/schema/alpha_bootstrap.sql",
-    "src/v3-core/schema/upgrade_v0_2.sql",
-    "src/v3-core/src/v3core/distribution_cli.py",
-    "src/v3-core/src/v3core/embed_chunks.py",
-    "src/v3-core/src/v3core/embed_failures.py",
-    "src/v3-core/src/v3core/observer.py",
-    "src/v3-core/src/v3core/recall_pool.py",
-    "src/v3-core/src/v3core/schema/alpha_bootstrap.sql",
-    "src/v3-core/src/v3core/schema/upgrade_v0_2.sql",
-    "src/v3-core/src/v3core/tools/embedding_backfill.py",
-    "src/v3-core/tests/test_alpha_bootstrap_contract.py",
-    "src/v3-core/tests/test_production_upgrade_contract.py"
+  "selected_source_wheel_identity": [
+    {
+      "source": "src/v3-core/src/v3core/observation_chunks.py",
+      "member": "v3core/observation_chunks.py",
+      "size": 18234,
+      "source_sha256": "d8189d24faf179a03f3f3a639d4ecfe185346733c73dbd04ebeb3d81f8de9389",
+      "wheel_sha256": "d8189d24faf179a03f3f3a639d4ecfe185346733c73dbd04ebeb3d81f8de9389",
+      "equal": true
+    },
+    {
+      "source": "src/v3-core/src/v3core/observer.py",
+      "member": "v3core/observer.py",
+      "size": 278635,
+      "source_sha256": "3f61882ae5ce0c1bf14918a0dda733a96553c1f048a1075ef24fcc22fb14c9b6",
+      "wheel_sha256": "3f61882ae5ce0c1bf14918a0dda733a96553c1f048a1075ef24fcc22fb14c9b6",
+      "equal": true
+    },
+    {
+      "source": "src/v3-core/src/v3core/recall_pool.py",
+      "member": "v3core/recall_pool.py",
+      "size": 201414,
+      "source_sha256": "8891b84f3fd67db6eb37ea2eefb02505d7f1905caefbe7b230d34d17c6d3d48d",
+      "wheel_sha256": "8891b84f3fd67db6eb37ea2eefb02505d7f1905caefbe7b230d34d17c6d3d48d",
+      "equal": true
+    },
+    {
+      "source": "src/v3-core/src/v3core/embed_chunks.py",
+      "member": "v3core/embed_chunks.py",
+      "size": 47277,
+      "source_sha256": "fc3cbfdfeddbb7de8d4079800381f2e46025a921d131b37d42b3d3afc64ca645",
+      "wheel_sha256": "fc3cbfdfeddbb7de8d4079800381f2e46025a921d131b37d42b3d3afc64ca645",
+      "equal": true
+    },
+    {
+      "source": "src/v3-core/src/v3core/embed_failures.py",
+      "member": "v3core/embed_failures.py",
+      "size": 24972,
+      "source_sha256": "02b905dbe976a650958d0314f5dfa69ea36d11198174cfea812a487f770ebeb0",
+      "wheel_sha256": "02b905dbe976a650958d0314f5dfa69ea36d11198174cfea812a487f770ebeb0",
+      "equal": true
+    },
+    {
+      "source": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "member": "v3core/tools/embedding_backfill.py",
+      "size": 34367,
+      "source_sha256": "a48a64b7de24109d4f5ac21b83223ede7ac60d806d0cf76477ada338699118c2",
+      "wheel_sha256": "a48a64b7de24109d4f5ac21b83223ede7ac60d806d0cf76477ada338699118c2",
+      "equal": true
+    },
+    {
+      "source": "src/v3-core/schema/observation_embedding_chunks.sql",
+      "member": "v3core/schema/observation_embedding_chunks.sql",
+      "size": 1923,
+      "source_sha256": "4f9dd8925255c9e094ae5f35aa5b49e139a0a911cccff71460f3c8b0d31b2998",
+      "wheel_sha256": "4f9dd8925255c9e094ae5f35aa5b49e139a0a911cccff71460f3c8b0d31b2998",
+      "equal": true
+    }
   ],
-  "working_tree_status_before_commit": [
-    " M CURRENT.md",
-    " M src/v3-core/pyproject.toml",
-    " M src/v3-core/schema/alpha_bootstrap.sql",
-    " M src/v3-core/schema/upgrade_v0_2.sql",
-    " M src/v3-core/src/v3core/distribution_cli.py",
-    " M src/v3-core/src/v3core/embed_chunks.py",
-    " M src/v3-core/src/v3core/embed_failures.py",
-    " M src/v3-core/src/v3core/observer.py",
-    " M src/v3-core/src/v3core/recall_pool.py",
-    " M src/v3-core/src/v3core/schema/alpha_bootstrap.sql",
-    " M src/v3-core/src/v3core/schema/upgrade_v0_2.sql",
-    " M src/v3-core/src/v3core/tools/embedding_backfill.py",
-    " M src/v3-core/tests/test_alpha_bootstrap_contract.py",
-    " M src/v3-core/tests/test_production_upgrade_contract.py",
-    "?? .baseline/",
-    "?? evidence/canonical-source-diff.patch",
-    "?? evidence/disposable-long-observation-e2e.json",
-    "?? evidence/disposable-long-observation-e2e.py",
-    "?? evidence/embedding-input-window-audit.final.json",
-    "?? evidence/embedding-input-window-audit.py",
-    "?? evidence/make-root-cause.py",
-    "?? evidence/make-wheel-manifest.py",
-    "?? evidence/migration-compatibility.json",
-    "?? evidence/migration-compatibility.py",
-    "?? evidence/observation-long-backfill-plan.cli.json",
-    "?? evidence/observation-long-backfill-plan.final.json",
-    "?? evidence/observation-long-root-cause.final.json",
-    "?? evidence/observation-migration-check.txt",
-    "?? evidence/phase0-checkpoint.json",
-    "?? evidence/phase0-checkpoint.py",
-    "?? evidence/plan-observation-6.py",
-    "?? evidence/production-schema-readonly.sql",
-    "?? evidence/real-provider-long-observation.json",
-    "?? evidence/real-provider-long-observation.py",
-    "?? src/v3-core/docs/ADR-long-observation-derived-index-v1.md",
-    "?? src/v3-core/docs/LONG-OBSERVATION-INDEX.md",
-    "?? src/v3-core/schema/observation_embedding_chunks.sql",
-    "?? src/v3-core/src/v3core/observation_chunks.py",
-    "?? src/v3-core/src/v3core/schema/observation_embedding_chunks.sql",
-    "?? src/v3-core/tests/test_long_observation_red.py",
-    "?? src/v3-core/tests/test_long_observation_writer_recall.py",
-    "?? src/v3-core/tests/test_observation_chunks_contract.py",
-    "?? src/v3-core/tests/test_observation_writer_contract.py"
-  ]
+  "source_wheel_product_drift": 0,
+  "all_non_dist_info_blobs": {
+    "comparison_against_previous_candidate": "IDENTICAL",
+    "member_count": 108
+  },
+  "real_y400_full_differential": "NOT_AVAILABLE",
+  "production_status": "NOT_DEPLOYED_AT_BUILD"
 }

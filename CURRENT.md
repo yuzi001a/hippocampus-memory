@@ -2,52 +2,38 @@
 
 Status: `DECISION_REQUIRED`
 
-## Candidate
+## Candidate (deployed)
 
 - Branch: `feature/long-observation-index-v1`
-- Base: `9c4d191017620e9edbd81ca8fd85d232f4faf23c`
-- Implementation commits: `12a2bce`, `f20c668`, `2f23e34`
-- Candidate wheel: `C:\\hp-testbed\\artifacts\\long-observation-candidate\\v3_core-4.0.0-py3-none-any.whl`
-- Candidate wheel SHA256: `9bb82c792a0d1ccbd62ed1511b3b5502afc8f751a8273397c7beb60629544d4a`
-- Status: integration candidate only; not production-authorized.
+- `product_code_head`: `2f23e34574880e3c61ed0e9a2d73ded4e685edac`
+- `artifact_build_head` / final documentation head at build: `75e7d1297927fa932bf766fddbf06407660f23d2`
+- Candidate wheel: `C:\hp-testbed\artifacts\LONG_OBSERVATION_PRODUCTION_CANDIDATE\v3_core-4.0.0-py3-none-any.whl`
+- Candidate wheel SHA256: `25a3bb46296b4aae261e8eed686b9d0fcd96e6bda1761343af75979d4d67fc5c`
+- Previous wheel SHA256 `9bb82c792a0d1ccbd62ed1511b3b5502afc8f751a8273397c7beb60629544d4a`; old vs new product blobs are byte-identical (`source_wheel_product_drift = 0`). The old blocker was stale provenance metadata, not a bad artifact.
+- Deployed to the live Hermes venv; installed member byte-equality `108/108`.
 
-## Production freeze result
+## Production rollout performed
 
-Production was used only for SELECT/schema introspection/source hashes/token census and the observation dry-run. No production migration, INSERT, UPDATE, DELETE, real backfill, live venv reinstall, gateway restart, or serve restart was performed by this task.
+- Additive migration only: `observation_embedding_chunks` created (FK, unique constraint, parent index, ivfflat index); `observation_notes` unchanged; 0 rows.
+- Gateway `3924/15408 -> 3772/5252`; serve `6548/18172 -> 2864/19988`; old PIDs absent; heartbeat fresh; Feishu inbound working.
+- Forward smoke: P0 validator active; embed policies unchanged; a post-restart short observation got a 1024-dim `bf32771ecbd1` vector; 0 new unexplained NULL.
+- Six-row dry-run re-planned against current production source: no source drift, all long, 2 children each.
 
-Final production facts:
+## Canary result
 
-- provider/model: SiliconFlow `BAAI/bge-m3`
-- fingerprint: `bf32771ecbd1`
-- provider hard window: `8192`
-- safe planner target: `7680`
-- `observation_notes` NULL parent vectors: `6`
-- NULL IDs: `634, 726, 732, 743, 746, 759`
-- all six are long/unembeddable on the old single-request path
-- all six dry-run plans are valid, two children each, no child above `7680`
-- total planned historical child calls: `12`
-- observation sidecar in production: absent
-- observation failure ledger: `total=0, unresolved=0`
-- production source hashes are recorded in the private-safe plan evidence.
-
-Live package manifest remained unchanged from the frozen production wheel. Process observation found two gateway and two serve processes; this task issued no lifecycle command. The process observation is retained separately rather than treating PID history as a restart claim.
-
-## Validation
-
-- RED evidence retained before implementation.
-- Targeted preservation gates: `229 passed`.
-- Full candidate suite: `854 passed, 3 inherited importer fixture failures, 4 skipped`.
-- Baseline: `801 passed, 4 inherited importer fixture failures, 4 skipped`.
-- Original-only differential: `NEW_REGRESSION=0`.
-- Disposable PostgreSQL E2E: short, 10k, 20k, retry, permanent failure, sidecar failure, idempotent rerun, and stale 4→3 replacement all passed.
-- Real non-production provider: 10k and 20k sources passed; every child <=7680, dimension 1024, fingerprint correct.
-- Final wheel imported from isolated `wheel-env`; P0 identity validator, forward embedding imports, long-QA, observation short/long planner, parent merge, D5 commit boundary, and backfill CLI entrypoint passed.
+- Repaired exactly one row: `observation_notes.id = 759` (smallest long row, 8512 tokens).
+- Source SHA unchanged before/after: `9adee801b4d5a9860b0ea78cd1fd5c7d432c03902e6c3c1e81f319ec969d7838`.
+- Children: `[7680, 833]` tokens, offsets `[0,14844]` + `[14844,16282]`, coverage complete, representation `v1-long-observation`, fingerprint `bf32771ecbd1`.
+- Parent: 1024-dim vector, fingerprint correct, aggregated from all children. Ledger unresolved = 0.
+- Recall proof (tail-only query): parent-only cosine `0.6631`, best child `0.7035`, merged rank 1, returned the FULL 16282-char parent.
+- Head-region query returned no hit for 759 — pre-existing newest-per-day semantics (a same-day observation scored higher). Not a long-observation regression.
+- `LONG_OBSERVATION_PRODUCTION_CANARY = PASS`
 
 ## Remaining production actions
 
-1. Decide whether to apply the additive migration in production.
-2. If migration is approved, run a separately authorized production dry-run/repair gate.
-3. Authorize a production observation backfill batch; no batch was applied tonight.
-4. Decide separately whether the static audit's 18 potentially-unbounded non-observation call sites need follow-up. No additional product scope was changed tonight.
+1. `observation_notes` NULL parents: `5` (`634, 726, 732, 743, 746`) — awaiting a separate authorization to finish the batch.
+2. Decide whether the newest-per-day interaction with long-child hits needs a follow-up design item.
+3. Decide whether the static audit's 18 potentially-unbounded non-observation call sites need follow-up.
 
-Evidence root: `C:\\hp-testbed\\evidence\\`
+Evidence root: `C:\hp-testbed\evidence\`
+Production canary evidence: `C:\Users\servi\workspace\backups\long-observation-canary-20260922\`
