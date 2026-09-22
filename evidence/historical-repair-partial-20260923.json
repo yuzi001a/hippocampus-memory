@@ -1,0 +1,274 @@
+{
+  "verdict": "PARTIAL",
+  "completed_ids": [
+    634,
+    726,
+    732,
+    743
+  ],
+  "blocked_at_id": 743,
+  "not_attempted_ids": [
+    746
+  ],
+  "steps": [
+    {
+      "step": 1,
+      "selected_id": 634,
+      "cli_returncode": 0,
+      "cli_verdict": "BACKFILL_OK",
+      "cli_stats": {
+        "selected": 1,
+        "repaired": 1,
+        "sidecar_written": 2,
+        "failed_retryable": 0,
+        "failed_permanent": 0
+      },
+      "structural_status": "PASS",
+      "failed_checks": [],
+      "source_sha256": "02b47ae49db3a0fa5d863fd0e6d2aab2918a0f78d23b9052be42f71f8df1a4fb",
+      "children": [
+        {
+          "chunk_index": 0,
+          "tokens": 7680,
+          "source_start": 0,
+          "source_end": 18114,
+          "representation_version": "v1-long-observation",
+          "embed_model": "bf32771ecbd1"
+        },
+        {
+          "chunk_index": 1,
+          "tokens": 3284,
+          "source_start": 18114,
+          "source_end": 26002,
+          "representation_version": "v1-long-observation",
+          "embed_model": "bf32771ecbd1"
+        }
+      ],
+      "coverage_complete": true,
+      "parent": {
+        "has_vector": true,
+        "dim": 1024,
+        "embed_model": "bf32771ecbd1",
+        "fingerprint_ok": true
+      },
+      "ledger_unresolved": 0,
+      "tail_recall": {
+        "query_sha256": "3aa7b7444bf322985c8c1ecd836005d5ff66b4d93656a8e8c29bdb4fbf1201ab",
+        "query_chars": 120,
+        "query_unique_to_tail": true,
+        "target_in_child_candidates": true,
+        "best_child_cosine": 0.6770598677325455,
+        "parent_only_cosine": null,
+        "merged_hit_found": true,
+        "merged_rank": 1,
+        "merged_cosine": 0.6770598677325455,
+        "merged_content_chars": 26002,
+        "merged_content_is_full_parent": true,
+        "merged_content_sha256": "02b47ae49db3a0fa5d863fd0e6d2aab2918a0f78d23b9052be42f71f8df1a4fb",
+        "tail_phrase_present_in_merged": true,
+        "merged_source_ids": [
+          "note:v634",
+          "note:v767",
+          "note:v740",
+          "note:v696",
+          "note:v689"
+        ]
+      }
+    },
+    {
+      "step": 2,
+      "selected_id": 726,
+      "cli_returncode": 0,
+      "cli_verdict": "BACKFILL_OK",
+      "cli_stats": {
+        "selected": 1,
+        "repaired": 1,
+        "sidecar_written": 2,
+        "failed_retryable": 0,
+        "failed_permanent": 0
+      },
+      "structural_status": "PASS",
+      "failed_checks": [],
+      "source_sha256": "5851a2da31549680ef4737f68de87042b538c5c4337ae0e358381d0ca4f0e17b",
+      "children": [
+        {
+          "chunk_index": 0,
+          "tokens": 7680,
+          "source_start": 0,
+          "source_end": 13946,
+          "representation_version": "v1-long-observation",
+          "embed_model": "bf32771ecbd1"
+        },
+        {
+          "chunk_index": 1,
+          "tokens": 1228,
+          "source_start": 13946,
+          "source_end": 16168,
+          "representation_version": "v1-long-observation",
+          "embed_model": "bf32771ecbd1"
+        }
+      ],
+      "coverage_complete": true,
+      "parent": {
+        "has_vector": true,
+        "dim": 1024,
+        "embed_model": "bf32771ecbd1",
+        "fingerprint_ok": true
+      },
+      "ledger_unresolved": 0,
+      "tail_recall": {
+        "query_sha256": "7e55918f948d0118a22ad82a2b0a119e7b6137640fac81cf94cedc5fad72df89",
+        "query_chars": 120,
+        "query_unique_to_tail": true,
+        "target_in_child_candidates": true,
+        "best_child_cosine": 0.7130985685049634,
+        "parent_only_cosine": 0.6815882338513348,
+        "merged_hit_found": true,
+        "merged_rank": 1,
+        "merged_cosine": 0.7130985685049634,
+        "merged_content_chars": 16168,
+        "merged_content_is_full_parent": true,
+        "merged_content_sha256": "5851a2da31549680ef4737f68de87042b538c5c4337ae0e358381d0ca4f0e17b",
+        "tail_phrase_present_in_merged": true,
+        "merged_source_ids": [
+          "note:v726",
+          "note:v761-compressed",
+          "note:v689",
+          "note:v708",
+          "note:v634"
+        ]
+      }
+    },
+    {
+      "step": 3,
+      "selected_id": 732,
+      "cli_returncode": 0,
+      "cli_verdict": "BACKFILL_OK",
+      "cli_stats": {
+        "selected": 1,
+        "repaired": 1,
+        "sidecar_written": 2,
+        "failed_retryable": 0,
+        "failed_permanent": 0
+      },
+      "structural_status": "PASS",
+      "failed_checks": [],
+      "source_sha256": "62ed033513c08743f381201769f323b9fc77724386e207c34cf444919728bdc7",
+      "children": [
+        {
+          "chunk_index": 0,
+          "tokens": 7680,
+          "source_start": 0,
+          "source_end": 14516,
+          "representation_version": "v1-long-observation",
+          "embed_model": "bf32771ecbd1"
+        },
+        {
+          "chunk_index": 1,
+          "tokens": 3950,
+          "source_start": 14516,
+          "source_end": 22228,
+          "representation_version": "v1-long-observation",
+          "embed_model": "bf32771ecbd1"
+        }
+      ],
+      "coverage_complete": true,
+      "parent": {
+        "has_vector": true,
+        "dim": 1024,
+        "embed_model": "bf32771ecbd1",
+        "fingerprint_ok": true
+      },
+      "ledger_unresolved": 0,
+      "tail_recall": {
+        "query_sha256": "90e6af963a94ff88883efaa5c4c4f62220937530fb86c3d6828f3cafa31098cd",
+        "query_chars": 120,
+        "query_unique_to_tail": true,
+        "target_in_child_candidates": true,
+        "best_child_cosine": 0.736761993476331,
+        "parent_only_cosine": 0.6941537054135319,
+        "merged_hit_found": true,
+        "merged_rank": 1,
+        "merged_cosine": 0.736761993476331,
+        "merged_content_chars": 22228,
+        "merged_content_is_full_parent": true,
+        "merged_content_sha256": "62ed033513c08743f381201769f323b9fc77724386e207c34cf444919728bdc7",
+        "tail_phrase_present_in_merged": true,
+        "merged_source_ids": [
+          "note:v732",
+          "note:v708",
+          "note:v767",
+          "note:v689",
+          "note:v634"
+        ]
+      }
+    },
+    {
+      "step": 4,
+      "selected_id": 743,
+      "cli_returncode": 0,
+      "cli_verdict": "BACKFILL_OK",
+      "cli_stats": {
+        "selected": 1,
+        "repaired": 1,
+        "sidecar_written": 2,
+        "failed_retryable": 0,
+        "failed_permanent": 0
+      },
+      "structural_status": "PASS",
+      "failed_checks": [
+        "tail_recall_full_parent",
+        "tail_recall_phrase_present"
+      ],
+      "source_sha256": "a5e5e0e4fcbea35d7c0f5b6d0df9a9f689600a138fadf034e9bb232586396414",
+      "children": [
+        {
+          "chunk_index": 0,
+          "tokens": 7680,
+          "source_start": 0,
+          "source_end": 16247,
+          "representation_version": "v1-long-observation",
+          "embed_model": "bf32771ecbd1"
+        },
+        {
+          "chunk_index": 1,
+          "tokens": 3347,
+          "source_start": 16247,
+          "source_end": 23326,
+          "representation_version": "v1-long-observation",
+          "embed_model": "bf32771ecbd1"
+        }
+      ],
+      "coverage_complete": true,
+      "parent": {
+        "has_vector": true,
+        "dim": 1024,
+        "embed_model": "bf32771ecbd1",
+        "fingerprint_ok": true
+      },
+      "ledger_unresolved": 0,
+      "tail_recall": {
+        "query_sha256": "20f16c6bde4be3fcbc5d8a8dadd8564932e63ea59e9887319a06271481e15257",
+        "query_chars": 120,
+        "query_unique_to_tail": true,
+        "target_in_child_candidates": true,
+        "best_child_cosine": 0.6775889992713928,
+        "parent_only_cosine": null,
+        "merged_hit_found": false,
+        "merged_rank": null,
+        "merged_cosine": null,
+        "merged_content_chars": null,
+        "merged_content_is_full_parent": false,
+        "merged_content_sha256": null,
+        "tail_phrase_present_in_merged": false,
+        "merged_source_ids": [
+          "note:v752-compressed",
+          "note:v742",
+          "note:v778",
+          "note:v694",
+          "note:v710"
+        ]
+      }
+    }
+  ]
+}
