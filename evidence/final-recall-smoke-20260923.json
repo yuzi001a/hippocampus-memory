@@ -1,0 +1,230 @@
+{
+  "sampled": 8,
+  "hits": 8,
+  "detail": [
+    {
+      "id": 1576,
+      "canonical_chars": 2000,
+      "per_slice": {
+        "first120": {
+          "rank": 1,
+          "top1": [
+            1576,
+            0.74407
+          ]
+        },
+        "third120": {
+          "rank": null,
+          "top1": [
+            6163,
+            0.58658
+          ]
+        },
+        "last120": {
+          "rank": null,
+          "top1": [
+            2774,
+            0.60435
+          ]
+        }
+      },
+      "recall_hit": true
+    },
+    {
+      "id": 13995,
+      "canonical_chars": 2000,
+      "per_slice": {
+        "first120": {
+          "rank": 1,
+          "top1": [
+            13995,
+            0.8078
+          ]
+        },
+        "third120": {
+          "rank": null,
+          "top1": [
+            13080,
+            0.62156
+          ]
+        },
+        "last120": {
+          "rank": 3,
+          "top1": [
+            13987,
+            0.79435
+          ]
+        }
+      },
+      "recall_hit": true
+    },
+    {
+      "id": 8514,
+      "canonical_chars": 74,
+      "per_slice": {
+        "first120": {
+          "rank": 1,
+          "top1": [
+            8514,
+            0.99992
+          ]
+        },
+        "third120": {
+          "rank": 1,
+          "top1": [
+            8514,
+            0.8728
+          ]
+        },
+        "last120": {
+          "rank": 1,
+          "top1": [
+            8514,
+            1.0
+          ]
+        }
+      },
+      "recall_hit": true
+    },
+    {
+      "id": 5677,
+      "canonical_chars": 60,
+      "per_slice": {
+        "first120": {
+          "rank": 1,
+          "top1": [
+            5677,
+            1.0
+          ]
+        },
+        "third120": {
+          "rank": 1,
+          "top1": [
+            5677,
+            0.91416
+          ]
+        },
+        "last120": {
+          "rank": 1,
+          "top1": [
+            5677,
+            1.0
+          ]
+        }
+      },
+      "recall_hit": true
+    },
+    {
+      "id": 12269,
+      "canonical_chars": 74,
+      "per_slice": {
+        "first120": {
+          "rank": 1,
+          "top1": [
+            12269,
+            0.99991
+          ]
+        },
+        "third120": {
+          "rank": 1,
+          "top1": [
+            12269,
+            0.79139
+          ]
+        },
+        "last120": {
+          "rank": 1,
+          "top1": [
+            12269,
+            1.0
+          ]
+        }
+      },
+      "recall_hit": true
+    },
+    {
+      "id": 10524,
+      "canonical_chars": 39,
+      "per_slice": {
+        "first120": {
+          "rank": 1,
+          "top1": [
+            10524,
+            1.0
+          ]
+        },
+        "third120": {
+          "rank": 1,
+          "top1": [
+            10524,
+            0.75481
+          ]
+        },
+        "last120": {
+          "rank": 1,
+          "top1": [
+            10524,
+            1.0
+          ]
+        }
+      },
+      "recall_hit": true
+    },
+    {
+      "id": 8611,
+      "canonical_chars": 50,
+      "per_slice": {
+        "first120": {
+          "rank": 1,
+          "top1": [
+            8611,
+            1.0
+          ]
+        },
+        "third120": {
+          "rank": 1,
+          "top1": [
+            8611,
+            0.8747
+          ]
+        },
+        "last120": {
+          "rank": 1,
+          "top1": [
+            8611,
+            1.0
+          ]
+        }
+      },
+      "recall_hit": true
+    },
+    {
+      "id": 10265,
+      "canonical_chars": 104,
+      "per_slice": {
+        "first120": {
+          "rank": 1,
+          "top1": [
+            10265,
+            1.0
+          ]
+        },
+        "third120": {
+          "rank": 1,
+          "top1": [
+            10265,
+            0.92956
+          ]
+        },
+        "last120": {
+          "rank": 1,
+          "top1": [
+            10265,
+            1.0
+          ]
+        }
+      },
+      "recall_hit": true
+    }
+  ]
+}
