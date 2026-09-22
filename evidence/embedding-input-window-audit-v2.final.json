@@ -1,0 +1,625 @@
+{
+  "audit": "embedding-input-window-audit-v2",
+  "generated_at": "2026-09-23",
+  "scope": "18 POTENTIALLY_UNBOUNDED embedding call sites from embedding-input-window-audit.final.json",
+  "method": {
+    "code_evidence": "read every call site + its enclosing function + upstream producer in the canonical source tree",
+    "production_census": "read-only PG/SQLite token census of the real input families (bge-m3 tokenizer)",
+    "provider_probe": "controlled synthetic probe through the REAL production embed config (no production text sent)",
+    "forbidden": "no static-only guessing; every verdict cites either a measured distribution or a slice/planner gate"
+  },
+  "window": {
+    "max_input_tokens": 8192,
+    "chunk_safety_margin": 512,
+    "safe_tokens": 7680,
+    "provider_measured_boundary": "8001 tok OK / 9001 tok HTTP 400 (code 20015)"
+  },
+  "summary": {
+    "total_call_sites": 18,
+    "classified": 18,
+    "unknown": 0,
+    "verdict_counts": {
+      "QUERY_NEEDS_CAP": 5,
+      "PROVEN_PRODUCTION_DEFECT": 4,
+      "SAFE_UPSTREAM_BOUNDED": 4,
+      "SAFE_DOMAIN_BOUNDED": 5
+    }
+  },
+  "production_census": {
+    "tokenizer": "BAAI/bge-m3",
+    "query_family_qa_pairs_question": {
+      "rows": 14027,
+      "max_chars": 73693,
+      "p50": 10956,
+      "p95": 21537,
+      "p99": 37303,
+      "top5_chars": [
+        73693,
+        37303,
+        37303,
+        37303,
+        37303
+      ],
+      "top5_tokens": [
+        54482,
+        9134,
+        9134,
+        9134,
+        9134
+      ],
+      "over_7680_chars": 190,
+      "note": "top-200 sample only; full-table percentile not computed"
+    },
+    "query_family_conversation_stream_user": {
+      "rows": 1249,
+      "max_chars": 37303,
+      "p50": 8825,
+      "p95": 18019,
+      "p99": 21658,
+      "top5_chars": [
+        37303,
+        21799,
+        21658,
+        21542,
+        21537
+      ],
+      "top5_tokens": [
+        9134,
+        6013,
+        6239,
+        7186,
+        4588
+      ],
+      "over_7680_chars": 143
+    },
+    "derived_topics_canonical": {
+      "rows": 348,
+      "pre_slice_max_chars": 3580,
+      "pre_slice_p95": 2149,
+      "post_slice_max_chars": 1000,
+      "rows_where_slice_binds": 172,
+      "max_tokens_after_slice": 336
+    },
+    "derived_conversation_stream_canonical_slice": {
+      "rows": 13904,
+      "raw_max_chars": 37303,
+      "canonical_slice_chars": 2000,
+      "slice_binds": true,
+      "max_tokens_after_slice": 669
+    },
+    "derived_yin_canonical": {
+      "rows": 1297,
+      "raw_max_chars": 2249,
+      "e1_slice_chars": 2000,
+      "yin_pool_slice_chars": 1500,
+      "max_tokens_e1_slice": 669,
+      "max_tokens_yin_pool_slice": 502
+    },
+    "derived_observation_canonical": {
+      "rows": 779,
+      "raw_max_chars": 38438,
+      "max_tokens": 20465,
+      "handled_by": "planner (v1-long-observation, chunked) — not a single-call path"
+    },
+    "failure_ledger": {
+      "rows": 0,
+      "unresolved": 0,
+      "by_entity_phase_class": []
+    },
+    "derived_topic_blocks_sqlite_build_topic_text": {
+      "db": "C:\\Users\\servi\\.v3-core\\profiles\\default\\v3_topic.db",
+      "exists": true,
+      "rows": 677,
+      "max_chars": 774,
+      "p95": 654,
+      "over_1000_chars": 0,
+      "over_7680_chars": 0,
+      "max_tokens": 260,
+      "slice_in_builder": false
+    }
+  },
+  "provider_probe": [
+    {
+      "target_tokens": 200,
+      "actual_tokens": 201,
+      "ok": true,
+      "dim": 1024
+    },
+    {
+      "target_tokens": 4000,
+      "actual_tokens": 4001,
+      "ok": true,
+      "dim": 1024
+    },
+    {
+      "target_tokens": 7000,
+      "actual_tokens": 7001,
+      "ok": true,
+      "dim": 1024
+    },
+    {
+      "target_tokens": 7680,
+      "actual_tokens": 7681,
+      "ok": true,
+      "dim": 1024
+    },
+    {
+      "target_tokens": 8000,
+      "actual_tokens": 8001,
+      "ok": true,
+      "dim": 1024
+    },
+    {
+      "target_tokens": 9000,
+      "actual_tokens": 9001,
+      "ok": false,
+      "error_class": "EmbeddingCallError",
+      "error": "embedding 调用失败: class=EMBEDDING_BAD_REQUEST attempts=1 elapsed=1.48s policy=realtime err=400 Client Error: Bad Request for url: https://api.siliconflow.cn/v1/embeddings"
+    },
+    {
+      "target_tokens": 12000,
+      "actual_tokens": 12001,
+      "ok": false,
+      "error_class": "EmbeddingCallError",
+      "error": "embedding 调用失败: class=EMBEDDING_BAD_REQUEST attempts=1 elapsed=1.79s policy=realtime err=400 Client Error: Bad Request for url: https://api.siliconflow.cn/v1/embeddings"
+    },
+    {
+      "target_tokens": 16000,
+      "actual_tokens": 16001,
+      "ok": false,
+      "error_class": "EmbeddingCallError",
+      "error": "embedding 调用失败: class=EMBEDDING_BAD_REQUEST attempts=1 elapsed=1.10s policy=realtime err=400 Client Error: Bad Request for url: https://api.siliconflow.cn/v1/embeddings"
+    }
+  ],
+  "real_query_token_census": [
+    {
+      "label": "qa_pairs.question TOP150-longest",
+      "rows": 150,
+      "max_tokens": 54482,
+      "p50": 3937,
+      "p95": 7290,
+      "over_7680_tokens": 8,
+      "over_7680_ids_sample": [
+        247211,
+        248275,
+        248278,
+        248277,
+        248274,
+        248276,
+        248273,
+        246594
+      ],
+      "over_8192_tokens": 7
+    },
+    {
+      "label": "qa_pairs.question random150",
+      "rows": 150,
+      "max_tokens": 6239,
+      "p50": 22,
+      "p95": 202,
+      "over_7680_tokens": 0,
+      "over_7680_ids_sample": [],
+      "over_8192_tokens": 0
+    },
+    {
+      "label": "conversation_stream(role=user) TOP100-longest",
+      "rows": 100,
+      "max_tokens": 9134,
+      "p50": 3877,
+      "p95": 6680,
+      "over_7680_tokens": 1,
+      "over_7680_ids_sample": [
+        9470
+      ],
+      "over_8192_tokens": 1
+    }
+  ],
+  "sites": [
+    {
+      "n": 1,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 1980,
+      "fn": "Core.search_cards",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "v3_search tool argument (agent-authored)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": null,
+      "max_prod_tokens": null,
+      "recent_calls": "NOT_AVAILABLE (not instrumented)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "QUERY_NEEDS_CAP",
+      "reason": "Tool path. No cap on `query`. Exposure is currently MASKED by an inverted cache guard (`query in _EMBED_CACHE`, line 1979) so cold queries never embed — see additional_findings F2. Once that guard is fixed this site inherits the same window exposure as the other query sites."
+    },
+    {
+      "n": 2,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2500,
+      "fn": "Core.prefetch_to_context_block",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "Hermes turn_context._query = original_user_message (memory_manager.prefetch_all)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": 37303,
+      "max_prod_tokens": 9134,
+      "recent_calls": "every non-trivial user turn",
+      "window_400_observed": true,
+      "ledger_marker": null,
+      "verdict": "PROVEN_PRODUCTION_DEFECT",
+      "reason": "PRODUCTION INJECTION PATH. Query = raw user message, unbounded. Production census (all 1249 role='user' rows in conversation_stream): p50=40 tok, p90=2778, p99=5167, max=9134 tok; 1 row (id 9470, 0.08%) > 7680 tok. Provider probe on the real embed config: 8001 tok OK, 9001 tok -> HTTP 400 code=20015. Failure is swallowed by `except Exception: logger.debug` -> vector lane silently degrades to keyword-only for that turn. Risk rank P2 (deterministic but 0.08% frequency, graceful degradation)."
+    },
+    {
+      "n": 3,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2503,
+      "fn": "Core.prefetch_to_context_block",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "same as site 2 (deadline-bounded fast path)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": 37303,
+      "max_prod_tokens": 9134,
+      "recent_calls": "every non-trivial user turn (deadline path)",
+      "window_400_observed": true,
+      "ledger_marker": null,
+      "verdict": "PROVEN_PRODUCTION_DEFECT",
+      "reason": "Identical input family and exposure as site 2; differs only in timeout/deadline wiring."
+    },
+    {
+      "n": 4,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2769,
+      "fn": "Core.prefetch_to_context_block",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "same as site 2 (fallback branch)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": 37303,
+      "max_prod_tokens": 9134,
+      "recent_calls": "every non-trivial user turn (fallback branch)",
+      "window_400_observed": true,
+      "ledger_marker": null,
+      "verdict": "PROVEN_PRODUCTION_DEFECT",
+      "reason": "Same query family as site 2; fallback branch of the injection path."
+    },
+    {
+      "n": 5,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2772,
+      "fn": "Core.prefetch_to_context_block",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "same as site 2 (fallback + deadline branch)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": 37303,
+      "max_prod_tokens": 9134,
+      "recent_calls": "every non-trivial user turn (fallback deadline branch)",
+      "window_400_observed": true,
+      "ledger_marker": null,
+      "verdict": "PROVEN_PRODUCTION_DEFECT",
+      "reason": "Same query family as site 2; fallback+deadline branch."
+    },
+    {
+      "n": 6,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2287,
+      "fn": "Core.prefetch",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "v3_prefetch tool argument (agent-authored)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": null,
+      "max_prod_tokens": null,
+      "recent_calls": "NOT_AVAILABLE (not instrumented)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "QUERY_NEEDS_CAP",
+      "reason": "Tool path, no cap. Tool queries are agent-authored and observed short in practice, but nothing in code bounds them; same missing-cap root cause as sites 2-5."
+    },
+    {
+      "n": 7,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2290,
+      "fn": "Core.prefetch",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "v3_prefetch tool argument (deadline branch)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": null,
+      "max_prod_tokens": null,
+      "recent_calls": "NOT_AVAILABLE (not instrumented)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "QUERY_NEEDS_CAP",
+      "reason": "Same as site 6; deadline branch."
+    },
+    {
+      "n": 8,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2388,
+      "fn": "Core.prefetch",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "v3_prefetch tool argument (legacy fallback, deadline branch)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": null,
+      "max_prod_tokens": null,
+      "recent_calls": "NOT_AVAILABLE (not instrumented)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "QUERY_NEEDS_CAP",
+      "reason": "Same as site 6; legacy fallback branch."
+    },
+    {
+      "n": 9,
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2392,
+      "fn": "Core.prefetch",
+      "api": "call_embedding",
+      "expr": "query",
+      "input_type": "query",
+      "producer": "v3_prefetch tool argument (legacy fallback)",
+      "upstream_bound": false,
+      "existing_slice_chunk": null,
+      "max_prod_chars": null,
+      "max_prod_tokens": null,
+      "recent_calls": "NOT_AVAILABLE (not instrumented)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "QUERY_NEEDS_CAP",
+      "reason": "Same as site 6; legacy fallback branch."
+    },
+    {
+      "n": 10,
+      "file": "src/v3-core/src/v3core/embed_failures.py",
+      "line": 477,
+      "fn": "embed_for_write",
+      "api": "call_embedding",
+      "expr": "text",
+      "input_type": "derived_text",
+      "producer": "shared write seam — every durable-write caller",
+      "upstream_bound": true,
+      "existing_slice_chunk": "depends on caller",
+      "max_prod_chars": null,
+      "max_prod_tokens": null,
+      "recent_calls": "all durable embedding writes",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_UPSTREAM_BOUNDED",
+      "reason": "Pure seam: no independent input of its own. Every production caller passes either a canonical slice (topics <=1000 chars, conversation_stream [:2000], yin <=2000), a planner-approved short text (<=7680 tok), a chunk, or a constant. Classification is inherited from the caller rows in this table; the seam adds no new exposure."
+    },
+    {
+      "n": 11,
+      "file": "src/v3-core/src/v3core/embed_topics.py",
+      "line": 62,
+      "fn": "embed_topics.main -> embed_for_write",
+      "api": "embed_for_write",
+      "expr": "text = build_topic_text(t) (summary + keywords + title)",
+      "input_type": "derived_text",
+      "producer": "legacy SQLite v3_topic.db topic_blocks",
+      "upstream_bound": false,
+      "existing_slice_chunk": "none in builder",
+      "max_prod_chars": 774,
+      "max_prod_tokens": 260,
+      "recent_calls": "legacy manual CLI; not on the live path",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_DOMAIN_BOUNDED",
+      "reason": "No slice, but the domain is bounded: all 677 topic_blocks rows produce <=774 chars = 260 tokens (p95 << that). 0 rows over 1000 chars, 0 over 7680. 34x margin to the window."
+    },
+    {
+      "n": 12,
+      "file": "src/v3-core/src/v3core/first_run.py",
+      "line": 1358,
+      "fn": "first_run._maybe_embed -> embed_batch",
+      "api": "embed_batch",
+      "expr": "[text] (ActiveMemoryWriter canonical card text)",
+      "input_type": "source_truth",
+      "producer": "seed import / explicit-memory write",
+      "upstream_bound": true,
+      "existing_slice_chunk": "card content contract (100-300 chars)",
+      "max_prod_chars": 0,
+      "max_prod_tokens": 0,
+      "recent_calls": "0 (public.explicit_memories is empty in production)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_DOMAIN_BOUNDED",
+      "reason": "Card text is contract-bounded (v3_store/v3_add schema: content 100-300 chars) and the table holds 0 production rows, so there is no production input at all. Not a defect; a hard cap here would be cosmetic. Note: if a future seed import bypasses the tool schema and writes long content, this becomes QUERY-free source exposure — revisit then."
+    },
+    {
+      "n": 13,
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 392,
+      "fn": "_repair_plain_row -> embed_for_write",
+      "api": "embed_for_write",
+      "expr": "txt = _row_text(table, row)",
+      "input_type": "derived_text",
+      "producer": "operator backfill over conversation_stream / topics / yin_paragraphs",
+      "upstream_bound": true,
+      "existing_slice_chunk": "yes, per table",
+      "max_prod_chars": 2000,
+      "max_prod_tokens": 669,
+      "recent_calls": "operator-only (this session: 0 on this branch)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_UPSTREAM_BOUNDED",
+      "reason": "Explicit per-table canonical slice: conversation_stream content[:2000] (=669 tok), topics canonical [:1000] (=336 tok), yin per-writer slice <=2000 (=669 tok). Measured max after slice = 669 tok, 11x margin. observation_notes/qa_pairs never reach this function (they have dedicated chunked paths)."
+    },
+    {
+      "n": 14,
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 453,
+      "fn": "_repair_qa_row -> embed_batch",
+      "api": "embed_batch",
+      "expr": "[short_text]",
+      "input_type": "derived_text",
+      "producer": "qa planner (short branch only)",
+      "upstream_bound": true,
+      "existing_slice_chunk": "planner gate (<=7680 tok)",
+      "max_prod_chars": null,
+      "max_prod_tokens": 7680,
+      "recent_calls": "operator-only",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_UPSTREAM_BOUNDED",
+      "reason": "Reached only when the qa planner classifies the row as short; long rows take the chunked branch."
+    },
+    {
+      "n": 15,
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 561,
+      "fn": "_repair_observation_row -> embed_batch",
+      "api": "embed_batch",
+      "expr": "[plan.embed_text]",
+      "input_type": "derived_text",
+      "producer": "observation planner (short branch only)",
+      "upstream_bound": true,
+      "existing_slice_chunk": "planner gate (<=7680 tok)",
+      "max_prod_chars": null,
+      "max_prod_tokens": 7680,
+      "recent_calls": "operator-only",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_UPSTREAM_BOUNDED",
+      "reason": "Reached only when the observation planner classifies the row as short; long rows take the v1-long-observation chunked branch."
+    },
+    {
+      "n": 16,
+      "file": "src/v3-core/src/v3core/tools/health.py",
+      "line": 412,
+      "fn": "health check -> call_embedding",
+      "api": "call_embedding",
+      "expr": "\"health check\" (constant)",
+      "input_type": "constant",
+      "producer": "hard-coded literal",
+      "upstream_bound": true,
+      "existing_slice_chunk": "constant",
+      "max_prod_chars": 12,
+      "max_prod_tokens": 4,
+      "recent_calls": "health probes only",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_DOMAIN_BOUNDED",
+      "reason": "Literal constant, cannot vary."
+    },
+    {
+      "n": 17,
+      "file": "src/v3-core/src/v3core/tools/topic_edit.py",
+      "line": 123,
+      "fn": "topic_edit -> embed_for_write",
+      "api": "embed_for_write",
+      "expr": "vec_text = f'{new_content} {summary} {body}'[:1000]",
+      "input_type": "derived_text",
+      "producer": "v3_topic_correct tool (user/agent edit)",
+      "upstream_bound": true,
+      "existing_slice_chunk": "explicit [:1000]",
+      "max_prod_chars": 1000,
+      "max_prod_tokens": 336,
+      "recent_calls": "NOT_AVAILABLE (not instrumented)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_DOMAIN_BOUNDED",
+      "reason": "Explicit [:1000] slice at the call site; 336 tok max = 23x margin."
+    },
+    {
+      "n": 18,
+      "file": "src/v3-core/src/v3core/topic_refine.py",
+      "line": 736,
+      "fn": "card_sync -> embed_for_write",
+      "api": "embed_for_write",
+      "expr": "text = f'{title}. {summary}'.strip()[:1000]",
+      "input_type": "derived_text",
+      "producer": "topic refine / card sync job",
+      "upstream_bound": true,
+      "existing_slice_chunk": "explicit [:1000]",
+      "max_prod_chars": 1000,
+      "max_prod_tokens": 336,
+      "recent_calls": "NOT_AVAILABLE (not instrumented)",
+      "window_400_observed": false,
+      "ledger_marker": null,
+      "verdict": "SAFE_DOMAIN_BOUNDED",
+      "reason": "Explicit [:1000] slice at the call site; 336 tok max = 23x margin."
+    }
+  ],
+  "additional_findings": [
+    {
+      "id": "F1",
+      "title": "QUERY_PATH_CAN_EXCEED_EMBEDDING_WINDOW_AND_DEGRADES_SILENTLY",
+      "risk": "P2",
+      "scope": "sites 2,3,4,5 (Core.prefetch_to_context_block) — the production memory-injection path",
+      "evidence": {
+        "query_origin": "turn_context.py:770 `_query = original_user_message` -> memory_manager.prefetch_all(_query) -> provider.prefetch -> Core.build_memory_context(query)",
+        "production_distribution_all_user_rows": {
+          "rows": 1249,
+          "p50_tok": 40,
+          "p90_tok": 2778,
+          "p99_tok": 5167,
+          "max_tok": 9134,
+          "over_7680": 1,
+          "rate_pct": 0.08,
+          "over_ids": [
+            9470
+          ]
+        },
+        "provider_probe": "9001 tok -> HTTP 400 code=20015 (deterministic, no retry)",
+        "code_behaviour": "except Exception: logger.debug(...) -> q_emb=None -> keyword-only lane for that turn",
+        "log_evidence": "0 occurrences of EMBEDDING_BAD_REQUEST in production logs — BUT the recall path logs at debug level, so absence of a log line is NOT evidence of absence"
+      },
+      "why_not_p1": "deterministic but 0.08% of turns and it degrades (keyword lane still serves) rather than losing or corrupting data; no data loss, no source mutation.",
+      "proposed_fix_design": {
+        "principle": "A query is a retrieval expression, not source truth -> explicit token cap + safe truncation. NOT chunked query, NOT multi-vector query.",
+        "seam": "new `call_embedding_for_query(query, embed_cfg, **kw)` in embedding.py: applies a token-safe cap then delegates to call_embedding; source/chunk call sites keep using call_embedding unchanged (so source text can never be silently truncated).",
+        "cap": "safe_tokens = max_input_tokens - chunk_safety_margin = 7680, resolved from embed config (no hard-coded model constant).",
+        "truncation_strategy": "head+tail keep (default 60/40) so a pasted document followed by the actual question keeps both; deterministic, no LLM involvement; returns metadata (original_tokens, kept_tokens, strategy) for observability.",
+        "observability": "log at INFO when a query is capped (rate-limited), so silent degradation becomes visible.",
+        "rollout": "DESIGNED_AND_TESTED_ONLY — per task instruction the cap is not shipped this round."
+      },
+      "status": "RECORDED_ONLY (P2 backlog)"
+    },
+    {
+      "id": "F2",
+      "title": "SEARCH_CARDS_EMBED_CACHE_INVERTED_CONDITION",
+      "risk": "P2",
+      "scope": "site 1 (Core.search_cards, __init__.py:1979)",
+      "evidence": {
+        "code": "if embed_cfg is not None and query in _EMBED_CACHE: q_emb = call_embedding(query, ...)",
+        "meaning": "the query embedding is computed only when the query is ALREADY cached, so a cold v3_search call never gets a query vector",
+        "corroboration": "__init__.py:2474 carries the comment '优化: 去掉 query in _EMBED_CACHE 前置条件' — the same inverted guard was already removed on the prefetch path but not here",
+        "impact": "v3_search (agent-facing manual search) runs keyword/RRF only; the production injection path is NOT affected"
+      },
+      "note": "Not an embedding-window defect. Recorded here because it was found while auditing this call site; no code changed this round.",
+      "status": "RECORDED_ONLY (P2 backlog)"
+    }
+  ],
+  "risk_ladder": {
+    "P1": [],
+    "P2": [
+      "F1 QUERY_PATH_CAN_EXCEED_EMBEDDING_WINDOW_AND_DEGRADES_SILENTLY",
+      "F2 SEARCH_CARDS_EMBED_CACHE_INVERTED_CONDITION"
+    ],
+    "P3": []
+  },
+  "conclusion": {
+    "new_p1_found": false,
+    "code_changed_this_round": false,
+    "why_no_code_change": "Task rule: if there is no P1, do not change code just to make the audit look productive. Both findings are P2 and are recorded with a fix design instead.",
+    "unknown_remaining": 0
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "tables": {
+    "conversation_stream": {
+      "rows": 14027,
+      "null_embedding": 0,
+      "null_with_nonempty_text": 0,
+      "has_embedding": 14027,
+      "dims": [
+        1024
+      ]
+    },
+    "qa_pairs": {
+      "rows": 14035,
+      "null_embedding": 0,
+      "null_with_nonempty_text": 0,
+      "has_embedding": 14035,
+      "dims": [
+        1024
+      ],
+      "embed_model_split": [
+        [
+          "bf32771ecbd1",
+          14035
+        ]
+      ]
+    },
+    "topics": {
+      "rows": 347,
+      "null_embedding": 0,
+      "null_with_nonempty_text": 0,
+      "has_embedding": 347,
+      "dims": [
+        1024
+      ],
+      "embed_model_split": [
+        [
+          "bf32771ecbd1",
+          347
+        ]
+      ]
+    },
+    "yin_paragraphs": {
+      "rows": 1303,
+      "null_embedding": 0,
+      "null_with_nonempty_text": 0,
+      "has_embedding": 1303,
+      "dims": [
+        1024
+      ],
+      "embed_model_split": [
+        [
+          "bf32771ecbd1",
+          1303
+        ]
+      ]
+    },
+    "observation_notes": {
+      "rows": 782,
+      "null_embedding": 0,
+      "null_with_nonempty_text": 0,
+      "has_embedding": 782,
+      "dims": [
+        1024
+      ],
+      "embed_model_split": [
+        [
+          "bf32771ecbd1",
+          782
+        ]
+      ]
+    }
+  },
+  "sidecars": {
+    "qa_embedding_chunks": {
+      "rows": 263,
+      "distinct_parents": 93,
+      "null_embedding": 0,
+      "non_1024_dims": 0
+    },
+    "observation_embedding_chunks": {
+      "rows": 12,
+      "distinct_parents": 6,
+      "null_embedding": 0,
+      "non_1024_dims": 0
+    }
+  },
+  "failure_ledger": {
+    "rows": 0,
+    "unresolved": 0,
+    "split": []
+  },
+  "unresolved_by_table": {},
+  "forward_writer_12h": {
+    "conversation_stream": {
+      "rows_12h": 192,
+      "null_12h": 0
+    },
+    "qa_pairs": {
+      "rows_12h": 21,
+      "null_12h": 0
+    },
+    "observation_notes": {
+      "rows_12h": 5,
+      "null_12h": 0
+    },
+    "yin_paragraphs": {
+      "rows_12h": 6,
+      "null_12h": 0
+    }
+  },
+  "unexplained_nonempty_null": {
+    "conversation_stream": 0,
+    "qa_pairs": 0,
+    "topics": 0,
+    "yin_paragraphs": 0,
+    "observation_notes": 0
+  },
+  "UNEXPLAINED_NONEMPTY_EMBEDDING_NULL": 0
+}

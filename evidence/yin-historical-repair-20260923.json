@@ -1,0 +1,116 @@
+{
+  "phase": "B2",
+  "table": "yin_paragraphs",
+  "status": "YIN_HISTORICAL_EMBEDDING_REPAIR = COMPLETE",
+  "writer_classification_stable": true,
+  "classification": {
+    "1251": "yin_pool",
+    "1252": "yin_pool",
+    "1256": "yin_pool",
+    "1257": "yin_pool",
+    "1263": "yin_pool",
+    "1268": "yin_pool",
+    "1276": "yin_pool"
+  },
+  "canonical_contract": {
+    "e1": "content[:2000]",
+    "yin_pool": "f'{section}. {content[:1500]}'"
+  },
+  "rows": 7,
+  "repaired": [
+    1251,
+    1252,
+    1256,
+    1257,
+    1263,
+    1268,
+    1276
+  ],
+  "all_verdicts": [
+    {
+      "id": 1251,
+      "verdict": "REPAIRED",
+      "writer_kind": "yin_pool",
+      "canonical_source": "f'{section}. {content[:1500]}'",
+      "canonical_chars": 798,
+      "canonical_cosine_recomputed": 1.0,
+      "recall_hit": true,
+      "dim": 1024,
+      "fingerprint_ok": true,
+      "ledger_unresolved": 0
+    },
+    {
+      "id": 1252,
+      "verdict": "REPAIRED",
+      "writer_kind": "yin_pool",
+      "canonical_source": "f'{section}. {content[:1500]}'",
+      "canonical_chars": 917,
+      "canonical_cosine_recomputed": 0.999924,
+      "recall_hit": true,
+      "dim": 1024,
+      "fingerprint_ok": true,
+      "ledger_unresolved": 0
+    },
+    {
+      "id": 1256,
+      "verdict": "REPAIRED",
+      "writer_kind": "yin_pool",
+      "canonical_source": "f'{section}. {content[:1500]}'",
+      "canonical_chars": 669,
+      "canonical_cosine_recomputed": 0.999935,
+      "recall_hit": true,
+      "dim": 1024,
+      "fingerprint_ok": true,
+      "ledger_unresolved": 0
+    },
+    {
+      "id": 1257,
+      "verdict": "REPAIRED",
+      "writer_kind": "yin_pool",
+      "canonical_source": "f'{section}. {content[:1500]}'",
+      "canonical_chars": 621,
+      "canonical_cosine_recomputed": 1.0,
+      "recall_hit": true,
+      "dim": 1024,
+      "fingerprint_ok": true,
+      "ledger_unresolved": 0
+    },
+    {
+      "id": 1263,
+      "verdict": "REPAIRED",
+      "writer_kind": "yin_pool",
+      "canonical_source": "f'{section}. {content[:1500]}'",
+      "canonical_chars": 551,
+      "canonical_cosine_recomputed": 1.0,
+      "recall_hit": true,
+      "dim": 1024,
+      "fingerprint_ok": true,
+      "ledger_unresolved": 0
+    },
+    {
+      "id": 1268,
+      "verdict": "REPAIRED",
+      "writer_kind": "yin_pool",
+      "canonical_source": "f'{section}. {content[:1500]}'",
+      "canonical_chars": 957,
+      "canonical_cosine_recomputed": 0.999907,
+      "recall_hit": true,
+      "dim": 1024,
+      "fingerprint_ok": true,
+      "ledger_unresolved": 0
+    },
+    {
+      "id": 1276,
+      "verdict": "REPAIRED",
+      "writer_kind": "yin_pool",
+      "canonical_source": "f'{section}. {content[:1500]}'",
+      "canonical_chars": 1267,
+      "canonical_cosine_recomputed": 1.0,
+      "recall_hit": true,
+      "dim": 1024,
+      "fingerprint_ok": true,
+      "ledger_unresolved": 0
+    }
+  ],
+  "source_unchanged_all": true
+}
