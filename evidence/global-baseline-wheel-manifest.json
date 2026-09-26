@@ -1,9 +1,9 @@
 {
   "artifact_status": "GLOBAL_BASELINE_CANDIDATE",
   "branch": "integration/global-baseline-v1",
-  "integration_head": "bb2446df8df7fbc4c5e00bda5289cf9e7c678470",
+  "integration_head": "0df23809bbfafac9d33eda6785883b99e0b99d31",
   "product_code_head": "86dd126d0b9496c3218d3bb25d3fcc62d6b98b89",
-  "documentation_head": "bb2446df8df7fbc4c5e00bda5289cf9e7c678470",
+  "documentation_head": "0df23809bbfafac9d33eda6785883b99e0b99d31",
   "product_blobs_unchanged_after": "86dd126d0b9496c3218d3bb25d3fcc62d6b98b89",
   "worktree_clean_at_build": true,
   "wheel_filename": "v3_core-4.0.0-py3-none-any.whl",
