@@ -7,6 +7,35 @@
 
 ---
 
+## [Unreleased] — integration baseline (not a release)
+
+> **Scope of this entry:** the current tree is the unified development baseline
+> (`integration/global-baseline-v1`, product-code HEAD `86dd126`). It is **not
+> deployed and not released**: the last published entry remains `0.1-alpha`
+> below. The packaged version string stays `4.0.0`.
+
+### Added
+
+- Runtime integrity / deployment identity surface: `hippocampus doctor --runtime
+  --wheel <whl>` (content fingerprints of the live process environment),
+  `install --plan`, `uninstall --plan`, plus the read-only `reliability`
+  diagnose/repair command group. See `docs/RUNTIME-INTEGRITY.md` and
+  `docs/reliability/`.
+
+### Changed
+
+- `README.md` install walkthrough now documents the runtime-integrity step that
+  the packaged code implements.
+- `README.md` bootstrap row and `docs/INSTALL.md` `doctor --static` contract now
+  state the actual packaged SQL set: five artifacts, three bootstrap include
+  markers, and a nine-table bootstrap schema (six core tables plus
+  `explicit_memories` and the two derived-index sidecars).
+
+### Documentation
+
+- `docs/GLOBAL-BASELINE.md` — the single capability matrix for this baseline
+  (what is included, what is deliberately not, with evidence and known limits).
+
 ## [0.1-alpha] — First Public Technical Preview
 
 > **Scope of this entry:** Hippocampus v0.1-alpha is the first public

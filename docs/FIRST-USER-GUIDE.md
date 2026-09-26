@@ -63,7 +63,7 @@ separate sub-step; it is not an eighth verdict topic.
 | 1 | install | Python / uv / Docker / existing install | `PASS` with versions |
 | 2 | database | starts or reuses a `pgvector/pgvector:pg17` container on a local port (default `55432`), verifies `CREATE EXTENSION vector` | `PASS pgvector 0.8.x` or the version your image ships |
 | 3 | config | writes the profile config with an absolute `basePath`, the database block, and the provider blocks | `PASS` + the config path |
-| 4 | bootstrap | applies the packaged SQL (canonical tables plus the recall-index sidecar) — idempotent | `PASS`, and a second run changes nothing |
+| 4 | bootstrap | applies the packaged SQL (canonical tables plus the two derived-index sidecars: `qa_embedding_chunks`, `observation_embedding_chunks`) — idempotent | `PASS`, and a second run changes nothing |
 | 5 | Hermes wiring | installs the provider into the Hermes environment and sets `memory.provider: deep_memory_v3`, with a backup of the old config | `PASS` + backup path |
 | 6 | doctor | read-only checks + real probes | `PASS` (see §7 for the full check list) |
 | 7 | end-to-end smoke | writes one real memory, reads it back, and recalls it | `PASS recall_hit=true` (keyword fallback is allowed in this install smoke) |
