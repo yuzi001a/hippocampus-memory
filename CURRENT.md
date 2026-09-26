@@ -34,9 +34,12 @@ commit messages):
 are evidence + `CURRENT.md`). Proven by `merge-base --is-ancestor`; the two tips are byte-identical
 on all 14 architecture-critical product files.
 
-Merged code was not judged by commit message: `distribution_cli.py` was the single shared file and
-both sides' semantics were verified present after the merge (sidecar splice/migration markers plus
-the `install --plan` / `uninstall --plan` / `reliability` / runtime-integrity subcommands).
+Merge footprint, measured: 45 files, 14839 insertions, 1 deletion. The only **modified** (non-new)
+files are `src/v3-core/src/v3core/distribution_cli.py` (product; disjoint hunks — the sidecar
+splice/migration markers and the new `install --plan` / `uninstall --plan` / `reliability` /
+runtime-integrity subcommands are all present after the merge) and `README.md` (docs; adds the
+`hippocampus doctor --runtime --wheel …` step that the merged code implements). Merged code was
+not judged by commit message.
 
 Validation (isolated venvs, Python 3.11.15, editable installs, no production contact):
 

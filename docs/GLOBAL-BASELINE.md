@@ -12,6 +12,9 @@ merged              origin/feature/runtime-integrity @ a007d72
 product blobs unchanged after 86dd126 (only CURRENT.md / README / docs / evidence follow)
 ```
 
+Merge footprint: 45 files, 14839 insertions, 1 deletion; the only modified (non-new) files are
+`src/v3-core/src/v3core/distribution_cli.py` (product) and `README.md` (docs).
+
 ## Included capabilities
 
 | Capability | Source | Verification evidence | User-visible effect | Known limits |
