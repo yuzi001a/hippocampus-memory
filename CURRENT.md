@@ -1,3 +1,92 @@
+# Hippocampus — global development baseline (A01)
+
+Status: `A01 = DONE` / `A02 = DOING` (see the A02 section at the end)
+
+## A01 — one integration baseline for all follow-on work
+
+```text
+branch                 integration/global-baseline-v1
+integration HEAD       <filled by the evidence script>
+product-code HEAD      <filled by the evidence script>
+documentation HEAD     <filled by the evidence script>
+base                   origin/feature/embedding-reliability-recovery (8d7a32f)
+merged                 origin/feature/runtime-integrity (a007d72)
+conflicts              none (git auto-merged distribution_cli.py; both sides verified present)
+```
+
+Inclusion matrix (proven by `merge-base` / `merge-base --is-ancestor` / blob comparison, not by
+commit messages):
+
+| Capability | Verdict | Evidence |
+| --- | --- | --- |
+| A. v0.2.1 public baseline | `ALREADY_INCLUDED` | `origin/main` (`0bd9e1e`) is an ancestor of the base |
+| B. P0 generated-context boundary | `ALREADY_INCLUDED` | `hotfix/e1-generated-context-boundary` (`7808b89`) is an ancestor of the base |
+| C. embedding reliability (policies, ledger, D1–D5, canonical representations) | `ALREADY_INCLUDED` | `integration/p0-embedding-reliability` (`22606e4`) and `fix/embedding-backfill-operator` (`9c4d191`) are ancestors |
+| D. long QA | `ALREADY_INCLUDED` | `qa_embedding_chunks.sql` + canonical planner + child→parent recall present on the base |
+| E. Long Observation | `ALREADY_INCLUDED` | `feature/long-observation-index-v1` (`425c42f`) is an ancestor of the base |
+| F. runtime integrity / deployment identity | `NEEDS_INTEGRATION` → merged | was a separate line off `main`; only shared file `distribution_cli.py`, disjoint hunks |
+| G. installer / upgrade / doctor / migration required by C–E | `ALREADY_INCLUDED` | `distribution_cli` splices `qa_embedding_chunks.sql` + `observation_embedding_chunks.sql`; `upgrade_v0_2.sql` carries the additive DDL |
+| installer-execution v2 (defects A1–A9) | `NOT_RELEASE_READY` | separate line, defects unfixed; not carried in |
+| Recall V2 (g6a/g6b/g6c) | `NOT_RELEVANT_TO_THIS_RELEASE` | separate contract/evaluator line |
+
+`feature/long-observation-index-v1` relative to `feature/embedding-reliability-recovery`: it is an
+**ancestor** (the recovery branch was cut from the long-observation tip, and its only later commits
+are evidence + `CURRENT.md`). Proven by `merge-base --is-ancestor`; the two tips are byte-identical
+on all 14 architecture-critical product files.
+
+Merged code was not judged by commit message: `distribution_cli.py` was the single shared file and
+both sides' semantics were verified present after the merge (sidecar splice/migration markers plus
+the `install --plan` / `uninstall --plan` / `reliability` / runtime-integrity subcommands).
+
+Validation (isolated venvs, Python 3.11.15, editable installs, no production contact):
+
+```text
+candidate full suite    1123 passed   6 failed   7 skipped   (575.8s)
+baseline  full suite     852 passed   4 failed   5 skipped   (445.9s)
+candidate vs baseline   collected 1136 vs 861 (the merged line adds 275 tests)
+inherited failures      3  test_importers_contract hermes state.db fixture
+                           (identical failures on both trees when run in isolation:
+                            3 failed / 18 passed / 1 skipped each)
+environment-dependent   3  test_reliability_cli --help smoke, hardcoded
+                           REPO_ROOT/.venv/Scripts/python.exe; with that assumption
+                           satisfied locally the file is 29 passed
+NEW_REGRESSION          0
+```
+
+`REAL_Y400_FULL_DIFFERENTIAL = NOT_AVAILABLE` (not applicable to A01; A03 owns the real canary).
+
+Artifact:
+
+```text
+artifacts/HIPPOCAMPUS_GLOBAL_BASELINE_CANDIDATE/v3_core-4.0.0-py3-none-any.whl
+wheel SHA256           <filled by the evidence script>
+members                <filled by the evidence script>
+SOURCE_WHEEL_PRODUCT_DRIFT = 0
+wheel smoke (fresh isolated venv): import identity / P0 validator / forward embedding policy
+constants / failure ledger / backfill CLI --help / long-QA planner / Long Observation planner /
+child→parent merge / doctor schema-artifact discovery
+```
+
+Documentation drift fixed this round (facts only, no history rewrite):
+
+- `README.md` — bootstrap schema table count corrected `7` → `9` (six core tables plus
+  `explicit_memories` and the two derived-index sidecars). Code truth: `alpha_bootstrap.sql`
+  (6 tables) + three resolved includes.
+- `docs/INSTALL.md` — `doctor --static` `packaged_sql` set corrected: **five** artifacts (adds
+  `observation_embedding_chunks.sql`) and **three** `include_markers` (adds
+  `schema/observation_embedding_chunks.sql`). Code truth: `distribution_cli.py` artifact tuple.
+- `docs/GLOBAL-BASELINE.md` — new: the single capability matrix (included / not included, with
+  evidence and known limits).
+- `CURRENT.md` — this section; and the drain accounting above restated precisely
+  (1072 = 20 + 1052) instead of quoting only the ledgered subtotal.
+
+Production was not touched: no wheel install, no gateway/serve restart, no schema mutation, no
+backfill. Read-only identity check only: the live `v3core` matches the baseline for all 103
+installed `.py` files once CRLF/LF is normalised (103/103), and lacks only the two packages this
+merge adds (`runtime_integrity`, `reliability`).
+
+## A02 — DOING (see the A02 section appended by the A02 round)
+
 # Hippocampus — embedding reliability recovery
 
 Status: `DECISION_REQUIRED`
@@ -72,10 +161,13 @@ re-embedding the canonical text reproduces the stored vector at cosine >= 0.9999
 
 B3 — serial provider usage only (shipped CLI loops serially); no concurrency, no 429, no
 timeout, 0 retryable / 0 permanent failures. Throughput 52–54 rows/min (≈1.1 s per call).
-Source integrity was checked on EVERY row in each batch (not a sample): 1052/1052 hashes
-unchanged. `conversation_stream` has no `embed_model` column, so the fingerprint was proven
-by re-embedding the canonical slice (`content[:2000]`) and comparing: cosine >= 0.9999 on
-every sampled row in every batch.
+Drain accounting, stated precisely: 1072 rows total = 20 repaired by the first CLI run
+(which had no per-row ledger entry; covered by the final census and the global recall
+smoke) + 1052 repaired across the four checkpointed batches
+(A=20 / B=100 / C=300 / D=632). Source integrity was verified per row for those 1052
+ledgered rows: 1052/1052 hashes unchanged (not a sample). `conversation_stream` has no
+`embed_model` column, so the fingerprint was proven by re-embedding the canonical slice
+(`content[:2000]`) and comparing: cosine >= 0.9999 on every sampled row in every batch.
 
 ### Final whole-DB state
 

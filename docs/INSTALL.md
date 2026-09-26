@@ -210,12 +210,14 @@ hippocampus doctor --static
 ```
 
 Expected: a single JSON object on stdout with `command: doctor`,
-`static: true`, and `checks.packaged_sql` listing **all four** packaged
+`static: true`, and `checks.packaged_sql` listing **all five** packaged
 SQL artifacts — `alpha_bootstrap.sql`, `explicit_memories.sql`,
-`qa_embedding_chunks.sql`, `upgrade_v0_2.sql` — each with its `sha256`,
+`qa_embedding_chunks.sql`, `observation_embedding_chunks.sql`,
+`upgrade_v0_2.sql` — each with its `sha256`,
 plus `include_markers` listing every artifact the bootstrap step will
-splice into `alpha_bootstrap.sql` (`schema/explicit_memories.sql` and
-`schema/qa_embedding_chunks.sql`). The `--static` flag skips config
+splice into `alpha_bootstrap.sql` (`schema/explicit_memories.sql`,
+`schema/qa_embedding_chunks.sql` and
+`schema/observation_embedding_chunks.sql`). The `--static` flag skips config
 resolution so the command is safe in packaging / CI contexts. Without
 `--static`, doctor also resolves the active profile's config (read-only)
 and prints a secret-redacted summary.
