@@ -745,6 +745,53 @@ def call_embedding(
     )
 
 
+def call_query_embedding(
+    text: str,
+    embed_cfg: dict,
+    *,
+    cache: bool = True,
+    timeout: float | None = None,
+    retries: int | None = None,
+    policy: EmbedPolicy | None = None,
+    stats: dict | None = None,
+    tokenizer_override: Any = None,
+) -> list[float]:
+    """Query-only embedding entry: token-safe query representation, then the ordinary call.
+
+    Budget (``timeout`` / ``retries`` / ``policy``), cache and every failure semantic stay exactly
+    those of :func:`call_embedding` — this seam only decides which *text* is sent. Durable source
+    text must keep using :func:`call_embedding` plus the chunked index.
+
+    Observability is aggregate only: token counts, the truncated flag and the strategy. The query
+    text, the head and the tail are never logged.
+    """
+    from .embed_chunks import prepare_query_embedding_text
+
+    prepared = prepare_query_embedding_text(text, embed_cfg, tokenizer_override=tokenizer_override)
+    if stats is not None:
+        stats["query_original_tokens"] = prepared.original_tokens
+        stats["query_prepared_tokens"] = prepared.prepared_tokens
+        stats["query_truncated"] = prepared.truncated
+        stats["query_strategy"] = prepared.strategy
+    if prepared.truncated:
+        logger.info(
+            "query embedding representation: strategy=%s original_tokens=%d prepared_tokens=%d truncated=%s",
+            prepared.strategy,
+            prepared.original_tokens,
+            prepared.prepared_tokens,
+            prepared.truncated,
+        )
+    return call_embedding(
+        prepared.text,
+        embed_cfg,
+        cache=cache,
+        timeout=timeout,
+        retries=retries,
+        policy=policy,
+        stats=stats,
+    )
+
+
 def embed_batch(
     texts: list[str],
     embed_cfg: dict,

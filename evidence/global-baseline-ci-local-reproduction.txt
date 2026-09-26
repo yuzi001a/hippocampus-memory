@@ -1,5 +1,5 @@
 workflow: product-ci.yml (verbatim focused-test steps, hard-empty credential contract)
-PASS focused-tests-v3-core exit=0 ======================= 191 passed in 85.30s (0:01:25) ========================
-PASS focused-tests-g5b-evaluator exit=0 ============================= 102 passed in 2.41s =============================
-PASS focused-tests-v3-hermes-plugin exit=0 ============================= 12 passed in 0.72s ==============================
+PASS focused-tests-v3-core exit=0 ======================= 191 passed in 86.69s (0:01:26) ========================
+PASS focused-tests-g5b-evaluator exit=0 ============================= 102 passed in 2.36s =============================
+PASS focused-tests-v3-hermes-plugin exit=0 ============================= 12 passed in 0.76s ==============================
 REQUIRED_CI_LOCAL_REPRODUCTION = PASS (3 steps)

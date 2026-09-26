@@ -211,30 +211,85 @@ planner, sidecar schema, aggregation, recall merge, or observation historical ro
 - 743 recall = `FINAL_RECALL_POLICY_SUPPRESSED` (same-day 754, registered as the P2 debt above);
   759 head likewise suppressed by same-day 751.
 
-## A02 — query path (DOING)
+## A02 — query path (DONE)
 
-Scope of this round: reproduce the two P2 defects, map the call sites exactly, and pin them with RED
-tests. No fix, no deploy — the cap design is an explicit gate.
+Two P2 defects fixed on the A01 baseline. Production was not touched (A03 owns the canary).
+
+### P2-1 `SEARCH_CARDS_EMBED_CACHE_INVERTED_CONDITION`
+
+`V3Core.search_cards` no longer pre-checks `query in _EMBED_CACHE`. It attempts the query embedding
+on the first call and lets the cache (`cache=True`) do the reuse, so a cold query reaches the
+semantic lane. Failure keeps this public path's existing degradation — `ValueError` and
+`PrefetchDeadlineExceeded` re-raise, anything else degrades to `q_emb=None` + debug log — the same
+policy the prefetch path already followed.
+
+### P2-2 `QUERY_NEEDS_CAP` — one query-only seam
 
 ```text
-RED-1  tests/test_a02_query_path_red.py::test_red1_search_cards_cold_query_must_attempt_query_embedding
-       现状复现: V3Core.search_cards computes the query embedding only when the query is already
-       in _EMBED_CACHE (__init__.py:1979). A cold query reaches recall_pool with q_emb=None ->
-       the semantic lane is lost. Captured call list is empty.
-
-RED-2  tests/test_a02_query_path_red.py::test_red2_no_query_bearing_call_site_passes_the_raw_query
-       现状复现: 9 query-bearing call sites hand the raw `query` to the provider —
-       __init__.py lines 1980 (search_cards), 2287 / 2290 / 2388 / 2392 (prefetch),
-       2500 / 2503 / 2769 / 2772 (prefetch_to_context_block). The provider window is 8192 tokens
-       (HTTP 400 code=20015 at 9001) and the longest real production query is 9134 tokens, so such
-       a query fails closed and the caller degrades to keyword-only recall.
-
-evidence/a02-query-path-call-site-map.json   full map (sites, enclosing functions, the 8 already
-                                             capped `query[:1000]` reference sites)
-a02 red run log                              2 failed (correct reasons), preserved in the round's
-                                             evidence directory
+v3core/embed_chunks.py   prepare_query_embedding_text()   representation only
+v3core/embedding.py      call_query_embedding()           representation + the ordinary call
 ```
 
-RED by design: on the baseline both tests fail because the defects are present. They turn green when
-the A02 fix lands; the fix must cap every listed site (cap size / head+tail policy is a design gate,
-never a chunked query).
+* `tokens <= safe_token_target(embed_cfg)` → the text is returned **byte-for-byte** (no strip, no
+  normalisation, no marker). Hard contract.
+* `tokens > target` → head ≈ 60% / tail ≈ 40% of the token budget, cut by tokenizer offsets, joined
+  with a single non-semantic separator (`"\n"`), original order preserved, the middle omitted, the
+  join re-counted; a deterministic 60/40 shrink repeats until it fits (never a provider 400 probe).
+* Token accounting reuses the shared planning helpers (`_get_token_counter`,
+  `_encode_field_offsets`, `safe_token_target`) — no second tokenizer, and `7680` is not hardcoded:
+  it comes from `max_input_tokens` (8192 default) minus the configured safety margin.
+* Budgets are untouched: each caller keeps its own `cache` / `timeout` / `retries` / `deadline`.
+* Observability is aggregate only: original tokens, prepared tokens, truncated flag, strategy,
+  provider/error class, elapsed — never the query text, the head or the tail.
+* Query-only: no source path (messages / conversation_stream / observation / QA / yin / topic /
+  explicit memory) can reach it; a test asserts those modules never reference it.
+
+### Coverage: old call site → seam
+
+```text
+1980 search_cards                    -> 1985 search_cards (guard removed + seam + degradation)
+2287 prefetch                        -> 2299 prefetch
+2290 prefetch                        -> 2302 prefetch
+2388 prefetch                        -> 2400 prefetch
+2392 prefetch                        -> 2404 prefetch
+2500 prefetch_to_context_block        -> 2512 prefetch_to_context_block
+2503 prefetch_to_context_block        -> 2515 prefetch_to_context_block
+2769 prefetch_to_context_block        -> 2781 prefetch_to_context_block
+2772 prefetch_to_context_block        -> 2784 prefetch_to_context_block
+
+9/9 covered; `call_embedding(` occurrences left in __init__.py = 0.
+Outside the core query path, every query-derived call is capped at 1000 chars by construction
+(recall_pool.py 3355/3358, topic_recall.py 467/475/664) — no query path can hand an over-window
+payload to the provider.
+```
+
+Evidence: `evidence/a02-query-seam-coverage.json`.
+
+### Verification
+
+```text
+RED -> GREEN (same tests, assertions unchanged)
+  tests/test_a02_query_path_red.py                2 passed   (were 2 failed)
+targeted behaviour                                 12 passed
+  cold query embeds / hot query 0 extra provider calls / target-1, target unchanged /
+  target+1 and 9001-token capped with both ends kept / original never mutated /
+  source paths never on the seam / failure degrades / ValueError re-raised
+affected query + embedding suites                 121 passed
+  embed_chunks_contract, observation_chunks_contract, embedding_write_reliability,
+  embedding_policy_guard, embedding_failure_resolution, prefetch_isolation_contract,
+  long_observation_writer_recall, qa_failure_accounting, backfill_cli_entrypoint
+required CI (local reproduction of product-ci.yml)
+  focused-tests-v3-core 191 passed / g5b 102 passed / v3-hermes-plugin 12 passed
+  import-smoke PASS, compileall PASS
+full suite (regression safety)                    1137 passed / 6 failed / 7 skipped (584.5s)
+  the 6 failures are the A01-known set: 3x test_importers_contract (hermes state.db fixture,
+  inherited) + 3x test_reliability_cli --help smoke (needs a repo-local .venv; 29 passed with it)
+  -> no newly introduced regression
+production                                          NOT TOUCHED
+```
+
+Q01 status: `READY_FOR_CANARY` — 16 frozen cases (`docs/Q01-QUERY-CANARY.md`,
+`src/v3-core/eval/q01_query_canary.py`); wording and expected behaviour frozen before execution, two
+off-topic cases carry a frozen response-level rubric for the A03 canary.
+
+B01 status: `READY` — `docs/B01-CORE-INTERFACE-INVENTORY.md` (inventory only; no adapter).

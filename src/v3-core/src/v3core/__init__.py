@@ -22,7 +22,7 @@ from .config import resolve_config, _resolve_prompt
 from .card_store import DeepStore
 from .pg_store import PgEmbedStore
 from .embedding import (
-    _EMBED_CACHE, call_embedding,
+    _EMBED_CACHE, call_embedding, call_query_embedding,
     build_embed_cfg, safe_embed_cfg,
     get_embed_fingerprint, get_embed_profile, EmbedProfile,
 )
@@ -1976,8 +1976,20 @@ class V3Core:
         cfg = self.config
         embed_cfg = safe_embed_cfg(cfg)
         q_emb = None
-        if embed_cfg is not None and query in _EMBED_CACHE:
-            q_emb = call_embedding(query, embed_cfg, cache=True)
+        # A02 / P2-1: no `query in _EMBED_CACHE` pre-check. A caller must not duplicate the cache's
+        # internal state — `cache=True` already reuses a hot query, and a cold query must reach the
+        # semantic lane on its first call (the contract the prefetch path already follows).
+        # Failure keeps this public path's existing degradation: q_emb=None, keyword lanes continue.
+        if embed_cfg is not None:
+            try:
+                q_emb = call_query_embedding(query, embed_cfg, cache=True)
+            except ValueError:
+                raise
+            except PrefetchDeadlineExceeded:
+                raise
+            except Exception as _qe:
+                logger.debug("search_cards: query embedding 失败, 走纯关键词: %s", str(_qe)[:80])
+                q_emb = None
         index = self.store.get_index()
         files_meta = index.get("files", {})
         card_index = {}
@@ -2284,10 +2296,10 @@ class V3Core:
             if embed_cfg is not None:
                 try:
                     if deadline is None:
-                        q_emb = call_embedding(query, embed_cfg, cache=True)
+                        q_emb = call_query_embedding(query, embed_cfg, cache=True)
                     else:
                         deadline.check(context="query embedding")
-                        q_emb = call_embedding(
+                        q_emb = call_query_embedding(
                             query,
                             embed_cfg,
                             cache=True,
@@ -2385,11 +2397,11 @@ class V3Core:
                 if deadline is not None:
                     deadline.check(context="core prefetch legacy fallback")
                     _legacy_timeout = max(0.001, min(3.0, deadline.remaining()))
-                    q_emb = call_embedding(query, embed_cfg, cache=True,
+                    q_emb = call_query_embedding(query, embed_cfg, cache=True,
                                            timeout=_legacy_timeout, retries=0)
                     deadline.check(context="core prefetch legacy fallback post-call")
                 else:
-                    q_emb = call_embedding(query, embed_cfg, cache=True)
+                    q_emb = call_query_embedding(query, embed_cfg, cache=True)
             index = self.store.get_index()
             return _prefetch(
                 query, limit, self.config, index.get("files", {}), self.pg, q_emb,
@@ -2497,10 +2509,10 @@ class V3Core:
                 try:
                     from .recall_pool import recall_pool
                     if deadline is None:
-                        q_emb = call_embedding(query, embed_cfg, cache=True, timeout=3, retries=0)
+                        q_emb = call_query_embedding(query, embed_cfg, cache=True, timeout=3, retries=0)
                     else:
                         deadline.check(context="context query embedding")
-                        q_emb = call_embedding(
+                        q_emb = call_query_embedding(
                             query,
                             embed_cfg,
                             cache=True,
@@ -2766,10 +2778,10 @@ class V3Core:
             q_emb = None
             if embed_cfg is not None:
                 if deadline is None:
-                    q_emb = call_embedding(query, embed_cfg, cache=True)
+                    q_emb = call_query_embedding(query, embed_cfg, cache=True)
                 else:
                     deadline.check(context="legacy context embedding")
-                    q_emb = call_embedding(
+                    q_emb = call_query_embedding(
                         query, embed_cfg,
                         cache=True,
                         timeout=max(0.001, min(3.0, deadline.remaining())),

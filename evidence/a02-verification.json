@@ -1,0 +1,78 @@
+{
+  "a02_verification": {
+    "head": "543ce5934a8a679750b70d983f0656e8b6121c0c",
+    "red_to_green": {
+      "file": "tests/test_a02_query_path_red.py",
+      "before": "2 failed (baseline)",
+      "after": "2 passed",
+      "assertions_changed": false
+    },
+    "behaviour_matrix": [
+      {
+        "case": "short query byte-identical",
+        "result": "PASS"
+      },
+      {
+        "case": "target-1 tokens unchanged",
+        "result": "PASS"
+      },
+      {
+        "case": "target tokens unchanged",
+        "result": "PASS"
+      },
+      {
+        "case": "target+1 tokens capped, both ends kept",
+        "result": "PASS"
+      },
+      {
+        "case": "9001-token query capped <=7680, head+tail kept, middle dropped, deterministic",
+        "result": "PASS"
+      },
+      {
+        "case": "original query never mutated",
+        "result": "PASS"
+      },
+      {
+        "case": "source paths never on the seam",
+        "result": "PASS"
+      },
+      {
+        "case": "cold long query -> 1 provider call, capped payload",
+        "result": "PASS"
+      },
+      {
+        "case": "hot repeat query -> 0 additional provider calls, same vector",
+        "result": "PASS"
+      },
+      {
+        "case": "short query cold then hot -> cache serves the repeat",
+        "result": "PASS"
+      },
+      {
+        "case": "search_cards hands q_emb to recall_pool on a cold query",
+        "result": "PASS"
+      },
+      {
+        "case": "provider failure -> no crash, q_emb=None, keyword path continues",
+        "result": "PASS"
+      },
+      {
+        "case": "ValueError from a bad embed config is re-raised",
+        "result": "PASS"
+      }
+    ],
+    "suites": {
+      "targeted_behaviour": "12 passed",
+      "affected_query_embedding": "121 passed",
+      "required_ci_local": "focused-tests-v3-core 191 / g5b 102 / v3-hermes-plugin 12 (PASS)",
+      "import_smoke": "PASS",
+      "compileall": "PASS",
+      "full_suite": "6 failed, 1137 passed, 7 skipped, 65 warnings in 584.54s (0:09:44)",
+      "full_suite_known_failures": [
+        "tests/test_importers_contract.py hermes state.db fixture (3, inherited since A01)",
+        "tests/test_reliability_cli.py --help smoke (3, requires a repo-local .venv; 29 passed with it)"
+      ]
+    },
+    "production": "NOT TOUCHED"
+  }
+}
