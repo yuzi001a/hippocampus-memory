@@ -2369,6 +2369,33 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument("--plugin-wheel", default=None,
                          help="Path to the v3-hermes-plugin wheel (or source directory) so the"
                               " installer can put the provider into the Hermes environment.")
+    install.add_argument(
+        "--plan",
+        action="store_true",
+        help=(
+            "PLAN ONLY: derive the actual loaded environment from live "
+            "processes, detect duplicate/shadowed copies, and print a "
+            "deterministic install/upgrade plan. Nothing is installed."
+        ),
+    )
+    install.add_argument(
+        "--wheel",
+        default=None,
+        help="Approved v3-core wheel for --plan (enables exact content comparison).",
+    )
+    install.add_argument("--tag", default=None, help="Release tag label for --wheel.")
+
+    uninst = sub.add_parser(
+        "uninstall",
+        help=(
+            "Uninstall planning: list the ACTIVE packages, duplicates, config, "
+            "database and source-data concerns. Execution is not implemented in "
+            "this round — --plan only."
+        ),
+    )
+    uninst.add_argument("--plan", action="store_true",
+                        help="Emit the uninstall plan (required; execution is not implemented).")
+    uninst.add_argument("--hermes-home", default=None)
 
     imp = sub.add_parser(
         "import",
@@ -2394,6 +2421,132 @@ def _build_parser() -> argparse.ArgumentParser:
     rb.add_argument("--no-resume", action="store_true")
     rb.add_argument("--profile-dir", default=None)
 
+    # --- reliability layer (feature/reliability-recovery-v1) -----------------
+    # Read-only subcommands. health / diagnose / repair all share the same
+    # flags for window sizing, production opt-in, and path-debug. ``repair``
+    # only runs as ``--dry-run``; ``--apply`` is provided so the help text
+    # can be explicit, but the handler always rejects it.
+
+    _reliability_common_args = (
+        ("--json", "json", "store_true",
+         "Emit the full HealthReport as deterministic JSON (sort_keys=True, "
+         "ensure_ascii=False). Default emits a one-line-per-section summary."),
+        ("--deep", "deep", "store_true",
+         "Run the deep provider auth probes (bounded HTTP, 10 s timeout each)."),
+        ("--allow-production-read", "allow_production_read", "store_true",
+         "Authorize SELECTs against the production boundary (port 5433 or "
+         "loopback/v3embeddings). Without this flag, storage / memory_write / "
+         "derived checks report skip and never lower the verdict."),
+        ("--profile-dir", "profile_dir", "store",
+         "Explicit profile directory to resolve the v3-core base path. "
+         "Defaults to v3core.config._resolve_data_dir() or "
+         "~/.v3-core/profiles/default."),
+        ("--window-hours", "window_hours", "store_int",
+         "Width of the 'recent' window for current-incident classification "
+         "(default 24)."),
+        ("--debug-paths", "debug_paths", "store_true",
+         "Include raw filesystem paths in path labels (off by default; "
+         "default output is a kind/leaf/hash12 triple)."),
+        ("--wheel", "wheel", "store",
+         "Approved release wheel path (optional). Enables exact content "
+         "comparison in the runtime-integrity checks (RT05-RT09 / "
+         "doctor --runtime)."),
+        ("--tag", "tag", "store",
+         "Release tag label for --wheel (e.g. v0.2.1)."),
+        ("--hermes-home", "hermes_home", "store",
+         "Hermes home directory used for runtime-integrity discovery "
+         "(defaults to HERMES_HOME or the platform convention)."),
+    )
+
+    health_p = sub.add_parser(
+        "health",
+        help=(
+            "Read-only Hippocampus health snapshot (DESIGN §4-§5). "
+            "Returns exit 0 healthy, 1 degraded, 2 unhealthy or hard-failure. "
+            "Production reads require --allow-production-read."
+        ),
+        description=(
+            "Read-only Hippocampus health snapshot (DESIGN §4-§5). "
+            "Returns exit 0 healthy, 1 degraded, 2 unhealthy or hard-failure. "
+            "Production reads require --allow-production-read."
+        ),
+    )
+    diagnose_p = sub.add_parser(
+        "diagnose",
+        help=(
+            "Read-only Hippocampus health classification (DESIGN §8). "
+            "Returns exit 0 when there are no active issues (info-only or "
+            "empty), 1 when there is at least one severity>=warning issue, "
+            "2 on hard failure. Production reads require "
+            "--allow-production-read."
+        ),
+        description=(
+            "Read-only Hippocampus health classification (DESIGN §8). "
+            "Returns exit 0 when there are no active issues (info-only or "
+            "empty), 1 when there is at least one severity>=warning issue, "
+            "2 on hard failure. Production reads require "
+            "--allow-production-read."
+        ),
+    )
+    repair_p = sub.add_parser(
+        "repair",
+        help=(
+            "Read-only dry-run repair plan (DESIGN §9). Returns exit 0 when "
+            "there are no candidate actions, 1 when at least one action is "
+            "planned, 2 on hard failure. --dry-run is the default; "
+            "--apply is NOT IMPLEMENTED IN v1 -- always refuses. "
+            "Production reads require --allow-production-read."
+        ),
+        description=(
+            "Read-only dry-run repair plan (DESIGN §9). Returns exit 0 when "
+            "there are no candidate actions, 1 when at least one action is "
+            "planned, 2 on hard failure. --dry-run is the default; "
+            "--apply is NOT IMPLEMENTED IN v1 -- always refuses. "
+            "Production reads require --allow-production-read."
+        ),
+    )
+
+    for flag, dest, action, help_text in _reliability_common_args:
+        kwargs = {"dest": dest, "help": help_text}
+        if action == "store_true":
+            kwargs["action"] = "store_true"
+            kwargs["default"] = False
+        elif action == "store_int":
+            kwargs["action"] = "store"
+            kwargs["type"] = int
+            kwargs["default"] = 24
+        elif action == "store":
+            kwargs["action"] = "store"
+            kwargs["type"] = str
+            kwargs["default"] = None
+        else:  # pragma: no cover - defensive
+            raise ValueError(f"unknown reliability arg action: {action!r}")
+        health_p.add_argument(flag, **kwargs)
+        diagnose_p.add_argument(flag, **kwargs)
+        repair_p.add_argument(flag, **kwargs)
+
+    # Repair-only knobs. ``--dry-run`` is the default; ``--apply`` is a
+    # documented trapdoor that the handler refuses with exit 2 + the
+    # REPAIR_APPLY_NOT_IMPLEMENTED error code.
+    repair_p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=True,
+        help="Default. Emit a deterministic dry-run plan; never write.",
+    )
+    repair_p.add_argument(
+        "--apply",
+        dest="apply",
+        action="store_true",
+        help=(
+            "NOT IMPLEMENTED IN v1 -- always refuses. The handler exits 2 "
+            "with REPAIR_APPLY_NOT_IMPLEMENTED_IN_V1 before any work. "
+            "Kept on the parser so the help text can document the "
+            "intentional absence."
+        ),
+    )
+
     doctor.add_argument(
         "--full",
         action="store_true",
@@ -2403,6 +2556,38 @@ def _build_parser() -> argparse.ArgumentParser:
         "--writes",
         action="store_true",
         help="With --full: allow the write probe (writes one row into the target DB).",
+    )
+    doctor.add_argument(
+        "--runtime",
+        action="store_true",
+        help=(
+            "Runtime integrity section: verify which v3core content the LIVE "
+            "Hermes processes actually load, against an approved Release "
+            "artifact (--wheel). Exit 0 healthy, 1 unverified/degraded, "
+            "2 integrity violation (shadow/mismatch/editable)."
+        ),
+    )
+    doctor.add_argument(
+        "--wheel",
+        default=None,
+        help="Path to the approved release wheel (enables exact content comparison).",
+    )
+    doctor.add_argument(
+        "--tag",
+        default=None,
+        help="Release tag label for --wheel (e.g. v0.2.1).",
+    )
+    doctor.add_argument(
+        "--json",
+        dest="runtime_json",
+        action="store_true",
+        help="With --runtime: emit the machine-readable JSON report instead of the human summary.",
+    )
+    doctor.add_argument(
+        "--deep",
+        dest="runtime_deep",
+        action="store_true",
+        help="With --runtime: fingerprint every package file instead of the critical set.",
     )
 
     return parser
@@ -2423,7 +2608,65 @@ def _resolve_profile_dir(explicit: str | None):
         return _Path.home() / ".v3-core" / "profiles" / "default"
 
 
+def _uninstall(args) -> int:
+    """Uninstall planning only (§30). Execution is not implemented this round."""
+    try:
+        from v3core.runtime_integrity import build_uninstall_plan
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "uninstall", "status": "error",
+                          "detail": f"runtime_integrity module unavailable: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    if not getattr(args, "plan", False):
+        print(json.dumps({
+            "command": "uninstall",
+            "status": "error",
+            "detail": "uninstall execution is not implemented in this round; "
+                      "run `hippocampus uninstall --plan` to inspect the plan",
+        }, ensure_ascii=False))
+        return 2
+    try:
+        plan = build_uninstall_plan(
+            hermes_home=getattr(args, "hermes_home", None) or _default_hermes_home(),
+        )
+    except Exception as exc:
+        print(json.dumps({"command": "uninstall", "plan": True, "status": "error",
+                          "detail": f"plan failed: {type(exc).__name__}: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    payload = {"command": "uninstall", "plan": True, **plan.to_dict()}
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+    return 0
+
+
+def _install_plan(args) -> int:
+    """PLAN ONLY — print a deterministic install/upgrade plan; never installs."""
+    try:
+        from v3core.runtime_integrity import build_install_plan
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "install", "plan": True, "status": "error",
+                          "detail": f"runtime_integrity module unavailable: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    try:
+        plan = build_install_plan(
+            hermes_home=getattr(args, "hermes_home", None) or _default_hermes_home(),
+            approved_wheel=getattr(args, "wheel", None),
+            tag=getattr(args, "tag", None),
+        )
+    except Exception as exc:
+        print(json.dumps({"command": "install", "plan": True, "status": "error",
+                          "detail": f"plan failed: {type(exc).__name__}: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    payload = {"command": "install", "plan": True, **plan.to_dict()}
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+    return 2 if plan.severity == "error" else 0
+
+
 def _install(args) -> int:
+    if getattr(args, "plan", False):
+        return _install_plan(args)
     try:
         from v3core import first_run
     except Exception as exc:  # pragma: no cover - defensive
@@ -2588,10 +2831,104 @@ def _doctor_full(args) -> int:
     return 0 if summary.get("fail", 0) == 0 else 1
 
 
+def _default_hermes_home() -> str | None:
+    """HERMES_HOME env -> Windows convention -> None (never guesses)."""
+    import os as _os
+    from pathlib import Path as _Path
+    hh = _os.environ.get("HERMES_HOME")
+    if hh:
+        return hh
+    cand = _Path.home() / "AppData" / "Local" / "hermes"
+    return str(cand) if cand.is_dir() else None
+
+
+def _doctor_runtime(args) -> int:
+    """Runtime integrity: which v3core content do the LIVE processes load?
+
+    Read-only: no environment writes, no process restarts, no DB access.
+    Exit codes: 0 healthy, 1 unverified/degraded, 2 integrity violation
+    (shadow / mismatch / editable-active).
+    """
+    try:
+        from v3core.runtime_integrity import approved_from_wheel, build_report
+    except Exception as exc:  # pragma: no cover - defensive
+        print(json.dumps({"command": "doctor", "runtime": True, "status": "error",
+                          "detail": f"runtime_integrity module unavailable: {exc}"},
+                         ensure_ascii=False))
+        return 2
+    approved = None
+    wheel = getattr(args, "wheel", None)
+    if wheel:
+        try:
+            approved = approved_from_wheel(wheel, tag=getattr(args, "tag", None))
+        except Exception as exc:
+            print(json.dumps({"command": "doctor", "runtime": True, "status": "error",
+                              "detail": f"approved wheel unreadable: {exc}"},
+                             ensure_ascii=False))
+            return 2
+    hermes_home = _default_hermes_home()
+    scope = "full" if getattr(args, "runtime_deep", False) else "critical"
+    report = build_report(hermes_home=hermes_home, approved=approved, scope=scope)
+    payload = {"command": "doctor", "runtime": True, **report.to_dict()}
+    if getattr(args, "runtime_json", False):
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+    else:
+        _render_runtime_human(payload)
+    if report.severity == "error":
+        return 2
+    if report.severity == "warn":
+        return 1
+    return 0
+
+
+def _render_runtime_human(payload: dict) -> None:
+    """Compact human summary for ``doctor --runtime``."""
+    out: list[str] = ["Hermes runtime integrity", "=" * 26]
+    host = payload.get("host") or {}
+    out.append(f"host: platform={host.get('platform')} python={host.get('python')}")
+    appr = payload.get("approved")
+    if appr and appr.get("wheel_filename"):
+        sha = (appr.get("wheel_sha256") or "")[:12]
+        out.append(f"approved: {appr.get('tag') or '?'} {appr['wheel_filename']} (sha256 {sha}...)")
+        out.append(f"approved fingerprint: {str(appr.get('content_fingerprint'))[:16]}...")
+    else:
+        out.append("approved: not supplied (content comparison disabled; pass --wheel)")
+    out.append("")
+    out.append("live processes:")
+    for pr in payload.get("live_processes") or []:
+        proc = pr.get("process") or {}
+        res = pr.get("resolution") or {}
+        fp = str(res.get("fingerprint") or "")[:12]
+        out.append(
+            f"  {proc.get('role', '?'):8s} PID {proc.get('pid'):<7} -> {pr.get('verdict')}  fp={fp}"
+        )
+    active = [c for c in (payload.get("copies") or [])
+              if c.get("package") == "v3core" and c.get("state") == "active"]
+    if active:
+        out.append("")
+        out.append(f"loaded path: {active[0].get('package_root')}")
+    others = [c for c in (payload.get("copies") or [])
+              if c.get("package") == "v3core" and c.get("state") != "active"]
+    if others:
+        out.append("")
+        out.append("other copies:")
+        for c in others:
+            out.append(f"  {c.get('package_root')}  [{c.get('state')} - {c.get('install_type')}]")
+    if payload.get("degraded"):
+        out.append("")
+        out.append("degraded: " + "; ".join(payload["degraded"]))
+    out.append("")
+    out.append(f"runtime integrity: {payload.get('verdict')} ({payload.get('severity')})")
+    out.append(f"summary: {payload.get('summary')}")
+    print("\n".join(out))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "doctor":
+        if getattr(args, "runtime", False):
+            return _doctor_runtime(args)
         if getattr(args, "full", False):
             return _doctor_full(args)
         return _doctor(args)
@@ -2601,10 +2938,39 @@ def main(argv: list[str] | None = None) -> int:
         return _upgrade(args)
     if args.command == "install":
         return _install(args)
+    if args.command == "uninstall":
+        return _uninstall(args)
     if args.command == "import":
         return _import(args)
     if args.command == "rebuild":
         return _rebuild(args)
+    if args.command == "health":
+        try:
+            from v3core.reliability.cli import handle_health
+        except Exception as exc:  # pragma: no cover - defensive
+            print(json.dumps({"command": "health", "status": "error",
+                              "detail": f"reliability module unavailable: {exc}"},
+                             ensure_ascii=False))
+            return 2
+        return handle_health(args)
+    if args.command == "diagnose":
+        try:
+            from v3core.reliability.cli import handle_diagnose
+        except Exception as exc:  # pragma: no cover - defensive
+            print(json.dumps({"command": "diagnose", "status": "error",
+                              "detail": f"reliability module unavailable: {exc}"},
+                             ensure_ascii=False))
+            return 2
+        return handle_diagnose(args)
+    if args.command == "repair":
+        try:
+            from v3core.reliability.cli import handle_repair
+        except Exception as exc:  # pragma: no cover - defensive
+            print(json.dumps({"command": "repair", "status": "error",
+                              "detail": f"reliability module unavailable: {exc}"},
+                             ensure_ascii=False))
+            return 2
+        return handle_repair(args)
     parser.print_help()
     return 2
 
