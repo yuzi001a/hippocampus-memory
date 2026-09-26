@@ -1,0 +1,61 @@
+{
+  "safe_token_target": 7680,
+  "qa_long_path": {
+    "is_long": true,
+    "chunks": 2,
+    "representation_version": "v0.2.0-long-qa",
+    "fields": [
+      "answer",
+      "question"
+    ],
+    "dense_offsets": [
+      [
+        "question",
+        0,
+        0,
+        2000,
+        757
+      ],
+      [
+        "answer",
+        1,
+        0,
+        19200,
+        7110
+      ]
+    ]
+  },
+  "qa_short_path": {
+    "is_long": false,
+    "chunks": 0
+  },
+  "qa_parent_aggregation": {
+    "dim": 1024,
+    "chunk_vectors": 2,
+    "norm": 1.0
+  },
+  "observation_path": {
+    "plan_type": "ObservationChunkPlan",
+    "chunks": 2,
+    "representation_version": "v1-long-observation",
+    "is_long": true,
+    "dense_offsets": [
+      [
+        "content",
+        0,
+        0,
+        20599,
+        7680
+      ],
+      [
+        "content",
+        1,
+        20599,
+        23040,
+        975
+      ]
+    ],
+    "expected_version_const": "v1-long-observation"
+  },
+  "FUNCTIONAL_PLANNER_SMOKE": "PASS"
+}

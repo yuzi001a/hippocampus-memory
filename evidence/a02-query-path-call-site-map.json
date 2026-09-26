@@ -1,0 +1,136 @@
+{
+  "a02_call_site_map": {
+    "baseline_head": "bb2446df8df7fbc4c5e00bda5289cf9e7c678470",
+    "defect_1": {
+      "id": "SEARCH_CARDS_EMBED_CACHE_INVERTED_CONDITION",
+      "site": {
+        "file": "src/v3-core/src/v3core/__init__.py",
+        "line": 1979,
+        "code": "if embed_cfg is not None and query in _EMBED_CACHE:"
+      },
+      "tool_caller": "src/v3-core/src/v3core/tools/search.py:103 -> core.search_cards(...)",
+      "reference_implementation": {
+        "file": "src/v3-core/src/v3core/__init__.py",
+        "line": 2474,
+        "note": "the same guard was already removed from the prefetch path",
+        "code": "            # 优化: 去掉 query in _EMBED_CACHE 前置条件 — 首轮也走 TopicRecall 快路径。\n            # 原因: call_embedding 自带 10 分钟缓存，同 query 二次调用命中极快；\n            #       若首轮因 query 不在缓存跳过 TopicRecall，会落到旧路 prefetch → chain_recall → _chain_fallback_file\n            #       全文件扫描，几千文件 Python 循环 = 5-6s，贴 8s 预算线，波动即超时。"
+      },
+      "semantics": "cold query -> q_emb=None -> recall_pool loses the semantic lane (keyword/BM25 only). Not data loss; degraded recall."
+    },
+    "defect_2": {
+      "id": "QUERY_NEEDS_CAP",
+      "provider_window_tokens": 8192,
+      "safe_target_tokens": 7680,
+      "longest_real_production_query_tokens": 9134,
+      "uncapped_sites": [
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 1980,
+          "enclosing_function": "search_cards",
+          "call": "q_emb = call_embedding(query, embed_cfg, cache=True)",
+          "capped": false
+        },
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 2769,
+          "enclosing_function": "prefetch_to_context_block",
+          "call": "q_emb = call_embedding(query, embed_cfg, cache=True)",
+          "capped": false
+        },
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 2772,
+          "enclosing_function": "prefetch_to_context_block",
+          "call": "q_emb = call_embedding(",
+          "capped": false
+        },
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 2287,
+          "enclosing_function": "prefetch",
+          "call": "q_emb = call_embedding(query, embed_cfg, cache=True)",
+          "capped": false
+        },
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 2290,
+          "enclosing_function": "prefetch",
+          "call": "q_emb = call_embedding(",
+          "capped": false
+        },
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 2388,
+          "enclosing_function": "prefetch",
+          "call": "q_emb = call_embedding(query, embed_cfg, cache=True,",
+          "capped": false
+        },
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 2392,
+          "enclosing_function": "prefetch",
+          "call": "q_emb = call_embedding(query, embed_cfg, cache=True)",
+          "capped": false
+        },
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 2500,
+          "enclosing_function": "prefetch_to_context_block",
+          "call": "q_emb = call_embedding(query, embed_cfg, cache=True, timeout=3, retries=0)",
+          "capped": false
+        },
+        {
+          "file": "src/v3-core/src/v3core/__init__.py",
+          "line": 2503,
+          "enclosing_function": "prefetch_to_context_block",
+          "call": "q_emb = call_embedding(",
+          "capped": false
+        }
+      ],
+      "uncapped_site_count": 9,
+      "capped_reference_sites": [
+        {
+          "file": "recall_pool.py",
+          "line": 2980,
+          "call": "# match 仍走旧路径 (内部 call_embedding(query[:1000], ...))."
+        },
+        {
+          "file": "recall_pool.py",
+          "line": 3266,
+          "call": "# match 仍走旧路径 (内部 call_embedding(query[:1000], ...))."
+        },
+        {
+          "file": "recall_pool.py",
+          "line": 3355,
+          "call": "yin_qemb = call_embedding(query[:1000], embed_cfg, timeout=2.5, retries=0)"
+        },
+        {
+          "file": "recall_pool.py",
+          "line": 3358,
+          "call": "yin_qemb = call_embedding(query[:1000], embed_cfg,"
+        },
+        {
+          "file": "topic_recall.py",
+          "line": 437,
+          "call": "* ``deadline=None`` (legacy path): call_embedding(query[:1000],"
+        },
+        {
+          "file": "topic_recall.py",
+          "line": 467,
+          "call": "emb = call_embedding(query[:1000], self._embed_cfg,"
+        },
+        {
+          "file": "topic_recall.py",
+          "line": 475,
+          "call": "emb = call_embedding(query[:1000], self._embed_cfg,"
+        },
+        {
+          "file": "topic_recall.py",
+          "line": 664,
+          "call": "q_emb = call_embedding(query[:1000], self._embed_cfg,"
+        }
+      ],
+      "note": "query text is a retrieval expression, not durable source: fix is a token-safe cap with head+tail retention (never chunked queries; never silent truncation of a durable source). Cap design is an explicit A02 gate."
+    }
+  }
+}

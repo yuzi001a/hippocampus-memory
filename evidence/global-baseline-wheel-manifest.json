@@ -1,0 +1,123 @@
+{
+  "artifact_status": "GLOBAL_BASELINE_CANDIDATE",
+  "branch": "integration/global-baseline-v1",
+  "integration_head": "bb2446df8df7fbc4c5e00bda5289cf9e7c678470",
+  "product_code_head": "86dd126d0b9496c3218d3bb25d3fcc62d6b98b89",
+  "documentation_head": "bb2446df8df7fbc4c5e00bda5289cf9e7c678470",
+  "product_blobs_unchanged_after": "86dd126d0b9496c3218d3bb25d3fcc62d6b98b89",
+  "worktree_clean_at_build": true,
+  "wheel_filename": "v3_core-4.0.0-py3-none-any.whl",
+  "wheel_sha256": "e543f4dd1ce846407b45c7d5add3d36f3896624839c422233f47b4ef55b3bcc4",
+  "wheel_bytes": 873103,
+  "member_count": 130,
+  "key_member_hashes": {
+    "v3core/generated_context_contract.py": {
+      "wheel": "21f4e55b5e78d9b0",
+      "source": "21f4e55b5e78d9b0",
+      "match": true
+    },
+    "v3core/llm.py": {
+      "wheel": "1365376950fc1c64",
+      "source": "1365376950fc1c64",
+      "match": true
+    },
+    "v3core/e1.py": {
+      "wheel": "0c47b943fdf60200",
+      "source": "0c47b943fdf60200",
+      "match": true
+    },
+    "v3core/embedding.py": {
+      "wheel": "78b97e55161a9d31",
+      "source": "78b97e55161a9d31",
+      "match": true
+    },
+    "v3core/embed_failures.py": {
+      "wheel": "02b905dbe976a650",
+      "source": "02b905dbe976a650",
+      "match": true
+    },
+    "v3core/ingest.py": {
+      "wheel": "beee6ea303a8bbd8",
+      "source": "beee6ea303a8bbd8",
+      "match": true
+    },
+    "v3core/embed_chunks.py": {
+      "wheel": "fc3cbfdfeddbb7de",
+      "source": "fc3cbfdfeddbb7de",
+      "match": true
+    },
+    "v3core/observation_chunks.py": {
+      "wheel": "d8189d24faf179a0",
+      "source": "d8189d24faf179a0",
+      "match": true
+    },
+    "v3core/observer.py": {
+      "wheel": "3f61882ae5ce0c1b",
+      "source": "3f61882ae5ce0c1b",
+      "match": true
+    },
+    "v3core/recall_pool.py": {
+      "wheel": "8891b84f3fd67db6",
+      "source": "8891b84f3fd67db6",
+      "match": true
+    },
+    "v3core/tools/embedding_backfill.py": {
+      "wheel": "a48a64b7de24109d",
+      "source": "a48a64b7de24109d",
+      "match": true
+    },
+    "v3core/schema/qa_embedding_chunks.sql": {
+      "wheel": "bccf8839ba8ea372",
+      "source": "bccf8839ba8ea372",
+      "match": true
+    },
+    "v3core/schema/observation_embedding_chunks.sql": {
+      "wheel": "4f9dd8925255c9e0",
+      "source": "4f9dd8925255c9e0",
+      "match": true
+    },
+    "v3core/schema/upgrade_v0_2.sql": {
+      "wheel": "2dc26d46531c6a21",
+      "source": "2dc26d46531c6a21",
+      "match": true
+    },
+    "v3core/distribution_cli.py": {
+      "wheel": "09cda4ee2c442eb7",
+      "source": "09cda4ee2c442eb7",
+      "match": true
+    },
+    "v3core/tools/health.py": {
+      "wheel": "4a8088ffe23e2076",
+      "source": "4a8088ffe23e2076",
+      "match": true
+    },
+    "v3core/runtime_integrity/__init__.py": {
+      "wheel": "9d87dc8d03b37d7e",
+      "source": "9d87dc8d03b37d7e",
+      "match": true
+    },
+    "v3core/runtime_integrity/plan.py": {
+      "wheel": "bb5afba109acf164",
+      "source": "bb5afba109acf164",
+      "match": true
+    },
+    "v3core/runtime_integrity/shadow.py": {
+      "wheel": "c91c70c9e1059e3d",
+      "source": "c91c70c9e1059e3d",
+      "match": true
+    },
+    "v3core/reliability/health.py": {
+      "wheel": "8c8b704fc8d4ef14",
+      "source": "8c8b704fc8d4ef14",
+      "match": true
+    },
+    "v3core/reliability/cli.py": {
+      "wheel": "0fdfc4fb3eb35760",
+      "source": "0fdfc4fb3eb35760",
+      "match": true
+    }
+  },
+  "key_files_missing_from_wheel": [],
+  "source_wheel_product_drift": [],
+  "SOURCE_WHEEL_PRODUCT_DRIFT": 0
+}

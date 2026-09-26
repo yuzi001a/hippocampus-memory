@@ -6,9 +6,9 @@ Status: `A01 = DONE` / `A02 = DOING` (see the A02 section at the end)
 
 ```text
 branch                 integration/global-baseline-v1
-integration HEAD       <filled by the evidence script>
-product-code HEAD      <filled by the evidence script>
-documentation HEAD     <filled by the evidence script>
+integration HEAD       bb2446d (docs commit; product-code HEAD = 86dd126, the merge)
+product blobs unchanged after 86dd126 — only CURRENT.md / README / docs / evidence follow
+documentation HEAD     bb2446d
 base                   origin/feature/embedding-reliability-recovery (8d7a32f)
 merged                 origin/feature/runtime-integrity (a007d72)
 conflicts              none (git auto-merged distribution_cli.py; both sides verified present)
@@ -41,12 +41,12 @@ the `install --plan` / `uninstall --plan` / `reliability` / runtime-integrity su
 Validation (isolated venvs, Python 3.11.15, editable installs, no production contact):
 
 ```text
-candidate full suite    1123 passed   6 failed   7 skipped   (575.8s)
-baseline  full suite     852 passed   4 failed   5 skipped   (445.9s)
-candidate vs baseline   collected 1136 vs 861 (the merged line adds 275 tests)
+candidate full suite    1126 passed   3 failed   7 skipped   (577.0s, JUnit run)
+baseline  full suite     853 passed   3 failed   5 skipped   (431.1s, JUnit run)
+candidate vs baseline   collected 1136 vs 861; 275 tests only in candidate, 0 only in baseline
 inherited failures      3  test_importers_contract hermes state.db fixture
-                           (identical failures on both trees when run in isolation:
-                            3 failed / 18 passed / 1 skipped each)
+                           (per-test differential: same 3 ids fail on both trees;
+                            in isolation each tree reports 3 failed / 18 passed / 1 skipped)
 environment-dependent   3  test_reliability_cli --help smoke, hardcoded
                            REPO_ROOT/.venv/Scripts/python.exe; with that assumption
                            satisfied locally the file is 29 passed
@@ -59,8 +59,8 @@ Artifact:
 
 ```text
 artifacts/HIPPOCAMPUS_GLOBAL_BASELINE_CANDIDATE/v3_core-4.0.0-py3-none-any.whl
-wheel SHA256           <filled by the evidence script>
-members                <filled by the evidence script>
+wheel SHA256           e543f4dd1ce846407b45c7d5add3d36f3896624839c422233f47b4ef55b3bcc4
+members                130  (21/21 key product members byte-identical to the source tree)
 SOURCE_WHEEL_PRODUCT_DRIFT = 0
 wheel smoke (fresh isolated venv): import identity / P0 validator / forward embedding policy
 constants / failure ledger / backfill CLI --help / long-QA planner / Long Observation planner /
@@ -207,3 +207,31 @@ planner, sidecar schema, aggregation, recall merge, or observation historical ro
   source hashes unchanged, fingerprint `bf32771ecbd1` uniform, ledger 0.
 - 743 recall = `FINAL_RECALL_POLICY_SUPPRESSED` (same-day 754, registered as the P2 debt above);
   759 head likewise suppressed by same-day 751.
+
+## A02 — query path (DOING)
+
+Scope of this round: reproduce the two P2 defects, map the call sites exactly, and pin them with RED
+tests. No fix, no deploy — the cap design is an explicit gate.
+
+```text
+RED-1  tests/test_a02_query_path_red.py::test_red1_search_cards_cold_query_must_attempt_query_embedding
+       现状复现: V3Core.search_cards computes the query embedding only when the query is already
+       in _EMBED_CACHE (__init__.py:1979). A cold query reaches recall_pool with q_emb=None ->
+       the semantic lane is lost. Captured call list is empty.
+
+RED-2  tests/test_a02_query_path_red.py::test_red2_no_query_bearing_call_site_passes_the_raw_query
+       现状复现: 9 query-bearing call sites hand the raw `query` to the provider —
+       __init__.py lines 1980 (search_cards), 2287 / 2290 / 2388 / 2392 (prefetch),
+       2500 / 2503 / 2769 / 2772 (prefetch_to_context_block). The provider window is 8192 tokens
+       (HTTP 400 code=20015 at 9001) and the longest real production query is 9134 tokens, so such
+       a query fails closed and the caller degrades to keyword-only recall.
+
+evidence/a02-query-path-call-site-map.json   full map (sites, enclosing functions, the 8 already
+                                             capped `query[:1000]` reference sites)
+a02 red run log                              2 failed (correct reasons), preserved in the round's
+                                             evidence directory
+```
+
+RED by design: on the baseline both tests fail because the defects are present. They turn green when
+the A02 fix lands; the fix must cap every listed site (cap size / head+tail policy is a design gate,
+never a chunked query).

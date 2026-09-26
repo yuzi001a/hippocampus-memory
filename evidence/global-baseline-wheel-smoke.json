@@ -1,0 +1,151 @@
+{
+  "python": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Scripts\\python.exe",
+  "sys_path_has_repo": false,
+  "import_identity": {
+    "ok": true,
+    "detail": {
+      "v3core_file": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Lib\\site-packages\\v3core\\__init__.py",
+      "in_site_packages": true,
+      "is_source_tree": false
+    }
+  },
+  "p0_generated_context_contract": {
+    "ok": true,
+    "detail": {
+      "module": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Lib\\site-packages\\v3core\\generated_context_contract.py",
+      "public_names": [
+        "GeneratedContextError",
+        "IDENTITY_TARGET_MAX_CHARS",
+        "IDENTITY_TARGET_MIN_CHARS",
+        "REQUIRED_SECTIONS",
+        "TARGET_MAX_CHARS",
+        "TARGET_MIN_CHARS",
+        "annotations",
+        "logger",
+        "logging",
+        "re",
+        "validate_identity_block",
+        "validate_situation_overview"
+      ]
+    }
+  },
+  "forward_embedding_policies": {
+    "ok": true,
+    "detail": {
+      "realtime": {
+        "description": "recall / prefetch / realtime injection — inside the 8s user budget",
+        "name": "realtime",
+        "retries": 0,
+        "timeout": 3.0
+      },
+      "durable": {
+        "description": "durable entity write on a background path — absorbs provider tail",
+        "name": "durable_write",
+        "retries": 2,
+        "timeout": 10.0
+      },
+      "batch": {
+        "description": "bulk import — many rows, no interactive deadline",
+        "name": "batch",
+        "retries": 2,
+        "timeout": 10.0
+      },
+      "health": {
+        "description": "health / config validation probes",
+        "name": "health",
+        "retries": 1,
+        "timeout": 5.0
+      }
+    }
+  },
+  "failure_ledger_import": {
+    "ok": true,
+    "detail": {
+      "module": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Lib\\site-packages\\v3core\\embed_failures.py",
+      "has_embed_for_write": true,
+      "has_status": true
+    }
+  },
+  "backfill_cli_help": {
+    "ok": true,
+    "detail": {
+      "exit": 0
+    }
+  },
+  "long_qa_planner": {
+    "ok": true,
+    "detail": {
+      "is_long": false,
+      "chunks": 0,
+      "representation_version": "v0.2.0-long-qa",
+      "fields": []
+    }
+  },
+  "long_observation_planner": {
+    "ok": true,
+    "detail": {
+      "module": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Lib\\site-packages\\v3core\\observation_chunks.py",
+      "public_names": [
+        "Any",
+        "Callable",
+        "Dict",
+        "EmbedChunk",
+        "List",
+        "Mapping",
+        "OBSERVATION_REPRESENTATION_VERSION",
+        "OBSERVATION_SOURCE_FIELD",
+        "ObservationChunkPlan",
+        "ObservationChunkPlanError",
+        "ObservationDerivedState",
+        "ObservationDerivedStateError",
+        "Optional",
+        "Sequence"
+      ],
+      "plan_type": "ObservationChunkPlan",
+      "chunks": 2,
+      "representation_version": "v1-long-observation"
+    }
+  },
+  "child_to_parent_merge": {
+    "ok": true,
+    "detail": {
+      "has_obs_child_fetch": true,
+      "has_obs_merge": true,
+      "file": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Lib\\site-packages\\v3core\\recall_pool.py"
+    }
+  },
+  "doctor_schema_artifacts": {
+    "ok": true,
+    "detail": {
+      "schema_dir": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Lib\\site-packages\\v3core\\schema",
+      "sql_files": [
+        "alpha_bootstrap.sql",
+        "explicit_memories.sql",
+        "observation_embedding_chunks.sql",
+        "qa_embedding_chunks.sql",
+        "upgrade_v0_2.sql"
+      ],
+      "has_static_check": true
+    }
+  },
+  "merged_surface_imports": {
+    "ok": true,
+    "detail": {
+      "runtime_integrity": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Lib\\site-packages\\v3core\\runtime_integrity\\__init__.py",
+      "reliability": "C:\\Users\\servi\\workspace\\backups\\a01-env-smoke\\Lib\\site-packages\\v3core\\reliability\\__init__.py",
+      "ri_names": [
+        "ApprovedArtifact",
+        "INSTALL_TYPES",
+        "InstallCopy",
+        "InstallPlan",
+        "IntegrityReport",
+        "ProcessInfo",
+        "ProcessResolution",
+        "ResolutionResult",
+        "SCOPE_CRITICAL",
+        "SCOPE_FULL"
+      ]
+    }
+  },
+  "SMOKE_VERDICT": "PASS"
+}
