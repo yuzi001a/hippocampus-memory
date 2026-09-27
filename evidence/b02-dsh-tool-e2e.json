@@ -1,0 +1,59 @@
+{
+  "release": "v0.2.4",
+  "asset": "v3_core-4.0.0-py3-none-any.whl",
+  "install": {
+    "clean_venv": true,
+    "mcp_version": "1.30.0",
+    "v3_core_version": "4.0.0",
+    "repo_cwd_used": false,
+    "editable_install_used": false
+  },
+  "bootstrap": {
+    "database": "b02public",
+    "host": "localhost",
+    "port": 55511,
+    "first": "PASS",
+    "second": "PASS",
+    "include_expanded": true,
+    "sql_bytes": 25042,
+    "fallback_used": false
+  },
+  "dsh": {
+    "dsh_version": "0.1.0-rc.6",
+    "mcp_client_version": "0.1.0-rc.6",
+    "support_level": "TOOL",
+    "tool_count": 13,
+    "capabilities": ["events", "prefetch", "source_read", "status", "tools"],
+    "session_a": {
+      "durable": true,
+      "durable_store": "explicit_memories",
+      "status": "DERIVED_WARNING",
+      "memory_id_verified_in_pg": true
+    },
+    "session_b": {
+      "new_process": true,
+      "search": "PASS via v1_fallback keyword path",
+      "source_read": "PASS",
+      "source": "explicit_memories",
+      "content_exact_match": true
+    },
+    "session_c": {
+      "status_tool": "PASS",
+      "pg_connected": true,
+      "database": "b02public",
+      "missing_tables": []
+    }
+  },
+  "database_after_canary": {
+    "explicit_memories": 1,
+    "embedding_null": true,
+    "yin_paragraphs": 0,
+    "conversation_stream": 0,
+    "qa_pairs": 0,
+    "topics": 0
+  },
+  "known_degradation": "Configured SiliconFlow embedding endpoint returned HTTP 401 Token is invalid; durable write remained true and search used the explicit keyword fallback. Vector recall was not passed off as healthy.",
+  "production_touched": false,
+  "production_restart": false,
+  "production_schema_mutation": false
+}

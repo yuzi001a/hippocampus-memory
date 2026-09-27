@@ -538,3 +538,25 @@ open findings    F3 embedding_failures.sql packaged but applied by nothing (fres
                  F2 outbox replay at-least-once on conversation_stream → B03_PRECONDITION
                     (re-evaluate before pi starts automatic event collection)
 next             B02 = DOING — DSH SUPPORT LEVEL = TOOL via `v3-core mcp` stdio
+
+## B02 public clean-install canary (2026-09-27)
+
+- Public release: `v0.2.4`; clean venv installed `v3_core-4.0.0-py3-none-any.whl`
+  and automatically resolved `mcp==1.30.0`.
+- Clean PostgreSQL+pgvector database: bootstrap #1 and #2 passed from the
+  installed wheel; no fallback path; database `b02public` was disposable.
+- DSH locked line: `@deepseek-ai/dsh@0.1.0-rc.6`, headless bundle and official
+  `@deepseek-ai/dsh-mcp-client` both `0.1.0-rc.6`.
+- Real DSH session A: explicit `v3_store` returned `durable=true`,
+  `durable_store=explicit_memories`; PG readback found one active memory.
+- Real new DSH session B: `v3_search` found that memory through the keyword
+  fallback, then `v3_get(target=hm)` read the exact content from
+  `explicit_memories`; session C `v3_get(target=status)` returned PG connected
+  with no missing tables.
+- Known blocker, not hidden: configured SiliconFlow embedding returned HTTP 401
+  `Token is invalid`. The write was durable with `DERIVED_WARNING`, and the
+  search result had `cosine=0.0`; vector recall is therefore **not** claimed
+  healthy. Full evidence: `evidence/b02-dsh-tool-e2e.json`.
+- Production: no install, restart, schema mutation, or data write.
+
+next             B03 remains blocked on re-evaluating `OUTBOX_REPLAY_SOURCE_AT_LEAST_ONCE` before pi automatic event collection.
