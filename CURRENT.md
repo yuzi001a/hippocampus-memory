@@ -526,6 +526,11 @@ schema           NONE
 production       NOT touched — no install, no restart, no schema mutation
 release          v0.2.3 patch tag (package version stays 4.0.0: test_distribution_packaging
                  freezes it as the Gate 0/1 contract)
+release asset    verified: v0.2.3 wheel downloaded from the public release →
+                 clean venv outside the repo → fresh empty PG → bootstrap #1 rc=0,
+                 FK present, bootstrap #2 rc=0 (10/11 tables; only F3's
+                 embedding_failures absent)
+                 evidence/fresh-bootstrap-e2e.release-v0.2.3.json
 open findings    F3 embedding_failures.sql packaged but applied by nothing (fresh install has
                     no public.embedding_failures; doctor does not require it)
                  F4 the two schema copies are CRLF/LF-divergent while INSTALL.md §8 claims
