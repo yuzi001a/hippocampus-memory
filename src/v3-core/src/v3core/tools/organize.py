@@ -102,7 +102,9 @@ def _resolve_paths():
     home = Path.home()
     # Lazy import to avoid circular import at module load time.
     from ..config import resolve_config
-    cfg = resolve_config()
+    from ._scope import current_scope
+    # B02: booted scope 优先（y/ 与 s/ 随 profile 走；memory_md/user_md 仍指 Hermes 树）。
+    cfg = current_scope() or resolve_config()
     base_str = cfg.get("basePath", "") if isinstance(cfg, dict) else ""
     base = Path(base_str) if base_str else (home / ".v3-core" / "profiles" / "default")
     return {

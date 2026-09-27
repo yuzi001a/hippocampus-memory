@@ -7,6 +7,29 @@
 
 ---
 
+## [0.2.5] — tool-level profile scoping completed
+
+> **Scope:** finish what 0.2.4 started. 0.2.4 fixed the *dispatch* layer; this
+> patch fixes the *leaf* helpers, so a non-default profile no longer reads or
+> writes default-profile data through any tool.
+
+### Fixed
+- **Tool helpers that ignored the booted profile.** Sites that resolved the
+  default profile on their own: `HandbookManager()` ×7 (handbook paths in
+  `v3_get`/`hm_status`/`hm_handbook_*`), `resolve_config("default")` in
+  affinity, `_resolve_paths()` in organize, and `_resolve_data_dir()` /
+  `resolve_config()` in the topic create/edit/correct paths (sqlite under the
+  default base). `v3core/_tool_scope.py` binds the booted config for one tool call
+  (`handle_tool_call` is the choke point for HTTP `/tool`, stdio MCP, and the
+  in-process provider); `config._resolve_data_dir()` honours the bound scope
+  when the caller passes none, and every other site prefers the bound scope
+  with `resolve_config()` kept as the legacy fallback for direct calls.
+
+### Tests
+- `tests/test_b02_tool_scope_completion.py` (RED first, then GREEN): scope
+  reaches the sqlite root / `DeepStore` / `HandbookManager` / organize paths;
+  scope never leaks past the call; unscoped legacy calls still resolve default.
+
 ## [0.2.4] — B02 MCP prerequisite fixes
 
 > **Scope:** make the existing v3-core stdio MCP path usable from a clean install.

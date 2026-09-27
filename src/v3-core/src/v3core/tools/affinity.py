@@ -166,7 +166,9 @@ def handle_v3_affinity(args, **kw):
     try:
         from ..card_store import DeepStore
         from ..config import resolve_config
-        cfg = resolve_config("default")
+        from ._scope import current_scope
+        # B02: booted scope 优先；无 scope 才回落历史 default 解析。
+        cfg = current_scope() or resolve_config("default")
         store = DeepStore(cfg)
         prev = load_cached(store)
         data = compute_affinity(store)

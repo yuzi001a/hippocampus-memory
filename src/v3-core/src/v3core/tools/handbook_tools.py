@@ -74,7 +74,8 @@ def handle_hm_handbook_set(args: dict, **kw) -> str:
     try:
         from ..handbook import HandbookManager
 
-        h = HandbookManager()
+        from ._scope import current_scope, handbook_manager
+        h = handbook_manager(current_scope())
         key = args.get("key", "").strip()
         title = args.get("title", "").strip()
         content = args.get("content", "").strip()
@@ -94,7 +95,8 @@ def handle_hm_handbook_get(args: dict, **kw) -> str:
     try:
         from ..handbook import HandbookManager
 
-        h = HandbookManager()
+        from ._scope import current_scope, handbook_manager
+        h = handbook_manager(current_scope())
         key = args.get("key", "").strip()
         if not key:
             return json.dumps(
@@ -117,7 +119,8 @@ def handle_hm_handbook_list(args: dict, **kw) -> str:
     try:
         from ..handbook import HandbookManager
 
-        h = HandbookManager()
+        from ._scope import current_scope, handbook_manager
+        h = handbook_manager(current_scope())
         entries = h.list_all()
         return json.dumps(
             {
@@ -135,7 +138,8 @@ def handle_hm_handbook_del(args: dict, **kw) -> str:
     try:
         from ..handbook import HandbookManager
 
-        h = HandbookManager()
+        from ._scope import current_scope, handbook_manager
+        h = handbook_manager(current_scope())
         key = args.get("key", "").strip()
         if not key:
             return json.dumps(

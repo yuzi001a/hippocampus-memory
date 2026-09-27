@@ -64,7 +64,8 @@ def handle_hm_get(args: dict, **kw) -> str:
         if source_id.startswith("handbook/"):
             key = source_id[len("handbook/"):]
             from ..handbook import HandbookManager
-            h = HandbookManager()
+            from ._scope import current_scope, handbook_manager
+            h = handbook_manager(current_scope())
             entry = h.get(key)
             if entry is None:
                 return json.dumps(
@@ -172,7 +173,8 @@ def handle_hm_get(args: dict, **kw) -> str:
         # 3. Fallback: try handbook lookup for bare keys
         from ..handbook import HandbookManager
 
-        h = HandbookManager()
+        from ._scope import current_scope, handbook_manager
+        h = handbook_manager(current_scope())
         entry = h.get(source_id)
         if entry is not None:
             return json.dumps(
@@ -254,7 +256,8 @@ def handle_hm_status(args: dict, **kw) -> str:
     try:
         from ..handbook import HandbookManager
 
-        h = HandbookManager()
+        from ._scope import current_scope, handbook_manager
+        h = handbook_manager(current_scope())
         entries = h.list_all()
         result["checks"]["handbook"] = {
             "available": True,
