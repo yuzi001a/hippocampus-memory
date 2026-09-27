@@ -105,7 +105,8 @@ def handle_v2_topic_edit(args: dict, **kw) -> str:
             from ..embedding import call_embedding, safe_embed_cfg
             from ..config import resolve_config, _resolve_data_dir
 
-            cfg = resolve_config()
+            from ._scope import current_scope
+            cfg = current_scope() or resolve_config()
             embed_cfg = safe_embed_cfg(cfg)
 
             row2 = store.conn.execute(

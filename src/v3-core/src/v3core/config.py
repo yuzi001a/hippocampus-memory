@@ -33,7 +33,16 @@ def _resolve_data_dir(config=None) -> Path:
     """解析 v3-core 数据根目录 — config.base_path 优先, 兜底 ~/.v3-core/profiles/default.
 
     Accepts V3Config / dict / None. 与 handbook._resolve_handbook_dir 同一模式.
+
+    B02: 当调用方没传 config 时，取本次工具调用绑定的 booted profile
+    (tools._scope)；未绑定（CLI/后台管线）时保持历史 default 语义。
     """
+    if config is None:
+        try:
+            from ._tool_scope import current_scope
+            config = current_scope()
+        except Exception:
+            config = None
     base_path = None
     if config is not None:
         if isinstance(config, dict):

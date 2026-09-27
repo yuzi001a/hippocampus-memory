@@ -247,4 +247,8 @@ def handle_tool_call(name: str, args: dict, **kw) -> str:
     td = TOOL_REGISTRY.get(name)
     if not td:
         raise ValueError(f"Unknown tool: {name}")
-    return td.handler(args, **kw)
+    # B02: 绑定 booted profile —— 深层 helper 拿不到 **kw，
+    # 否则各自 resolve_config() 回落 default profile。
+    from ._scope import scoped
+    with scoped(kw.get("effective_config")):
+        return td.handler(args, **kw)

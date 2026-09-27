@@ -73,7 +73,8 @@ def handle_v2_topic_create(args: dict, **kw) -> str:
         db_path = str(_resolve_data_dir() / 'v3_topic_full.db')
         store = TopicStore(db_path)
 
-        cfg = resolve_config()
+        from ._scope import current_scope
+        cfg = current_scope() or resolve_config()
         embed_cfg = safe_embed_cfg(cfg)
 
         # 仅在 embedding 显式启用时计算；disabled 不手拼空配置。
