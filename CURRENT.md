@@ -377,8 +377,22 @@ rerank HTTP 400 (siliconflow rerank endpoint) — pre-existing production config
 reliability CLI --help smoke tests still assume a repo-local .venv
 ```
 
-### Delivery
+### Delivery (closed)
 
-Merged to `main` and released per the repo's existing convention (`v0.2.x` tag → `release.yml`), so the
-documented install entry can obtain these fixes. Packaged version string stays `4.0.0`.
+```text
+PR                       #12 → main, required checks green (product-ci 29s, distribution-packaging
+                         smoke 1m9s), normal merge, no force push
+merge commit             83fc337a5ecb592a8be90d99b410404ebacb2f7f  (2026-09-27T01:05:31Z)
+tag / release            v0.2.2 → release workflow run 36284508666 (success) → "Hippocampus v0.2.2"
+                         (Latest) with 4 assets: v3_core wheel+sdist, v3_hermes_plugin wheel+sdist
+release wheel vs canary  members 130/130 byte-identical (CRC mismatch 0, header metadata 130) — the
+                         published wheel contains exactly the code the canary validated; only zip
+                         timestamps differ, i.e. a repackaging, not a code change
+install entry (verified) fresh venv + install from the released assets: uv pip check "37 packages,
+                         all compatible"; probe shows prepare_query_embedding_text /
+                         call_query_embedding / runtime_integrity all present; console entries
+                         `hippocampus --help` and `v3-core --help` both rc=0
+packaged version string  still 4.0.0 (tag convention v0.2.x, matching v0.2 / v0.2.1)
+deployment record        evidence/a03-deployment.json
+```
 
