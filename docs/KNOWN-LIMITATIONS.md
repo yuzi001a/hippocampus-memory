@@ -108,6 +108,36 @@ The alpha E2E confirmed a **narrow** replay/recovery capability and a
 
 ---
 
+### 1.7. DSH MCP tool path (tool level only)
+
+The DSH integration is **TOOL support**: the model calls the tools explicitly.
+There is no automatic recording and no automatic recall injection on that path
+(that is B04). See [`docs/B02-DSH-TOOL-SUPPORT.md`](B02-DSH-TOOL-SUPPORT.md)
+for the exact MCP configuration and the verified session transcript.
+
+- `v3_prefetch` is **topic-card recall**, not record recall. On a fresh install
+  there are no topic cards, so it returns `[]`. Read records with
+  `v3_search` → `v3_get(target=hm, source_id=…)`.
+- The tools share one **union-parameter signature**. A model that invents
+  parameters (e.g. `v3_get` with `action=read`) lands on the tool's default
+  (`target=status`) and concludes "there is no read path". Prompt it with the
+  exact parameter names.
+- `v3_store`'s response reports `embedding: null` on a healthy install — that is
+  the pre-embed snapshot; the vector is written by a post-commit update. Verify
+  with a read, not with the write response.
+- An embedding credential problem does not fail the write: the record stays
+  `durable=true` with `status=DERIVED_WARNING` and
+  `warnings=[… class=EMBEDDING_AUTH_FAILED … 401 …]`, and the MCP server's
+  stderr shows `embedding HTTP 401`. The profile's own `.env` (written by
+  `hippocampus install --embed-key …`) is the credential channel — exporting a
+  look-alike variable such as `SILICONFLOW_API_KEY` does nothing and produces
+  exactly this symptom.
+- A fresh install has **no `embedding_failures` ledger** (registered as F3 in
+  [`docs/B01-FINDINGS.md`](B01-FINDINGS.md)), so failure history lives in the
+  write response and the server log, not in a table.
+- `topic_recall: no data source (PG failed, SQLite not found)` is a benign
+  fresh-install warning from the topic layer; the record lanes are unaffected.
+
 ## 2. Things explicitly out of scope for this alpha
 
 ### 2.1. Recall V2
