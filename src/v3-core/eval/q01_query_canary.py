@@ -162,6 +162,17 @@ def _toolchain(v3core_mod) -> tuple[dict, Callable[[], None]]:
 
     v3core_mod.call_query_embedding = _ce_observed
 
+    # Real provider boundary: the HTTP payload the embedding backend actually receives.
+    import v3core.embedding as embedding_module
+    original_post = embedding_module.requests.post
+
+    def _post_observed(url, json=None, headers=None, proxies=None, timeout=None):
+        if isinstance(json, dict) and "input" in json:
+            state.setdefault("provider_payloads", []).append(json["input"])
+        return original_post(url, json=json, headers=headers, proxies=proxies, timeout=timeout)
+
+    embedding_module.requests.post = _post_observed
+
     import v3core.recall_pool as recall_pool_module
     original_rp = recall_pool_module.recall_pool
 
@@ -180,6 +191,7 @@ def _toolchain(v3core_mod) -> tuple[dict, Callable[[], None]]:
     def _restore() -> None:
         v3core_mod.call_query_embedding = original_ce
         recall_pool_module.recall_pool = original_rp
+        embedding_module.requests.post = original_post
 
     return state, _restore
 
@@ -221,6 +233,7 @@ def run_cases(profile: str, config_path: str | None,
             state["inject"] = None
             sent = list(state["sent"])
             attempts = list(state["attempts"])
+            payloads = [p for p in state.get("provider_payloads", []) if isinstance(p, str)]
             traces = list(state["built_traces"])
             trace_error = state.get("trace_error")
         finally:
@@ -232,8 +245,11 @@ def run_cases(profile: str, config_path: str | None,
             "hit_ids": hit_ids[:5],
             "provider_query_calls": len(sent),
             "query_attempts": len(attempts),
-            "sent_chars": [len(c) for c in sent],
-            "sent_tokens": ([_token_count(sent[0], embed_cfg) if sent and embed_cfg else None]),
+            "seam_input_chars": [len(c) for c in sent],
+            "provider_payloads": len(payloads),
+            "provider_chars": [len(p) for p in payloads],
+            "provider_tokens": ([_token_count(payloads[0], embed_cfg) if payloads and embed_cfg else None]),
+            "seam_input_tokens": ([_token_count(sent[0], embed_cfg) if sent and embed_cfg else None]),
             "trace_built": bool(traces),
             "trace_error": trace_error,
         })
@@ -249,19 +265,23 @@ def run_cases(profile: str, config_path: str | None,
             res.checks["min_hits"] = len(hit_ids) >= expect["min_hits"]
         if "truncated" in expect:
             if expect["truncated"]:
-                res.checks["truncated_true"] = bool(sent) and len(sent[0]) < len(query)
+                res.checks["truncated_true"] = bool(payloads) and len(payloads[0]) < len(query)
             else:
-                res.checks["truncated_false"] = bool(sent) and len(sent[0]) == len(query)
+                res.checks["truncated_false"] = bool(payloads) and len(payloads[0]) == len(query)
         if expect.get("prepared_equals_original"):
-            res.checks["prepared_equals_original"] = len(sent) == 1 and sent[0] == query
+            res.checks["prepared_equals_original"] = (len(payloads) == 1 and payloads[0] == query
+                                                      and payloads[0].encode() == query.encode())
         if expect.get("head_retained"):
-            res.checks["head_retained"] = bool(sent) and sent[0].startswith(query[:24])
+            res.checks["head_retained"] = bool(payloads) and payloads[0].startswith(query[:24])
         if expect.get("tail_retained"):
-            res.checks["tail_retained"] = bool(sent) and sent[0].endswith(query[-24:])
-        if expect.get("prepared_tokens_max") and sent and embed_cfg:
-            tok = _token_count(sent[0], embed_cfg)
-            res.observed["sent_tokens"] = tok
+            res.checks["tail_retained"] = bool(payloads) and payloads[0].endswith(query[-24:])
+        if expect.get("prepared_tokens_max") and payloads and embed_cfg:
+            tok = _token_count(payloads[0], embed_cfg)
+            res.observed["provider_tokens"] = tok
             res.checks["prepared_tokens_max"] = tok <= expect["prepared_tokens_max"]
+        if expect.get("original_unmodified") and payloads:
+            res.observed["original_unmodified"] = query[:200] == (SYNTHETIC_INPUTS[case["query_ref"]]()
+                                                                  if case.get("query_ref") else case["query"])[:200]
         if expect.get("no_provider_error"):
             res.checks["no_provider_error"] = res.observed["raised"] is None
         if expect.get("repeat_of"):

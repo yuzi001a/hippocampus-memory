@@ -1,0 +1,693 @@
+{
+  "task": "A03 — production canary + installable delivery",
+  "artifact": {
+    "branch": "integration/global-baseline-v1",
+    "integration_head": "41a94bc4c9e4838294c4d3745c64d83d0e8297d7",
+    "product_code_head": "41a94bc4c9e4838294c4d3745c64d83d0e8297d7",
+    "artifact_build_head": "41a94bc4c9e4838294c4d3745c64d83d0e8297d7",
+    "wheel": "v3_core-4.0.0-py3-none-any.whl",
+    "wheel_sha256": "c13cd4cb39c0c839ee5477b87c1a8d5d5009accb237ec717047052448c02322e",
+    "wheel_members_total": 130,
+    "wheel_product_members": 124,
+    "SOURCE_WHEEL_PRODUCT_DRIFT": 0,
+    "protected_members_identical": {
+      "v3core/__init__.py": true,
+      "v3core/embed_chunks.py": true,
+      "v3core/embedding.py": true,
+      "v3core/generated_context_contract.py": true,
+      "v3core/e1.py": true,
+      "v3core/llm.py": true,
+      "v3core/embed_failures.py": true,
+      "v3core/ingest.py": true,
+      "v3core/observation_chunks.py": true,
+      "v3core/observer.py": true,
+      "v3core/recall_pool.py": true,
+      "v3core/tools/embedding_backfill.py": true
+    }
+  },
+  "live_before": {
+    "winning_copy": "venv/Lib/site-packages (PYTHONPATH precedes .hermes-runtime)",
+    "dist_info": "v3_core-4.0.0.dist-info",
+    "modules": 108,
+    "installed_from": "{\"url\":\"file:///C:/hp-testbed/artifacts/LONG_OBSERVATION_PRODUCTION_CANDIDATE/v3_core-4.0.0-py3-none-any.whl\",\"archive_info\":{}}",
+    "editable_pth": "both disabled-by-v021-20260918",
+    "other_copy": "…\\.hermes-runtime\\…\\site-packages\\v3core  [shadowed]"
+  },
+  "live_after": {
+    "modules": 124,
+    "changed": [
+      "__init__.py",
+      "distribution_cli.py",
+      "embed_chunks.py",
+      "embedding.py"
+    ],
+    "new": [
+      "reliability/__init__.py",
+      "reliability/cli.py",
+      "reliability/diagnose.py",
+      "reliability/failure_reader.py",
+      "reliability/health.py",
+      "reliability/models.py",
+      "reliability/redaction.py",
+      "reliability/repair.py",
+      "runtime_integrity/__init__.py",
+      "runtime_integrity/contract.py",
+      "runtime_integrity/discovery.py",
+      "runtime_integrity/identity.py",
+      "runtime_integrity/models.py",
+      "runtime_integrity/plan.py",
+      "runtime_integrity/resolver.py",
+      "runtime_integrity/shadow.py"
+    ],
+    "only_in_live": [],
+    "byte_identity": "124/124 v3core + 2/2 v3hermes identical to the wheel members"
+  },
+  "gateway_swap": {
+    "old_pids_absent": {
+      "3772": {
+        "exists": false
+      },
+      "5252": {
+        "exists": false
+      }
+    },
+    "new_processes": {
+      "5420": {
+        "created": 1790469446.7456825,
+        "same_env_probe_rc": 0,
+        "same_env_probe": "{\"v3core\": \"C:\\\\Users\\\\servi\\\\AppData\\\\Local\\\\hermes\\\\hermes-agent\\\\venv\\\\Lib\\\\site-packages\\\\v3core\\\\__init__.py\", \"prepare\": true, \"call_query\": true, \"ri\": \"C:\\\\Users\\\\servi\\\\AppData\\\\Local\\\\hermes\\\\hermes-agent\\\\venv\\\\Lib\\\\site-packages\\\\v3core\\\\runtime_integrity\\\\__init__.py\", \"rel\": \"C:\\\\Users\\\\servi\\\\AppData\\\\Local\\\\hermes\\\\hermes-agent\\\\venv\\\\Lib\\\\site-packages\\\\v3core\\\\reliability\\\\__init__.py\"}"
+      },
+      "17068": {
+        "created": 1790469446.7811682,
+        "same_env_probe_rc": 0,
+        "same_env_probe": "{\"v3core\": \"C:\\\\Users\\\\servi\\\\AppData\\\\Local\\\\hermes\\\\hermes-agent\\\\venv\\\\Lib\\\\site-packages\\\\v3core\\\\__init__.py\", \"prepare\": true, \"call_query\": true, \"ri\": \"C:\\\\Users\\\\servi\\\\AppData\\\\Local\\\\hermes\\\\hermes-agent\\\\venv\\\\Lib\\\\site-packages\\\\v3core\\\\runtime_integrity\\\\__init__.py\", \"rel\": \"C:\\\\Users\\\\servi\\\\AppData\\\\Local\\\\hermes\\\\hermes-agent\\\\venv\\\\Lib\\\\site-packages\\\\v3core\\\\reliability\\\\__init__.py\"}"
+      }
+    },
+    "heartbeat": {
+      "pid": 17068,
+      "updated_at": "2026-09-27T00:38:15.444393+00:00",
+      "monotonic": 635878.562,
+      "start_time": 1790469458.3155115,
+      "loop_tick_socket": true,
+      "loop_tick_tcp_port": 61977
+    },
+    "readiness_fence": "2026-09-27 08:38:47 (+08) feishu reconnected after one transient 30s timeout"
+  },
+  "rollback": {
+    "path": "workspace/backups/a03-canary-20260926/rollback",
+    "content": "108 v3core + 2 v3hermes modules + both dist-info, readback-verified"
+  },
+  "q01_layer_a": {
+    "summary": {
+      "cases": 16,
+      "selected": [
+        "Q01-01",
+        "Q01-02",
+        "Q01-03",
+        "Q01-04",
+        "Q01-05",
+        "Q01-06",
+        "Q01-07",
+        "Q01-08",
+        "Q01-09",
+        "Q01-10",
+        "Q01-11",
+        "Q01-12",
+        "Q01-13",
+        "Q01-14",
+        "Q01-15",
+        "Q01-16"
+      ],
+      "pass": 12,
+      "fail": 2,
+      "ready_for_canary_judgement": 2,
+      "no_checks": 0,
+      "profile": "default",
+      "config_path": null
+    },
+    "cases": [
+      {
+        "case_id": "Q01-01",
+        "category": "cold_semantic",
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 12404.9
+        }
+      },
+      {
+        "case_id": "Q01-02",
+        "category": "hot_cache",
+        "verdict": "PASS",
+        "checks": {
+          "additional_provider_calls": true,
+          "same_hit_ids": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 7411.5
+        }
+      },
+      {
+        "case_id": "Q01-03",
+        "category": "historical_fact",
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 6426.0
+        }
+      },
+      {
+        "case_id": "Q01-04",
+        "category": "historical_fact",
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 5423.8
+        }
+      },
+      {
+        "case_id": "Q01-05",
+        "category": "project_continuation",
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 4907.0
+        }
+      },
+      {
+        "case_id": "Q01-06",
+        "category": "project_continuation",
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 3891.0
+        }
+      },
+      {
+        "case_id": "Q01-07",
+        "category": "long_query",
+        "verdict": "FAIL",
+        "checks": {
+          "truncated_true": false,
+          "head_retained": true,
+          "tail_retained": true,
+          "prepared_tokens_max": false,
+          "no_provider_error": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 237669.8
+        }
+      },
+      {
+        "case_id": "Q01-08",
+        "category": "long_query",
+        "verdict": "FAIL",
+        "checks": {
+          "min_hits": true,
+          "truncated_true": false,
+          "tail_retained": true,
+          "prepared_tokens_max": false,
+          "no_provider_error": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 245484.4
+        }
+      },
+      {
+        "case_id": "Q01-09",
+        "category": "embedding_failure",
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "no_crash": true,
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 0,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 5499.1
+        }
+      },
+      {
+        "case_id": "Q01-10",
+        "category": "embedding_failure",
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "no_crash": true,
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 0,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 4640.6
+        }
+      },
+      {
+        "case_id": "Q01-11",
+        "category": "off_topic",
+        "verdict": "READY_FOR_CANARY_JUDGEMENT",
+        "checks": {},
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 6742.4
+        }
+      },
+      {
+        "case_id": "Q01-12",
+        "category": "off_topic",
+        "verdict": "READY_FOR_CANARY_JUDGEMENT",
+        "checks": {},
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 4842.1
+        }
+      },
+      {
+        "case_id": "Q01-13",
+        "category": "cold_semantic",
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 5143.3
+        }
+      },
+      {
+        "case_id": "Q01-14",
+        "category": "historical_fact",
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 5244.6
+        }
+      },
+      {
+        "case_id": "Q01-15",
+        "category": "long_query",
+        "verdict": "PASS",
+        "checks": {
+          "truncated_false": true,
+          "prepared_equals_original": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 5116.0
+        }
+      },
+      {
+        "case_id": "Q01-16",
+        "category": "hot_cache",
+        "verdict": "PASS",
+        "checks": {
+          "additional_provider_calls": true,
+          "same_hit_ids": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": null,
+          "provider_chars": null,
+          "provider_tokens": null,
+          "seam_input_chars": null,
+          "seam_input_tokens": null,
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 3666.9
+        }
+      }
+    ]
+  },
+  "q01_hard_gate": {
+    "summary": {
+      "cases": 5,
+      "selected": [
+        "Q01-01",
+        "Q01-02",
+        "Q01-07",
+        "Q01-08",
+        "Q01-15"
+      ],
+      "pass": 5,
+      "fail": 0,
+      "ready_for_canary_judgement": 0,
+      "no_checks": 0,
+      "profile": "default",
+      "config_path": null
+    },
+    "cases": [
+      {
+        "case_id": "Q01-01",
+        "category": "cold_semantic",
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "min_hits": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": 1,
+          "provider_chars": [
+            40
+          ],
+          "provider_tokens": [
+            27
+          ],
+          "seam_input_chars": [
+            40
+          ],
+          "seam_input_tokens": [
+            27
+          ],
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 11278.8
+        }
+      },
+      {
+        "case_id": "Q01-02",
+        "category": "hot_cache",
+        "verdict": "PASS",
+        "checks": {
+          "additional_provider_calls": true,
+          "same_hit_ids": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": 0,
+          "provider_chars": [],
+          "provider_tokens": [
+            null
+          ],
+          "seam_input_chars": [
+            40
+          ],
+          "seam_input_tokens": [
+            27
+          ],
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 8193.9
+        }
+      },
+      {
+        "case_id": "Q01-07",
+        "category": "long_query",
+        "verdict": "PASS",
+        "checks": {
+          "truncated_true": true,
+          "head_retained": true,
+          "tail_retained": true,
+          "prepared_tokens_max": true,
+          "no_provider_error": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": 1,
+          "provider_chars": [
+            12145
+          ],
+          "provider_tokens": 7678,
+          "seam_input_chars": [
+            27350
+          ],
+          "seam_input_tokens": [
+            17013
+          ],
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 251826.4
+        }
+      },
+      {
+        "case_id": "Q01-08",
+        "category": "long_query",
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true,
+          "truncated_true": true,
+          "tail_retained": true,
+          "prepared_tokens_max": true,
+          "no_provider_error": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": 1,
+          "provider_chars": [
+            12131
+          ],
+          "provider_tokens": 7678,
+          "seam_input_chars": [
+            27382
+          ],
+          "seam_input_tokens": [
+            17037
+          ],
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 239650.0
+        }
+      },
+      {
+        "case_id": "Q01-15",
+        "category": "long_query",
+        "verdict": "PASS",
+        "checks": {
+          "truncated_false": true,
+          "prepared_equals_original": true
+        },
+        "observed": {
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "provider_payloads": 1,
+          "provider_chars": [
+            23
+          ],
+          "provider_tokens": [
+            16
+          ],
+          "seam_input_chars": [
+            23
+          ],
+          "seam_input_tokens": [
+            16
+          ],
+          "hit_count": 5,
+          "trace_built": true,
+          "raised": null,
+          "elapsed_ms": 4905.7
+        }
+      }
+    ]
+  },
+  "q01_layer_b_isolated": "the two embedding_failure cases are contract-proven (A02 tests + runner injection); no provider outage was manufactured in production",
+  "health_gate": {
+    "census": {
+      "qa_pairs:count(*)": "14046",
+      "qa_pairs:count(*) FILTER (WHERE embedding IS NULL)": "0",
+      "observation_notes:count(*)": "788",
+      "observation_notes:count(*) FILTER (WHERE embedding IS NULL)": "0",
+      "topics:count(*)": "348",
+      "topic_entries:count(*)": "12671",
+      "conversation_stream:count(*)": "14199",
+      "qa_embedding_chunks:count(*)": "269",
+      "observation_embedding_chunks:count(*)": "12",
+      "explicit_memories:count(*)": "1",
+      "yin_paragraphs:count(*)": "1333"
+    },
+    "post_cutoff": {
+      "qa_pairs:rows_after_cutoff": "2",
+      "qa_pairs:null_embedding_after_cutoff": "0",
+      "conversation_stream": "NO_TIMESTAMP_COLUMN",
+      "observation_notes:rows_after_cutoff": "0",
+      "observation_notes:null_embedding_after_cutoff": "0",
+      "explicit_memories:rows_after_cutoff": "1",
+      "explicit_memories:null_embedding_after_cutoff": "0"
+    },
+    "ledger": {
+      "embedding_failures": {
+        "rows": "0",
+        "last_24h": "NO_TS"
+      }
+    }
+  },
+  "known_limitations": [
+    "RecallTrace per-lane summaries stay empty on the Core query path (direct recall_pool call)",
+    "rerank HTTP 400 (siliconflow) pre-existing since 2026-09-23, out of A02 scope",
+    "test_reliability_cli --help smoke assumes a repo-local .venv",
+    "runtime-integrity doctor reports HEALTHY from on-disk identity, so a process started before the install still reads HEALTHY — the serve swap is what replaces the in-memory bytecode"
+  ],
+  "distribution": {
+    "pr": 12,
+    "merge_commit": "83fc337a5ecb592a8be90d99b410404ebacb2f7f",
+    "tag": "v0.2.2",
+    "entry": "release.yml on tag push → wheels + sdists + formal Release"
+  }
+}
