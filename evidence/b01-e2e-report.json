@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-27T11:27:31+0800",
+  "generated_at": "2026-09-27T13:24:06+0800",
   "steps": {
     "pg_container": {
       "name": "b01-e2e-pg",
@@ -11,25 +11,14 @@
       "broken": "C:\\Users\\servi\\workspace\\backups\\b01-e2e-20260927\\broken"
     },
     "bootstrap": {
-      "rc": 1,
-      "tail": "bytes\": 25042,\n    \"target\": {\n      \"database\": \"b01e2e\",\n      \"host\": \"127.0.0.1\",\n      \"password\": \"***\",\n      \"port\": 55501,\n      \"user\": \"v3user\"\n    }\n  },\n  \"target\": {\n    \"database\": \"b01e2e\",\n    \"host\": \"127.0.0.1\",\n    \"password\": \"***\",\n    \"port\": 55501,\n    \"user\": \"v3user\"\n  }\n}\n"
-    },
-    "bootstrap_fallback": {
-      "packaged_bootstrap_failed": true,
-      "packaged_error": "relation \"public.observation_notes\" does not exist",
-      "marker_line": "alpha_bootstrap.sql:139 (observation_embedding_chunks) < 269 (observation_notes)",
-      "manual_order_applied": [
-        "alpha_bootstrap.sql",
-        "explicit_memories.sql",
-        "qa_embedding_chunks.sql",
-        "observation_embedding_chunks.sql",
-        "embedding_failures.sql"
-      ]
+      "rc": 0,
+      "tail": "{\n      \"database\": \"b01e2e\",\n      \"host\": \"127.0.0.1\",\n      \"password\": \"***\",\n      \"port\": 55501,\n      \"user\": \"v3user\"\n    },\n    \"upgrade_applied\": true\n  },\n  \"target\": {\n    \"database\": \"b01e2e\",\n    \"host\": \"127.0.0.1\",\n    \"password\": \"***\",\n    \"port\": 55501,\n    \"user\": \"v3user\"\n  }\n}\n",
+      "fallback_used": false
     },
     "serve_ready_run1": {
       "host": "127.0.0.1",
-      "port": 62745,
-      "pid": 20288,
+      "port": 59106,
+      "pid": 16524,
       "bridge_protocol_version": "b01.1",
       "core_package_version": "4.0.0",
       "capabilities": {
@@ -62,9 +51,9 @@
           "source_id": "qa_sync/synthetic-dsh/sessA/e-u1"
         },
         "counts": {
-          "stream": 0,
+          "stream": 1,
           "qa": 0,
-          "stream_u1": 0,
+          "stream_u1": 1,
           "stream_hostB": 0,
           "qa_answered": 0,
           "qa_empty": 0
@@ -205,7 +194,7 @@
           "source_id": "qa_sync/synthetic-dsh/sessA/e-u3"
         },
         "counts": {
-          "stream": 3,
+          "stream": 4,
           "qa": 2,
           "stream_u1": 1,
           "stream_hostB": 1,
@@ -233,12 +222,12 @@
           "host": "synthetic-dsh"
         },
         "counts": {
-          "stream": 4,
-          "qa": 3,
+          "stream": 5,
+          "qa": 2,
           "stream_u1": 1,
           "stream_hostB": 1,
           "qa_answered": 1,
-          "qa_empty": 2
+          "qa_empty": 1
         }
       },
       {
@@ -307,8 +296,8 @@
     },
     "serve_ready_run2": {
       "host": "127.0.0.1",
-      "port": 62807,
-      "pid": 2340,
+      "port": 59164,
+      "pid": 18548,
       "bridge_protocol_version": "b01.1",
       "core_package_version": "4.0.0",
       "capabilities": {
@@ -321,13 +310,13 @@
     },
     "prefetch": {
       "http": 200,
-      "block_head": "[以下为与当前话题相关的过往对话/笔记片段；若信息不足，请如实说明，不要编造]\n\n[qa] [2026-09-27 03:27:42.033306+00:00] Q: B01-CANARY-QUESTION-1-B\nA:\n\n[qa] [2026-09-27 03:27:42.518776+00:00] Q: B01-CANARY-QUESTION-3\nA:\n\n[qa] [2026-09-27 03:27:42.281739+00:00] Q: B01-CANARY-QUESTION-2\nA:\n\n[qa] [2026-09-27 03:27:40.337200+00:00] Q: B01-CANARY-QUESTION-1\nA: B01-CANARY-ANSWER-1",
+      "block_head": "[以下为与当前话题相关的过往对话/笔记片段；若信息不足，请如实说明，不要编造]\n\n[qa] [2026-09-27 05:24:13.600967+00:00] Q: B01-CANARY-QUESTION-1-B\nA:\n\n[qa] [2026-09-27 05:24:11.907551+00:00] Q: B01-CANARY-QUESTION-1\nA: B01-CANARY-ANSWER-1\n\n[qa] [2026-09-27 05:24:14.164661+00:00] Q: B01-CANARY-QUESTION-3\nA:\n\n[qa] [2026-09-27 05:24:13.875680+00:00] Q: B01-CANARY-QUESTION-2\nA:",
       "hit_canary": true
     },
     "serve_ready_broken": {
       "host": "127.0.0.1",
-      "port": 62864,
-      "pid": 20084,
+      "port": 59228,
+      "pid": 17988,
       "bridge_protocol_version": "b01.1",
       "core_package_version": "4.0.0",
       "capabilities": {
@@ -387,6 +376,7 @@
       "out_of_order_not_guessed": true,
       "writer_rejection_reported": true,
       "ready_json_real_port": true,
+      "packaged_bootstrap_ok": true,
       "counts": {
         "stream": 13,
         "qa": 4,

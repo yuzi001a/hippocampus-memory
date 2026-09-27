@@ -52,6 +52,17 @@ def docker(*args):
     return run(["docker", *args])
 
 
+def host_tcp_ok(port: int = None) -> bool:
+    """True when the published PG port really accepts a host-side TCP connect."""
+    import socket
+    p = port or PGPORT
+    try:
+        with socket.create_connection(("127.0.0.1", p), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
 # ── 1. disposable container ─────────────────────────────────────
 def start_pg() -> None:
     docker("rm", "-f", CTR)
@@ -62,17 +73,24 @@ def start_pg() -> None:
                "-e", "POSTGRES_DB=b01e2e",
                "pgvector/pgvector:pg17")
     assert r.returncode == 0, r.stderr
-    for _ in range(60):
-        ok = docker("exec", CTR, "pg_isready", "-U", "v3user", "-d", "b01e2e")
-        if ok.returncode == 0:
+    # pg_isready returns OK during the container's init phase (temp server on the
+    # unix socket) while the published TCP port still refuses connections — which
+    # made bootstrap fail as a spurious "fresh-install" error. Require BOTH a real
+    # query inside the container AND a host-side TCP connect to the mapped port.
+    ver = ""
+    last = ""
+    for _ in range(90):
+        probe = docker("exec", CTR, "psql", "-U", "v3user", "-d", "b01e2e", "-tAc",
+                       "SELECT version()")
+        ver = (probe.stdout or "").strip()
+        last = (probe.stderr or "").strip()[:120]
+        if probe.returncode == 0 and ver and host_tcp_ok():
             break
         time.sleep(1)
     else:
-        raise RuntimeError("PG 未就绪")
-    ver = docker("exec", CTR, "psql", "-U", "v3user", "-d", "b01e2e", "-tAc",
-                 "SELECT version()").stdout.strip()
+        raise RuntimeError(f"PG 未就绪（version={ver!r} tcp={host_tcp_ok()} err={last}）")
     EVIDENCE["steps"]["pg_container"] = {"name": CTR, "port": PGPORT, "version": ver[:60]}
-    log(f"[1] PG ready: {ver[:50]}")
+    log(f"[1] PG ready: {ver[:50]} (host tcp ok)")
 
 
 # ── 2. isolated profile ─────────────────────────────────────────
@@ -113,11 +131,12 @@ def bootstrap(home: Path) -> None:
     S = EVIDENCE["steps"]
     S["bootstrap"] = {"rc": r.returncode, "tail": tail[-300:]}
     if r.returncode == 0:
-        log("[3] hippocampus bootstrap OK")
+        S["bootstrap"]["fallback_used"] = False
+        log("[3] hippocampus bootstrap OK（packaged path，无 fallback）")
         return
-    # 打包 bootstrap 在全新库上有 splice 顺序缺陷（观察 chunks 的 FK 早于
-    # observation_notes 建表）——按依赖顺序手工应用同一批 artifact，并如实记录。
-    log("[3] hippocampus bootstrap FAILED → 按依赖顺序手工应用 packaged artifacts")
+    # 诊断兼容路径保留（fresh-install 顺序缺陷的历史记录不删除），但正常路径
+    # 必须不需要它：一旦用到 fallback 就是回归，本轮直接判失败。
+    log("[3] hippocampus bootstrap FAILED → 走诊断 fallback（这本身即为失败信号）")
     schema = REPO / "src" / "v3-core" / "schema"
     order = ["alpha_bootstrap.sql", "explicit_memories.sql", "qa_embedding_chunks.sql",
              "observation_embedding_chunks.sql", "embedding_failures.sql"]
@@ -131,38 +150,58 @@ def bootstrap(home: Path) -> None:
                     "-d", "b01e2e", "-f", f"/tmp/{name}")
         assert rr.returncode == 0, f"{name} 应用失败: {rr.stdout[-300:]} {rr.stderr[-300:]}"
         applied.append(name)
+    S["bootstrap"]["fallback_used"] = True
     S["bootstrap_fallback"] = {
         "packaged_bootstrap_failed": True,
         "packaged_error": "relation \"public.observation_notes\" does not exist",
         "marker_line": "alpha_bootstrap.sql:139 (observation_embedding_chunks) < 269 (observation_notes)",
         "manual_order_applied": applied,
+        "status": "RESOLVED in the fresh-bootstrap hotfix — kept as diagnostic only; "
+                  "seeing this step means the ordering regressed",
     }
     log(f"[3] 手工应用完成: {applied}")
+    EVIDENCE["summary"] = {"packaged_bootstrap_fallback_used": True,
+                           "verdict": "FAIL — fresh packaged bootstrap must work"}
+    with open(REPO / "evidence" / "b01-e2e-report.json", "w", encoding="utf-8") as fh:
+        json.dump(EVIDENCE, fh, ensure_ascii=False, indent=2)
+    raise AssertionError(
+        "packaged fresh bootstrap must succeed; fallback_used=True means the "
+        "FRESH_DB_BOOTSTRAP_DEPENDENCY_ORDER fix regressed")
 
 
 # ── 3. real serve with --port 0 --ready-json ────────────────────
 def start_serve(home: Path, tag: str) -> tuple[subprocess.Popen, dict]:
+    # stdout/stderr go to a FILE, never a PIPE: this harness only reads the
+    # pipe until the ready line, and an undrained pipe wedges the server on
+    # its next log write (64 KiB buffer) — which looks exactly like a product
+    # hang. Log file also keeps the crash story readable.
+    log_path = ROOT / f"serve-{tag}.log"
+    logfh = open(log_path, "w", encoding="utf-8")
     proc = subprocess.Popen(
         [str(VENV / "v3-core.exe"), "serve", "--port", "0", "--ready-json"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
-        errors="replace", env=env_for(home), cwd=str(REPO),
+        stdout=logfh, stderr=subprocess.STDOUT,
+        env=env_for(home), cwd=str(REPO),
     )
     ready = None
     deadline = time.time() + 180
     while time.time() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            if proc.poll() is not None:
-                raise RuntimeError(f"serve 提前退出: {(proc.stderr.read() or '')[-500:]}")
-            continue
-        line = line.strip()
-        try:
-            data = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(data, dict) and data.get("event") == "ready":
-            ready = data
+        if proc.poll() is not None:
+            logfh.flush()
+            raise RuntimeError(f"serve 提前退出: {log_path.read_text(encoding='utf-8')[-500:]}")
+        line = ""
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("{") and '"ready"' in line:
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(data, dict) and data.get("event") == "ready":
+                        ready = data
+        if ready is not None:
             break
+        time.sleep(0.3)
     if ready is None:
         proc.kill()
         raise RuntimeError("未收到 ready event")
@@ -353,6 +392,7 @@ def main() -> int:
         "out_of_order_not_guessed": True,
         "writer_rejection_reported": True,
         "ready_json_real_port": port > 0,
+        "packaged_bootstrap_ok": S["bootstrap"].get("fallback_used") is False,
         "counts": S["final_counts"],
     }
     (REPO / "evidence" / "b01-e2e-report.json").write_text(

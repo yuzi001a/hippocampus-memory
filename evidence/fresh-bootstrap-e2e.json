@@ -1,0 +1,96 @@
+{
+  "steps": {
+    "build": {
+      "head": "0684f0472fd0e1597a42f0ceacfbf5a2b34e238f",
+      "packaged_source_dirty": "M src/v3-core/src/v3core/schema/alpha_bootstrap.sql",
+      "wheel": "v3_core-4.0.0-py3-none-any.whl",
+      "wheel_bytes": 881946,
+      "build_rc": 0
+    },
+    "fresh_install": {
+      "venv": "C:\\Users\\servi\\workspace\\backups\\fresh-bootstrap-e2e\\venv",
+      "v3_core_version": "4.0.0",
+      "console_script": "hippocampus.exe"
+    },
+    "pg": {
+      "container": "freshboot-e2e-pg",
+      "port": 55505,
+      "database": "freshboot",
+      "version": "PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2) on x86_64-pc-linux-gnu",
+      "public_tables_before": 0
+    },
+    "bootstrap_1": {
+      "rc": 0,
+      "tail": "{\n  \"alpha_bootstrap_sql_sha256\": \"343f5d25dca0d1035e6fbe5373a9e5040e4af0b617ebeb986e8ce4f3bd0523cb\",\n  \"command\": \"bootstrap\",\n  \"result\": {\n    \"applied\": true,\n    \"include_expanded\": true,\n    \"sql_bytes\": 25042,\n    \"target\": {\n      \"database\": \"freshboot\",\n      \"host\": \"127.0.0.1\",\n      \"password\": \"***\",\n      \"port\": 55505,\n      \"user\": \"v3user\"\n    },\n    \"upgrade_applied\": true\n  },\n  \"target\": {\n    \"database\": \"freshboot\",\n    \"host\": \"127.0.0.1\",\n    \"password\": \"***\",\n    \"port\": 55505,\n    \"user\": \"v3user\"\n  }\n}\n",
+      "cwd": "C:\\Users\\servi\\workspace\\backups\\fresh-bootstrap-e2e\\neutral-cwd",
+      "pythonpath_set": false,
+      "undefined_notes": false,
+      "undefinedtable": false
+    },
+    "tables_after_bootstrap_1": {
+      "explicit_memories": true,
+      "qa_pairs": true,
+      "qa_embedding_chunks": true,
+      "conversation_stream": true,
+      "topics": true,
+      "topic_entries": true,
+      "observation_notes": true,
+      "observation_embedding_chunks": true,
+      "yin_paragraphs": true,
+      "schema_versions": true,
+      "embedding_failures": false
+    },
+    "fks_after_bootstrap_1": {
+      "observation_embedding_chunks.observation_id -> observation_notes": "observation_embedding_chunks_observation_id_fkey",
+      "qa_embedding_chunks.qa_id -> qa_pairs": "qa_embedding_chunks_qa_id_fkey"
+    },
+    "indexes_after_bootstrap_1": {
+      "qa_embedding_chunks": 4,
+      "observation_embedding_chunks": 4
+    },
+    "unreachable_artifact_tables": {
+      "embedding_failures": false
+    },
+    "bootstrap_2": {
+      "rc": 0,
+      "tail": "{\n  \"alpha_bootstrap_sql_sha256\": \"343f5d25dca0d1035e6fbe5373a9e5040e4af0b617ebeb986e8ce4f3bd0523cb\",\n  \"command\": \"bootstrap\",\n  \"result\": {\n    \"applied\": true,\n    \"include_expanded\": true,\n    \"sql_bytes\": 25042,\n    \"target\": {\n      \"database\": \"freshboot\",\n      \"host\": \"127.0.0.1\",\n      \"password\": \"***\",\n      \"port\": 55505,\n      \"user\": \"v3user\"\n    },\n    \"upgrade_applied\": true\n  },\n  \"target\": {\n    \"database\": \"freshboot\",\n    \"host\": \"127.0.0.1\",\n    \"password\": \"***\",\n    \"port\": 55505,\n    \"user\": \"v3user\"\n  }\n}\n",
+      "cwd": "C:\\Users\\servi\\workspace\\backups\\fresh-bootstrap-e2e\\neutral-cwd",
+      "pythonpath_set": false,
+      "undefined_notes": false,
+      "undefinedtable": false
+    },
+    "tables_after_bootstrap_2": {
+      "explicit_memories": true,
+      "qa_pairs": true,
+      "qa_embedding_chunks": true,
+      "conversation_stream": true,
+      "topics": true,
+      "topic_entries": true,
+      "observation_notes": true,
+      "observation_embedding_chunks": true,
+      "yin_paragraphs": true,
+      "schema_versions": true,
+      "embedding_failures": false
+    },
+    "fks_after_bootstrap_2": {
+      "observation_embedding_chunks.observation_id -> observation_notes": "observation_embedding_chunks_observation_id_fkey",
+      "qa_embedding_chunks.qa_id -> qa_pairs": "qa_embedding_chunks_qa_id_fkey"
+    },
+    "indexes_after_bootstrap_2": {
+      "qa_embedding_chunks": 4,
+      "observation_embedding_chunks": 4
+    }
+  },
+  "summary": {
+    "red_reproduced": false,
+    "packaged_fresh_bootstrap": "PASS",
+    "missing_tables": null,
+    "fk_present": true,
+    "fk_missing": null,
+    "second_bootstrap_rc": 0,
+    "idempotent_tables_stable": true,
+    "idempotent_indexes_stable": true,
+    "schema_versions_rows": 1,
+    "fallback_used": false
+  }
+}
