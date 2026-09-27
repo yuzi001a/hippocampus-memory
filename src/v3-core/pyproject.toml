@@ -32,6 +32,9 @@ dependencies = [
     "pgvector",
     "jieba",
     "openai",
+    # B02 official MCP stdio path. v3core.mcp_server uses the FastMCP 1.x API;
+    # mcp 2.x removed/changed that import surface, so keep the upper bound explicit.
+    "mcp>=1.0,<2",
     # 2026-09-04 P1.3.1 deadline-closure: Aho-Corasick multi-pattern string
     # scan replaces the rows×terms nested-substring scan inside
     # _qa_snapshot_lookup for long-query prefetch.  Required at runtime
