@@ -108,6 +108,13 @@ The following rows summarize current evidence from a fresh disposable Windows 10
 - multi-writer and multi-agent routing — not implemented;
 - long-soak evidence and any "no known issue" claim.
 
+### Host adapters (capability matrix)
+
+| Host | Support level | What that means | Evidence |
+|---|---|---|---|
+| Hermes Agent (`v3-hermes-plugin`) | provider | registered memory provider; 13 tools + prefetch/sync_turn hooks | plugin-mediated E2E still `UNKNOWN / NOT TESTED` (see the table above) |
+| DeepSeek Harness (DSH) via its official MCP client | **TOOL** | explicit tool calls only — **no** automatic recording, **no** automatic recall injection (that is B04) | verified on the public `v0.2.8` asset: 13 tools discovered, durable store with a 1024-d vector, reworded question recalled the record (`cosine 0.5324`), full source read, surviving a full host restart — [`docs/B02-DSH-TOOL-SUPPORT.md`](docs/B02-DSH-TOOL-SUPPORT.md) |
+
 ## Why this is not just a vector database
 
 Vector similarity is only one possible recall lane. Hippocampus also cares about whether source data survives, whether explicit memory has a canonical durable home, whether the system still works without an embedding provider, whether derived state can be rebuilt, whether restart and backup/restore preserve usable memory, and whether the boundary between evidence and interpretation remains inspectable.

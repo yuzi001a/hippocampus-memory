@@ -1,6 +1,6 @@
 # Hippocampus — global development baseline (A01)
 
-Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2) / `B01 = DONE` (merged, PR #15) / `FRESH_DB_BOOTSTRAP_HOTFIX = DONE` (v0.2.3) / `B02 = DOING` (see the sections at the end)
+Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2) / `B01 = DONE` (merged, PR #15) / `FRESH_DB_BOOTSTRAP_HOTFIX = DONE` (v0.2.3) / `B02 = DONE` (DSH SUPPORT LEVEL = TOOL, v0.2.8 — see the sections at the end)
 
 ## A01 — one integration baseline for all follow-on work
 
@@ -560,3 +560,57 @@ next             B02 = DOING — DSH SUPPORT LEVEL = TOOL via `v3-core mcp` stdi
 - Production: no install, restart, schema mutation, or data write.
 
 next             B03 remains blocked on re-evaluating `OUTBOX_REPLAY_SOURCE_AT_LEAST_ONCE` before pi automatic event collection.
+
+## B02 embedding-401 round → B02 = DONE (2026-09-28)
+
+The single B02 blocker in the section above is closed, and closing it surfaced three
+real defects on the same seam. Chain: `v0.2.6` → `v0.2.7` → `v0.2.8`
+(main `7a59e5d` → `8ebc431` → `d0b8904`).
+
+**401 classification (not a guess).** The provider rejected a request that carried no
+valid token: MCP-child log `embedding HTTP 401 … code 30014 Token is invalid`, same
+endpoint/model as a healthy direct call. Root cause: the canary profile had no
+*resolvable* embedding credential — the engine reads `api_key` from config or
+`${env:V3CORE_EMBED_API_KEY}` (process env or the profile's own `.env`), and the old
+harness exported `SILICONFLOW_API_KEY`, a name the package never reads. Direct leg with
+the profile's real credential: HTTP 2xx, `dims=1024`. Controlled reproduction (credential
+emptied): the identical 401/code 30014 signature.
+
+**Fixed on this path.**
+- `v0.2.6` (`7a59e5d`): MCP/CLI entry points never read `HERMES_HOME`, so a fresh
+  install's profile was invisible to the MCP child — 13 tools listed, first call failed
+  with `V3CORE_PG_PASSWORD not set`.
+- `v0.2.7` (`8ebc431`): core-internal leaves resolved the **default** profile — a
+  process booted on a non-default profile reported `_get_pg_conn()` against another
+  install's database (`topics=349`) and cached that foreign topic matrix locally.
+  Verified before/after: `5433/v3embeddings@349` → `55521/v3embeddings_alpha@0`.
+  Production untouched (349 topics unchanged, no canary rows).
+- `v0.2.8` (`d0b8904`): `v3_search` → `search_cards` skipped the active-memory vector
+  lane, so a reworded question returned 0 hits.
+
+**Final acceptance on the public `v0.2.8` asset (fresh venv, fresh pgvector container
+55523, `hippocampus install` = INSTALL OK with its own write+readback+recall smoke).**
+- Session A `v3_store`: `durable=true`, `DURABLE_COMMITTED`, `warnings=[]`; DB readback
+  `embedding IS NOT NULL`, `vector_dims=1024`.
+- Session B, new DSH session, reworded query with no substring overlap:
+  `v3_search` → 4 hits, top = the stored record `cosine 0.5324` (vector lane);
+  `v3_get(target=hm)` read the full source; the answer used it.
+- Session C, DSH + MCP child fully restarted, different question: the record was
+  retrieved and read again (`v3_get(hm)`), answer "Thursday 09:30 Beijing time".
+- Honesty: with the credential removed, a store returns `durable=true` **and**
+  `status=DERIVED_WARNING` + `warnings=[… class=EMBEDDING_AUTH_FAILED … 401 …]`.
+- Profile leak: none — the non-default profile read its own database throughout.
+
+**G01 delivered with B02:** `docs/B02-DSH-TOOL-SUPPORT.md` (tested versions, exact MCP
+config, verified transcript, limitation list), README host-adapter capability matrix,
+and `docs/KNOWN-LIMITATIONS.md` §1.7.
+
+**Carried forward (explicit, not hidden):**
+- `F2 OUTBOX_REPLAY_SOURCE_AT_LEAST_ONCE` untouched — still `B03_PRECONDITION`.
+- `topic_recall: no data source (PG failed, SQLite not found)` on fresh installs is a
+  benign warning; the topic lane is degraded, record lanes unaffected. Follow-up.
+- A raw stdio JSON-RPC probe of the MCP child (this round's scratch harness, not the
+  DSH path) died mid-call with `exit_code=143` and no traceback while the same call
+  succeeds in-process and through DSH. Unreproduced through the official client;
+  recorded as an open anomaly with evidence paths under
+  `workspace/dsh-b02-canary/sp*_child.stderr.txt`.
