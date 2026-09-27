@@ -33,6 +33,8 @@ from .config import resolve_config, _resolve_data_dir
 
 # ── LiveBuffer (实时 ingest) ──
 
+_LEGACY_HOST = "legacy"
+
 LIVE_BATCH = 8
 LIVE_FLUSH_SEC = 30.0
 # 2026-08-27 pool-owner 回归修复: 断线重连参数显式化
@@ -119,7 +121,8 @@ class LiveBuffer:
         return None, None
 
     def enqueue(self, session_id: str, msg_id: str, content: str = '', role: str = '',
-                turn_id: str = '', timestamp=None, tool_calls=None, tool_results=None) -> bool | None:
+                turn_id: str = '', timestamp=None, tool_calls=None, tool_results=None,
+                host: str = '') -> bool | None:
         """Enqueue a live message.
 
         Return contract (2026-09-07 compression-aware durability, B + C):
@@ -149,11 +152,13 @@ class LiveBuffer:
             timestamp = _parse_msg_timestamp(timestamp)
         except (ImportError, AttributeError):
             pass
-        item = (session_id, msg_id, content, role, turn_id, timestamp, tool_calls, tool_results)
+        item = (session_id, msg_id, content, role, turn_id, timestamp, tool_calls,
+                tool_results, str(host or ''))
         # Cross-process accepted/pending identity gate: do this before
         # computing or persisting a new content-sensitive job id.
         if self.has_durable_marker(session_id, msg_id, content, role, turn_id,
-                                   timestamp, tool_calls, tool_results):
+                                   timestamp, tool_calls, tool_results,
+                                   host=str(host or '')):
             return True
         # Compute the same job_id we will persist on disk; cheap sha256
         # over the deterministic payload.
@@ -255,18 +260,64 @@ class LiveBuffer:
         identity = f"{session_id}\x00{msg_id}".encode("utf-8", errors="ignore")
         return hashlib.sha256(identity).hexdigest()
 
-    def _live_accepted_path(self, session_id: str, msg_id: str):
+    def _live_accepted_path(self, session_id: str, msg_id: str, host: str = ""):
+        """Durable accepted-identity tombstone path.
+
+        B01 backward compatibility: a missing/empty host OR the explicit
+        legacy namespace resolves to the SAME template as before, so every
+        tombstone already on disk keeps resolving.  A real host gets its own
+        namespace, so identical session/event ids from two hosts do not
+        collide.
+        """
         dirp = self._live_accepted_dir()
         if dirp is None:
             return None
+        host_key = str(host or "").strip()
+        if host_key and host_key != _LEGACY_HOST:
+            safe_host = host_key.replace("..", "_").replace("/", "_").replace("\\", "_")
+            return dirp / safe_host / f"{self._live_identity_id(session_id, msg_id)}.json"
         return dirp / f"{self._live_identity_id(session_id, msg_id)}.json"
 
-    def _persist_live_accepted(self, item) -> bool:
+    def event_status(self, session_id: str, msg_id: str, host: str = "",
+                     item=None) -> str:
+        """Durable ingest status for one canonical event identity.
+
+        * ``durable`` — accepted tombstone exists (PG ack already happened);
+          survives a process restart.
+        * ``pending`` — durable outbox marker exists, PG write not yet acked.
+          Requires the full item (the pending identity is content-sensitive).
+        * ``absent``  — no durable trace.
+
+        This is the probe callers use so correctness never depends on
+        in-process counters or the message buffer.
+        """
+        if not session_id or not msg_id:
+            return "absent"
+        try:
+            path = self._live_accepted_path(str(session_id), str(msg_id), host)
+            if path is not None and path.exists():
+                return "durable"
+        except Exception:
+            return "absent"
+        if item is None:
+            return "absent"
+        try:
+            job_id = self._live_job_id(item)
+            dirp = self._live_pending_dir()
+            if dirp is not None and (dirp / f"{job_id}.json").exists():
+                return "pending"
+        except Exception:
+            pass
+        return "absent"
+
+    def _persist_live_accepted(self, item, host: str = "") -> bool:
         """Persist a post-PG-ack identity tombstone before deleting outbox."""
         try:
             session_id = str(item[0]) if len(item) > 0 else ""
             msg_id = str(item[1]) if len(item) > 1 else ""
-            path = self._live_accepted_path(session_id, msg_id)
+            if not host and len(item) > 8 and item[8]:
+                host = str(item[8])
+            path = self._live_accepted_path(session_id, msg_id, host)
             dirp = self._live_accepted_dir()
             if path is None or dirp is None:
                 return False
@@ -300,10 +351,11 @@ class LiveBuffer:
 
     def has_durable_marker(self, session_id: str, msg_id: str, content: str = "",
                            role: str = "", turn_id: str = "", timestamp=None,
-                           tool_calls=None, tool_results=None) -> bool:
+                           tool_calls=None, tool_results=None,
+                           host: str = "") -> bool:
         """Return whether this canonical identity is pending or already accepted."""
         try:
-            accepted = self._live_accepted_path(str(session_id), str(msg_id))
+            accepted = self._live_accepted_path(str(session_id), str(msg_id), host)
             if accepted is not None and accepted.exists():
                 return True
             try:
@@ -334,7 +386,11 @@ class LiveBuffer:
             ts = item[5] if len(item) > 5 else None
             tc = item[6] if len(item) > 6 else None
             tr = item[7] if len(item) > 7 else None
-            payload = json.dumps({"session_id": session_id, "msg_id": msg_id, "content": content, "role": role, "turn_id": turn_id, "ts": str(ts) if ts is not None else "", "tc": tc, "tr": tr}, sort_keys=True, ensure_ascii=False, default=str)
+            _payload = {"session_id": session_id, "msg_id": msg_id, "content": content, "role": role, "turn_id": turn_id, "ts": str(ts) if ts is not None else "", "tc": tc, "tr": tr}
+            _item_host = str(item[8]).strip() if len(item) > 8 and item[8] else ""
+            if _item_host and _item_host != _LEGACY_HOST:
+                _payload["host"] = _item_host
+            payload = json.dumps(_payload, sort_keys=True, ensure_ascii=False, default=str)
             return hashlib.sha256(payload.encode("utf-8")).hexdigest()
         except Exception:
             import hashlib

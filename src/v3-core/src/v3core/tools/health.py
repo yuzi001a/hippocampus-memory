@@ -282,6 +282,12 @@ def _observer_check(state: dict, qa_head=None, *, qa_count=None, qa_head_id=None
 
 def handle_v3_health(args: dict, **kw) -> str:
     result = {"timestamp": time.time(), "checks": {}}
+    # B01: HTTP /health 与 MCP v3_health 共用同一 capability 真值
+    try:
+        from ..bridge_contract import get_bridge_capabilities
+        result["bridge"] = get_bridge_capabilities()
+    except Exception:
+        pass
     cfg = {}
     pg = None
     counts = {}

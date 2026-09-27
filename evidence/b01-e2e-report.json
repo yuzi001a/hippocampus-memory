@@ -1,0 +1,400 @@
+{
+  "generated_at": "2026-09-27T11:27:31+0800",
+  "steps": {
+    "pg_container": {
+      "name": "b01-e2e-pg",
+      "port": 55501,
+      "version": "PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2) on x86_64-pc-linu"
+    },
+    "profiles": {
+      "hostA": "C:\\Users\\servi\\workspace\\backups\\b01-e2e-20260927\\hostA",
+      "broken": "C:\\Users\\servi\\workspace\\backups\\b01-e2e-20260927\\broken"
+    },
+    "bootstrap": {
+      "rc": 1,
+      "tail": "bytes\": 25042,\n    \"target\": {\n      \"database\": \"b01e2e\",\n      \"host\": \"127.0.0.1\",\n      \"password\": \"***\",\n      \"port\": 55501,\n      \"user\": \"v3user\"\n    }\n  },\n  \"target\": {\n    \"database\": \"b01e2e\",\n    \"host\": \"127.0.0.1\",\n    \"password\": \"***\",\n    \"port\": 55501,\n    \"user\": \"v3user\"\n  }\n}\n"
+    },
+    "bootstrap_fallback": {
+      "packaged_bootstrap_failed": true,
+      "packaged_error": "relation \"public.observation_notes\" does not exist",
+      "marker_line": "alpha_bootstrap.sql:139 (observation_embedding_chunks) < 269 (observation_notes)",
+      "manual_order_applied": [
+        "alpha_bootstrap.sql",
+        "explicit_memories.sql",
+        "qa_embedding_chunks.sql",
+        "observation_embedding_chunks.sql",
+        "embedding_failures.sql"
+      ]
+    },
+    "serve_ready_run1": {
+      "host": "127.0.0.1",
+      "port": 62745,
+      "pid": 20288,
+      "bridge_protocol_version": "b01.1",
+      "core_package_version": "4.0.0",
+      "capabilities": {
+        "events": "v1",
+        "prefetch": "v1",
+        "tools": "v1",
+        "source_read": "v1",
+        "status": "v1"
+      }
+    },
+    "events": [
+      {
+        "label": "single_user",
+        "request": {
+          "host": "synthetic-dsh",
+          "session_id": "sessA",
+          "role": "user",
+          "content": "B01-CANARY-QUESTION-1",
+          "turn_id": "1",
+          "event_id": "e-u1"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": true,
+          "duplicate": false,
+          "status": "accepted",
+          "event_id": "e-u1",
+          "host": "synthetic-dsh",
+          "source_id": "qa_sync/synthetic-dsh/sessA/e-u1"
+        },
+        "counts": {
+          "stream": 0,
+          "qa": 0,
+          "stream_u1": 0,
+          "stream_hostB": 0,
+          "qa_answered": 0,
+          "qa_empty": 0
+        }
+      },
+      {
+        "label": "assistant_same_turn",
+        "request": {
+          "host": "synthetic-dsh",
+          "session_id": "sessA",
+          "event_id": "e-a1",
+          "role": "assistant",
+          "content": "B01-CANARY-ANSWER-1",
+          "turn_id": "1"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": true,
+          "duplicate": false,
+          "status": "accepted",
+          "event_id": "e-a1",
+          "host": "synthetic-dsh"
+        },
+        "counts": {
+          "stream": 1,
+          "qa": 0,
+          "stream_u1": 1,
+          "stream_hostB": 0,
+          "qa_answered": 0,
+          "qa_empty": 0
+        }
+      },
+      {
+        "label": "duplicate_same_process",
+        "request": {
+          "host": "synthetic-dsh",
+          "session_id": "sessA",
+          "role": "user",
+          "content": "B01-CANARY-QUESTION-1",
+          "turn_id": "1",
+          "event_id": "e-u1"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": false,
+          "duplicate": true,
+          "status": "duplicate",
+          "event_id": "e-u1",
+          "host": "synthetic-dsh"
+        },
+        "counts": {
+          "stream": 2,
+          "qa": 0,
+          "stream_u1": 1,
+          "stream_hostB": 0,
+          "qa_answered": 0,
+          "qa_empty": 0
+        }
+      },
+      {
+        "label": "same_ids_other_host",
+        "request": {
+          "host": "synthetic-pi",
+          "session_id": "sessA",
+          "event_id": "e-u1",
+          "role": "user",
+          "content": "B01-CANARY-QUESTION-1-B",
+          "turn_id": "1"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": true,
+          "duplicate": false,
+          "status": "accepted",
+          "event_id": "e-u1",
+          "host": "synthetic-pi",
+          "source_id": "qa_sync/synthetic-pi/sessA/e-u1"
+        },
+        "counts": {
+          "stream": 2,
+          "qa": 0,
+          "stream_u1": 1,
+          "stream_hostB": 0,
+          "qa_answered": 0,
+          "qa_empty": 0
+        }
+      },
+      {
+        "label": "turn2_user_missing_answer",
+        "request": {
+          "host": "synthetic-dsh",
+          "session_id": "sessA",
+          "event_id": "e-u2",
+          "role": "user",
+          "content": "B01-CANARY-QUESTION-2",
+          "turn_id": "2"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": true,
+          "duplicate": false,
+          "status": "accepted",
+          "event_id": "e-u2",
+          "host": "synthetic-dsh",
+          "source_id": "qa_sync/synthetic-dsh/sessA/e-u2"
+        },
+        "counts": {
+          "stream": 3,
+          "qa": 1,
+          "stream_u1": 1,
+          "stream_hostB": 1,
+          "qa_answered": 1,
+          "qa_empty": 0
+        }
+      },
+      {
+        "label": "turn3_user_flushes_turn2",
+        "request": {
+          "host": "synthetic-dsh",
+          "session_id": "sessA",
+          "event_id": "e-u3",
+          "role": "user",
+          "content": "B01-CANARY-QUESTION-3",
+          "turn_id": "3"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": true,
+          "duplicate": false,
+          "status": "accepted",
+          "event_id": "e-u3",
+          "host": "synthetic-dsh",
+          "source_id": "qa_sync/synthetic-dsh/sessA/e-u3"
+        },
+        "counts": {
+          "stream": 3,
+          "qa": 2,
+          "stream_u1": 1,
+          "stream_hostB": 1,
+          "qa_answered": 1,
+          "qa_empty": 1
+        }
+      },
+      {
+        "label": "orphan_assistant_turn5",
+        "request": {
+          "host": "synthetic-dsh",
+          "session_id": "sessA",
+          "event_id": "e-a5",
+          "role": "assistant",
+          "content": "B01-CANARY-ANSWER-5",
+          "turn_id": "5"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": true,
+          "duplicate": false,
+          "status": "accepted",
+          "event_id": "e-a5",
+          "host": "synthetic-dsh"
+        },
+        "counts": {
+          "stream": 4,
+          "qa": 3,
+          "stream_u1": 1,
+          "stream_hostB": 1,
+          "qa_answered": 1,
+          "qa_empty": 2
+        }
+      },
+      {
+        "label": "legacy_payload_no_host",
+        "request": {
+          "session_id": "sessA",
+          "msg_id": "legacy-m1",
+          "role": "user",
+          "content": "LEGACY-PAYLOAD-QUESTION"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": true,
+          "duplicate": false,
+          "status": "accepted",
+          "event_id": "legacy-m1",
+          "host": "legacy",
+          "source_id": "qa_sync/sessA/8/legacy-m1"
+        },
+        "counts": {
+          "stream": 6,
+          "qa": 3,
+          "stream_u1": 1,
+          "stream_hostB": 1,
+          "qa_answered": 1,
+          "qa_empty": 2
+        }
+      },
+      {
+        "label": "restart_duplicate",
+        "request": {
+          "host": "synthetic-dsh",
+          "session_id": "sessA",
+          "role": "user",
+          "content": "B01-CANARY-QUESTION-1",
+          "turn_id": "1",
+          "event_id": "e-u1"
+        },
+        "http": 200,
+        "response": {
+          "ok": true,
+          "accepted": false,
+          "duplicate": true,
+          "status": "duplicate",
+          "event_id": "e-u1",
+          "host": "synthetic-dsh"
+        },
+        "counts": {
+          "stream": 7,
+          "qa": 4,
+          "stream_u1": 1,
+          "stream_hostB": 1,
+          "qa_answered": 1,
+          "qa_empty": 3
+        }
+      }
+    ],
+    "pre_restart_counts": {
+      "stream": 7,
+      "qa": 4,
+      "stream_u1": 1,
+      "stream_hostB": 1,
+      "qa_answered": 1,
+      "qa_empty": 3
+    },
+    "serve_ready_run2": {
+      "host": "127.0.0.1",
+      "port": 62807,
+      "pid": 2340,
+      "bridge_protocol_version": "b01.1",
+      "core_package_version": "4.0.0",
+      "capabilities": {
+        "events": "v1",
+        "prefetch": "v1",
+        "tools": "v1",
+        "source_read": "v1",
+        "status": "v1"
+      }
+    },
+    "prefetch": {
+      "http": 200,
+      "block_head": "[以下为与当前话题相关的过往对话/笔记片段；若信息不足，请如实说明，不要编造]\n\n[qa] [2026-09-27 03:27:42.033306+00:00] Q: B01-CANARY-QUESTION-1-B\nA:\n\n[qa] [2026-09-27 03:27:42.518776+00:00] Q: B01-CANARY-QUESTION-3\nA:\n\n[qa] [2026-09-27 03:27:42.281739+00:00] Q: B01-CANARY-QUESTION-2\nA:\n\n[qa] [2026-09-27 03:27:40.337200+00:00] Q: B01-CANARY-QUESTION-1\nA: B01-CANARY-ANSWER-1",
+      "hit_canary": true
+    },
+    "serve_ready_broken": {
+      "host": "127.0.0.1",
+      "port": 62864,
+      "pid": 20084,
+      "bridge_protocol_version": "b01.1",
+      "core_package_version": "4.0.0",
+      "capabilities": {
+        "events": "v1",
+        "prefetch": "v1",
+        "tools": "v1",
+        "source_read": "v1",
+        "status": "v1"
+      }
+    },
+    "writer_rejection": {
+      "http": 503,
+      "response": {
+        "ok": false,
+        "accepted": false,
+        "duplicate": false,
+        "status": "retryable",
+        "event_id": "e-bad1",
+        "host": "synthetic-dsh"
+      }
+    },
+    "final_counts": {
+      "stream": 13,
+      "qa": 4,
+      "stream_u1": 2,
+      "stream_hostB": 2,
+      "qa_answered": 1,
+      "qa_empty": 3
+    },
+    "outbox_replay_finding": {
+      "note": "run1 被终止时仍有未 ack 的 outbox 项；run2 启动 _recover_live_pending 重放 → conversation_stream 出现同一身份的第二次写入。这是既有 at-least-once 语义（conversation_stream 无身份唯一键），B01 未引入、本轮不修；B01 的贡献是让重复可被识别（event_status/duplicate ACK）。派生层不受影响：重复事件跳过派生 + source_id 幂等 ⇒ qa_pairs 不增长。",
+      "pre_restart": {
+        "stream": 7,
+        "qa": 4,
+        "stream_u1": 1,
+        "stream_hostB": 1,
+        "qa_answered": 1,
+        "qa_empty": 3
+      },
+      "final": {
+        "stream": 13,
+        "qa": 4,
+        "stream_u1": 2,
+        "stream_hostB": 2,
+        "qa_answered": 1,
+        "qa_empty": 3
+      },
+      "qa_rows_unchanged_after_replay": true,
+      "stream_rows_extra": 6
+    },
+    "summary": {
+      "single_accepted": true,
+      "same_process_duplicate_safe": true,
+      "restart_duplicate_safe": true,
+      "host_identity_no_collision": true,
+      "missing_answer_incomplete_allowed": true,
+      "out_of_order_not_guessed": true,
+      "writer_rejection_reported": true,
+      "ready_json_real_port": true,
+      "counts": {
+        "stream": 13,
+        "qa": 4,
+        "stream_u1": 2,
+        "stream_hostB": 2,
+        "qa_answered": 1,
+        "qa_empty": 3
+      }
+    }
+  }
+}

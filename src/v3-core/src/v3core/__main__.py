@@ -248,6 +248,8 @@ def main():
     serve_p.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
     serve_p.add_argument("--port", type=int, default=39090, help="监听端口 (默认 39090)")
     serve_p.add_argument("--profile", default="default", help="V3Core profile (默认 default)")
+    serve_p.add_argument("--ready-json", action="store_true",
+                         help="绑定成功后向 stdout 打印一条确定性 ready JSON(含实际端口)")
 
     # Thin config control plane (subcommands: show / validate /
     # set-provider / set-key / set-toggle / test). Keep legacy commands
@@ -286,7 +288,8 @@ def main():
         run_mcp(profile=args.profile)
     elif args.command == "serve":
         from .serve import serve
-        serve(host=args.host, port=args.port, profile=args.profile)
+        serve(host=args.host, port=args.port, profile=args.profile,
+              ready_json=bool(getattr(args, "ready_json", False)))
     elif args.command == "config":
         if run_config is None:
             print("error: config CLI unavailable (config_cli import failed)", file=sys.stderr)
