@@ -536,6 +536,19 @@ class V3Core:
 
     def initialize(self) -> None:
         """初始化 — 验证配置 + 启动 E1 内部调度"""
+        # B02 (one effective config truth): bind THIS core's profile + config for
+        # the process lifetime. Core-internal leaves call bare ``resolve_config()``
+        # (no profile argument to pass), and a bare call means "the ambient booted
+        # core" — without this bind they resolved ``default`` and a non-default
+        # core read another profile's database.
+        try:
+            from ._tool_scope import bind_booted
+
+            # ``self.config`` (property), not ``self._config``: the attribute is
+            # still None until the property resolves it.
+            self._scope_tokens = bind_booted(self._profile, self.config)
+        except Exception as e:
+            logger.warning("booted scope bind 失败 (不阻塞): %s", _safe_err(e)[:100])
         # Runtime-backed Core only starts the Runtime-owned services.  A
         # legacy standalone Core keeps the old per-Core scheduler for
         # compatibility.
@@ -995,6 +1008,17 @@ class V3Core:
 
     def shutdown(self, timeout: float | None = 1.0) -> None:
         """关闭 — bounded quiesce + durable handoff + fence (monotonic deadline)"""
+        # Release this core's process-level scope binding (B02): a later core in
+        # the same process (tests, multi-profile hosts) must not inherit it.
+        _tokens = getattr(self, "_scope_tokens", None)
+        if _tokens:
+            self._scope_tokens = None
+            try:
+                from ._tool_scope import unbind_booted
+
+                unbind_booted(_tokens)
+            except Exception:  # noqa: BLE001
+                pass
         # compatible: timeout default 1.0, legacy callers with no args still work
         if timeout is None:
             timeout = 1.0
