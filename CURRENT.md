@@ -293,3 +293,92 @@ Q01 status: `READY_FOR_CANARY` — 16 frozen cases (`docs/Q01-QUERY-CANARY.md`,
 off-topic cases carry a frozen response-level rubric for the A03 canary.
 
 B01 status: `READY` — `docs/B01-CORE-INTERFACE-INVENTORY.md` (inventory only; no adapter).
+
+---
+
+## A03 — production canary + installable delivery (DONE)
+
+### Artifact (built from a fresh clone, not reused from A01)
+
+| field | value |
+|---|---|
+| branch | `integration/global-baseline-v1` |
+| integration_head | `41a94bc4c9e4838294c4d3745c64d83d0e8297d7` |
+| product_code_head | `41a94bc4c9e4838294c4d3745c64d83d0e8297d7` (this commit *is* the query-path fix) |
+| artifact_build_head | `41a94bc4c9e4838294c4d3745c64d83d0e8297d7` |
+| documentation_head | the evidence commit that carries this section |
+| wheel | `v3_core-4.0.0-py3-none-any.whl` sha256 `c13cd4cb39c0c839ee5477b87c1a8d5d5009accb237ec717047052448c02322e` |
+| plugin wheel | `v3_hermes_plugin-4.0.0-py3-none-any.whl` sha256 `c705476841deef9ce1944a1f6975adf4b448e95551384acad36fac3f901a3366` |
+| members | 130 total / 124 product modules |
+| `SOURCE_WHEEL_PRODUCT_DRIFT` | **0** (124 source files vs 124 wheel members, 0 only-in-source, 0 only-in-wheel, 0 differing); 12/12 protected modules byte-identical |
+
+### Live runtime before → after
+
+```text
+winning copy           venv/Lib/site-packages (PYTHONPATH precedes .hermes-runtime)
+before                 v3_core-4.0.0.dist-info from LONG_OBSERVATION_PRODUCTION_CANDIDATE (108 modules)
+after                  A03 candidate wheel (124 modules)
+byte identity          124/124 v3core + 2/2 v3hermes identical to the wheel members
+installed churn        exactly 4 changed (__init__.py, distribution_cli.py, embed_chunks.py,
+                       embedding.py) + 16 new (runtime_integrity/*, reliability/*); 0 only-in-live
+editable shadow        none — both editable .pth are .disabled-by-v021-20260918
+gateway                3772/5252 (2026-09-22) → 5420/17068 (2026-09-27 08:37:26), old PIDs absent,
+                       live-env probe resolves venv site-packages with prepare/call_query/runtime_integrity
+readiness fence        2026-09-27 08:38:47 (feishu connected after one transient 30s timeout)
+rollback               workspace/backups/a03-canary-20260926/rollback (108+2+10+10 files, readback-verified)
+```
+
+### Q01 canary (frozen set, production profile, real provider boundary)
+
+```text
+retrieval cases        14/14 PASS   (cold 2, hot 2, historical 4, continuation 2, long 2, short-parity 1,
+                                     failure-injection 2 — the failure cases are isolated-contract evidence)
+response cases         2/2 PASS by the frozen rubric (off-topic 11/12 answered correctly, no memory
+                       fragment presented as the answer)
+cold gate              Q01-01 first call: seam input 40 chars -> provider payload 1 call / 27 tokens
+hot gate               Q01-02 repeat: provider payloads = 0, identical hit ids
+long gate              Q01-07 original 17013 tokens -> provider payload 7678 tokens (<= 7680),
+                       strategy head60_tail40, head+tail kept, provider window error = 0
+                       Q01-08 original 17037 tokens -> provider payload 7678 tokens, same contract
+short parity           Q01-15 provider payload byte-identical to the original query (23 chars)
+```
+
+`ISOLATED_FAILURE_CONTRACT`: the two `embedding_failure` cases are proven by the A02 test suite and the
+Q01 runner's injection path; **no provider outage was manufactured in production**.
+
+### Write → new session
+
+```text
+session 1 (real entry, hermes -z)   wrote the canary fact through v3_store
+PG                                  explicit_memories mem_dfef128b…, category memory, embedding not NULL,
+                                    status active, created 2026-09-27 00:51:17Z (post-cutover)
+session 2 (brand-new session)       asked in natural language; answered
+                                    "统一基线 integration/global-baseline-v1 / Canary ID A03-CANARY-20260927-1"
+```
+
+### Health gate
+
+```text
+qa_pairs                     14046 rows / 0 unexplained NULL embeddings
+observation_notes            788 rows / 0 NULL
+post-cutoff writes           qa_pairs +2 (0 NULL), explicit_memories +1 (0 NULL)
+embedding_failures           0 rows (no ledger growth)
+gateway/serve                gateway healthy + fence; serve swapped last (self-hosting path)
+pre-existing, out of scope   rerank HTTP 400 (siliconflow) first seen 2026-09-23, before this cutover
+                             historical tracebacks in gateway.log (2026-08-30) — not this window
+```
+
+### Known limitations carried forward
+
+```text
+RecallTrace per-lane summaries stay empty on the Core query path (direct recall_pool call) — recorded,
+  not fixed here; Q01 relies on provider payload sizes / hit ids / raise status instead
+rerank HTTP 400 (siliconflow rerank endpoint) — pre-existing production config issue, out of A02 scope
+reliability CLI --help smoke tests still assume a repo-local .venv
+```
+
+### Delivery
+
+Merged to `main` and released per the repo's existing convention (`v0.2.x` tag → `release.yml`), so the
+documented install entry can obtain these fixes. Packaged version string stays `4.0.0`.
+

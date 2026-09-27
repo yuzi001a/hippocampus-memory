@@ -7,12 +7,14 @@
 
 ---
 
-## [Unreleased] — integration baseline (not a release)
+## [0.2.2] — unified baseline (A01 + A02), production canary closed
 
-> **Scope of this entry:** the current tree is the unified development baseline
-> (`integration/global-baseline-v1`, product-code HEAD `86dd126`). It is **not
-> deployed and not released**: the last published entry remains `0.1-alpha`
-> below. The packaged version string stays `4.0.0`.
+> **Scope of this entry:** the unified baseline (`integration/global-baseline-v1`) that
+> merges the embedding-reliability recovery line with the runtime-integrity line and fixes
+> the query path (A02). It **is deployed** to the production Hermes runtime (canary closed
+> 2026-09-27, gateway 3772/5252 → 5420/17068) and is published as tag `v0.2.2`. The
+> packaged version string stays `4.0.0`; the last published entry before this one is
+> `0.1-alpha` below, with `v0.2`/`v0.2.1` as the intermediate tags.
 
 ### Added
 
@@ -30,6 +32,20 @@
   state the actual packaged SQL set: five artifacts, three bootstrap include
   markers, and a nine-table bootstrap schema (six core tables plus
   `explicit_memories` and the two derived-index sidecars).
+
+### Query path (A02) — the fix this release exists for
+
+- **Cold queries now reach the semantic lane.** `search_cards` no longer pre-checks its own
+  `_EMBED_CACHE` membership before embedding; `cache=True` owns the reuse. Failure keeps the public
+  path's degradation (`ValueError` / `PrefetchDeadlineExceeded` re-raise, otherwise keyword-only).
+- **One token-safe query embedding seam.** `embed_chunks.prepare_query_embedding_text()` +
+  `embedding.call_query_embedding()`: a query that already fits is returned byte-for-byte; a query past
+  the provider window is reduced head 60% / tail 40% by tokenizer offsets with a single `\n` join and a
+  deterministic shrink, so no query can hand an over-window payload to the embedding provider. Durable
+  source text is never capped by this path.
+- Production canary evidence: 16 frozen Q01 cases executed against the installed candidate — cold
+  `+1` provider call, hot `+0`, a 17 013-token query reduced to a 7 678-token provider payload, short
+  query byte-identical, failure degradation intact. See `CURRENT.md` §A03.
 
 ### Documentation
 
