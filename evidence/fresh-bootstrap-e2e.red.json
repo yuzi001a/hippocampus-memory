@@ -1,0 +1,48 @@
+{
+  "steps": {
+    "build": {
+      "head": "0684f0472fd0e1597a42f0ceacfbf5a2b34e238f",
+      "packaged_source_dirty": null,
+      "wheel": "v3_core-4.0.0-py3-none-any.whl",
+      "wheel_bytes": 881951,
+      "build_rc": 0
+    },
+    "fresh_install": {
+      "venv": "C:\\Users\\servi\\workspace\\backups\\fresh-bootstrap-e2e\\venv",
+      "v3_core_version": "4.0.0",
+      "console_script": "hippocampus.exe"
+    },
+    "pg": {
+      "container": "freshboot-e2e-pg",
+      "port": 55505,
+      "database": "freshboot",
+      "version": "",
+      "public_tables_before": 0
+    },
+    "bootstrap_1": {
+      "rc": 1,
+      "tail": "{\n  \"alpha_bootstrap_sql_sha256\": \"363af1df8892775cace59b05d32c6881b27abcf28140e178fb3d4e4aa30a0d33\",\n  \"command\": \"bootstrap\",\n  \"result\": {\n    \"applied\": false,\n    \"error\": \"UndefinedTable('relation \\\"public.observation_notes\\\" does not exist\\\\n')\",\n    \"include_expanded\": true,\n    \"sql_bytes\": 25042,\n    \"target\": {\n      \"database\": \"freshboot\",\n      \"host\": \"127.0.0.1\",\n      \"password\": \"***\",\n      \"port\": 55505,\n      \"user\": \"v3user\"\n    }\n  },\n  \"target\": {\n    \"database\": \"freshboot\",\n    \"host\": \"127.0.0.1\",\n    \"password\": \"***\",\n    \"port\": 55505,\n    \"user\": \"v3user\"\n  }\n}\n",
+      "cwd": "C:\\Users\\servi\\workspace\\backups\\fresh-bootstrap-e2e\\neutral-cwd",
+      "pythonpath_set": false,
+      "undefined_notes": true,
+      "undefinedtable": true
+    },
+    "tables_after_failure": {
+      "explicit_memories": false,
+      "qa_pairs": false,
+      "qa_embedding_chunks": false,
+      "conversation_stream": false,
+      "topics": false,
+      "topic_entries": false,
+      "observation_notes": false,
+      "observation_embedding_chunks": false,
+      "yin_paragraphs": false,
+      "schema_versions": false,
+      "embedding_failures": false
+    }
+  },
+  "summary": {
+    "red_reproduced": true,
+    "fix_required": "FRESH_DB_BOOTSTRAP_DEPENDENCY_ORDER"
+  }
+}

@@ -7,12 +7,28 @@
 
 ---
 
-## [Unreleased] — B01 minimal host contract (on `main`, no tag yet)
+## [0.2.3] — B01 minimal host contract + fresh-database bootstrap fix
 
-> **Scope:** transport/identity only, for the DSH (B02) and pi (B03) host contract.
-> Not deployed to production; no schema change; no new model calls.
+> **Scope:** transport/identity/host-contract work. Not deployed to production;
+> no schema change; no new model calls.
+>
+> **Fix fresh-database bootstrap ordering for `observation_embedding_chunks`.**
+> A brand-new database could not be initialised at all from the installed wheel
+> (`UndefinedTable: relation "public.observation_notes" does not exist`) because
+> the long-observation sidecar was spliced before its FK target existed. This is
+> a first-install hotfix, not a feature release.
 
 ### Fixed
+- **Fresh-database bootstrap (`FRESH_DB_BOOTSTRAP_DEPENDENCY_ORDER`, P1 install blocker).**
+  `hippocampus bootstrap` on an empty PostgreSQL+pgvector failed with
+  `UndefinedTable: relation "public.observation_notes" does not exist` and rolled the whole
+  transaction back, so a brand-new install ended up with no schema. The
+  `observation_embedding_chunks.sql` include marker now sits after the `observation_notes`
+  block in both artifact copies (repo-root canonical + packaged). Ordering only — no schema,
+  FK or migration change. Guard: `tests/test_bootstrap_dependency_order.py` validates the FK
+  creation order of the *expanded* packaged SQL, and
+  `eval/fresh_bootstrap_e2e.py` proves the whole packaged path (clean wheel → fresh venv →
+  fresh DB → bootstrap #1 → bootstrap #2) with `fallback_used=false`.
 - **Post-restart duplicate QA (`EVENT_INGEST_CORRECTNESS_DEPENDS_ON_EPHEMERAL_PROCESS_STATE`).**
   Derived QA identity embedded `q_turn = context.turn`, an in-process counter that resets on a
   fresh Core, so a re-sent event after a restart produced a second `qa_pairs` row. Event

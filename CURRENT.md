@@ -1,6 +1,6 @@
 # Hippocampus — global development baseline (A01)
 
-Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2 released) / `B01 = DOING` (see the B01 section at the end)
+Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2) / `B01 = DONE` (merged, PR #15) / `FRESH_DB_BOOTSTRAP_HOTFIX = DONE` (v0.2.3) / `B02 = DOING` (see the sections at the end)
 
 ## A01 — one integration baseline for all follow-on work
 
@@ -500,3 +500,36 @@ F2  outbox replay is at-least-once: a crash before the PG ack replays the item o
     that table). B01 does not change it; it makes the duplicate *detectable* and keeps the
     derived layer idempotent (E2E asserts qa_pairs does not grow).
 ```
+
+## FRESH_DB_BOOTSTRAP_HOTFIX — fresh install unblocked (v0.2.3)
+
+```text
+classification   PRODUCT_DEFECT / P1-INSTALL-BLOCKER
+code             FRESH_DB_BOOTSTRAP_DEPENDENCY_ORDER
+symptom          fresh empty PG + installed wheel + `hippocampus bootstrap`
+                 → UndefinedTable('relation "public.observation_notes" does not exist')
+                 → transaction rollback → NO schema at all on a brand-new install
+root cause       alpha_bootstrap.sql inlined observation_embedding_chunks.sql (FK →
+                 observation_notes) at the qa-sidecar marker position, i.e. BEFORE
+                 observation_notes was created in the same file; bootstrap splices
+                 includes in place, so the FK target did not exist yet
+fix              marker moved 139 → 299 (observation_notes @ 269) in BOTH copies
+                 (repo-root canonical + packaged src/v3core/schema/); ordering only
+RED              evidence/fresh-bootstrap-e2e.red.json  (rc=1, undefinedtable=true)
+GREEN            evidence/fresh-bootstrap-e2e.json      (rc=0, PACKAGED_FRESH_BOOTSTRAP=PASS)
+idempotency      bootstrap #2 rc=0, tables stable, indexes stable, schema_versions=1
+guard            tests/test_bootstrap_dependency_order.py — FK creation order of the
+                 EXPANDED packaged SQL (RED 2 failed → GREEN 7 passed), no PG required
+B01 E2E          packaged_bootstrap_ok=true, fallback_used=false (fallback now FAILS the run
+                 if it is ever needed again; the historical note is kept in the findings doc)
+schema           NONE
+production       NOT touched — no install, no restart, no schema mutation
+release          v0.2.3 patch tag (package version stays 4.0.0: test_distribution_packaging
+                 freezes it as the Gate 0/1 contract)
+open findings    F3 embedding_failures.sql packaged but applied by nothing (fresh install has
+                    no public.embedding_failures; doctor does not require it)
+                 F4 the two schema copies are CRLF/LF-divergent while INSTALL.md §8 claims
+                    they are byte-identical
+                 F2 outbox replay at-least-once on conversation_stream → B03_PRECONDITION
+                    (re-evaluate before pi starts automatic event collection)
+next             B02 = DOING — DSH SUPPORT LEVEL = TOOL via `v3-core mcp` stdio

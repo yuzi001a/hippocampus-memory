@@ -1,77 +1,141 @@
-# B01 findings — 本轮实测到的两个**既有**缺陷（未修，不属 B01 范围）
+# B01 findings — defects found by the B01 rounds
 
-发现方式：隔离真机 E2E（`src/v3-core/eval/b01_host_contract_e2e.py`）与全新库 bootstrap。
-两条都不是 B01 引入的，也都**没有**在本轮顺手改（避免把传输层的改动和别的修复混在一起）。
+Found by the isolated real E2E (`eval/b01_host_contract_e2e.py`) and by building a
+brand-new database from the installed wheel (`eval/fresh_bootstrap_e2e.py`).
 
----
-
-## F1 — 打包 bootstrap 在全新库上必然失败（splice 顺序）
-
-```text
-复现    docker run pgvector/pgvector:pg17（全新空库）
-        hippocampus bootstrap --dsn postgresql://.../<newdb>
-结果    rc=1
-        {"result": {"applied": false,
-                    "error": "UndefinedTable('relation \"public.observation_notes\" does not exist')"}}
-```
-
-根因（读 schema 原文得出，非推断）：
-
-```text
-src/v3-core/schema/alpha_bootstrap.sql:139
-  -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
-src/v3-core/schema/alpha_bootstrap.sql:269
-  CREATE TABLE IF NOT EXISTS public.observation_notes (...)
-
-observation_embedding_chunks.sql:9
-  REFERENCES public.observation_notes(id) ON DELETE CASCADE
-```
-
-marker 被**原地展开**，而它排在 `observation_notes` 建表之前 → 外键引用不存在的表 → 整批回滚。
-
-影响：任何**全新安装**走打包 bootstrap 都拿不到 schema。存量库不受影响（早已建好）。
-B01 的 E2E 因此改为按依赖顺序手工应用同一批 artifact
-（`alpha_bootstrap.sql → explicit_memories.sql → qa_embedding_chunks.sql → observation_embedding_chunks.sql → embedding_failures.sql`），
-并在证据里显式标注 `bootstrap_fallback.packaged_bootstrap_failed = true`。
-
-建议修法（未实施）：把 `alpha_bootstrap.sql` 里的
-`observation_embedding_chunks.sql` marker 移到 `observation_notes` 建表之后（与 `qa_embedding_chunks.sql`
-相对 `qa_pairs` 的次序一致）。
+Scope discipline: only what the current task authorises gets fixed. Everything
+else is recorded here with evidence and a classification.
 
 ---
 
-## F2 — outbox 重放是 at-least-once：崩溃窗口内 source 可能二次写入
+## F1 — packaged bootstrap failed on a brand-new database — **RESOLVED (v0.2.3)**
+
+`classification = PRODUCT_DEFECT / P1-INSTALL-BLOCKER`
+`code = FRESH_DB_BOOTSTRAP_DEPENDENCY_ORDER`
+
+**Symptom** (deterministic, fresh empty PG + installed wheel):
 
 ```text
-复现    run1 收到事件 → 进程在 PG ack 之前被终止 → run2 启动
-结果    run2 的 LiveBuffer._recover_live_pending 重放未 ack 项
-        → conversation_stream 出现同一身份的第二次写入（stream 行数 +1）
-        同批次的派生层不重复（qa_pairs 行数不变）
+$ hippocampus bootstrap --dsn postgresql://…@127.0.0.1:55505/freshboot
+{
+  "result": {
+    "applied": false,
+    "error": "UndefinedTable('relation \"public.observation_notes\" does not exist')",
+    "include_expanded": true,
+    "sql_bytes": 25042
+  }
+}
 ```
 
-为什么既有：`conversation_stream` 没有身份唯一键（无 `msg_id`/`event_id` 列），
-重放只能靠 outbox 文件，无法判断"这行到底写没写进去"。这是 at-least-once 的固有代价。
+**Root cause**: `alpha_bootstrap.sql` inlined `observation_embedding_chunks.sql`
+before `observation_notes` was created. The sidecar carries
 
-B01 做了什么：**没有**改变这条语义，但让"重复"第一次变得可识别 ——
-`event_status()` 探针 + `duplicate` ACK 让调用方能看到身份已存在；
-派生层靠"重复事件跳过派生 + `source_id` 幂等"保证 QA 不增长（E2E 已断言）。
+```sql
+observation_id BIGINT NOT NULL REFERENCES public.observation_notes(id) ON DELETE CASCADE
+```
 
-建议修法（未实施，属后续）：给 source 层补一个按身份的 durable 接收索引
-（B01 §4 已授权的 additive receipt seam），让重放能判"已写则不再写"。
+and the include marker sat at the *qa* sidecar position (right after `qa_pairs`),
+while `observation_notes` is created much later in the same file. Bootstrap
+splices includes in place, so the FK target did not exist yet → `UndefinedTable`
+→ the whole transaction rolled back → a brand-new install had *no* schema at all.
+
+The artifact's own header ("Additive-only: no ALTER to observation_notes, safe to
+apply first") is what invited the mis-ordering: it is safe to apply first only
+once its FK target exists.
+
+**Fix (ordering only)**: moved the include marker to after the `observation_notes`
+block, in **both** copies of the artifact set:
+
+| copy | role |
+| --- | --- |
+| `src/v3-core/schema/alpha_bootstrap.sql` | canonical source of truth (per INSTALL.md §8) |
+| `src/v3-core/src/v3core/schema/alpha_bootstrap.sql` | the copy bootstrap actually applies |
+
+```text
+marker line 139 → 299   (observation_notes at 268)
+diff per file: +2 / −1  (marker move + one blank line)
+no schema change, no FK change, no migration change, no production change
+```
+
+**Evidence**
+
+- RED (pre-fix, packaged path): `evidence/fresh-bootstrap-e2e.red.json`
+  → `rc=1`, `undefinedtable=true`, `public_tables_before=0`
+- GREEN: `evidence/fresh-bootstrap-e2e.json`
+  → `rc=0`, `PACKAGED_FRESH_BOOTSTRAP=PASS`, FK
+  `observation_embedding_chunks.observation_id → observation_notes.id` present,
+  second bootstrap `rc=0` with tables and indexes unchanged (`schema_versions=1`)
+- Fast guard (no PG): `tests/test_bootstrap_dependency_order.py` — expands the
+  packaged SQL through the same helper bootstrap uses and asserts, statement by
+  statement, that every FK target is created before the table referencing it.
+  RED first: 2 failed before the fix, 7 passed after.
+- B01 E2E now proves the normal path: `packaged_bootstrap_ok=true`,
+  `fallback_used=false` (the old hand-ordered fallback is kept as a diagnostic
+  path and now *fails the run* if it is ever needed again).
 
 ---
 
-## 附：本轮 E2E 的实测数字（`evidence/b01-e2e-report.json`）
+## F2 — outbox replay is at-least-once for `conversation_stream` — **KNOWN, NOT FIXED**
 
-```text
-serve --port 0 --ready-json   → 实际端口 62864（不是 0）✓
-single event                  → accepted=true duplicate=false
-same-process duplicate        → accepted=false duplicate=true，行数不变
-restart duplicate             → accepted=false duplicate=true，身份行数不变
-same ids / other host         → accepted=true（不碰撞）
-missing assistant             → turn2 记为 incomplete（answer 空），从未配到 turn3
-out-of-order assistant        → 源层收下，不猜配对（未派生 QA）
-writer rejection              → HTTP 503 + ok=false + status=retryable
-legacy payload（无 host）      → 200 + host=legacy（旧契约不破）
-prefetch                      → hit=true（合成历史可召回）
-```
+`classification = KNOWN_LIMITATION / B03_PRECONDITION`
+
+A crash between the durable outbox write and the PG ack can give
+`conversation_stream` a second row for one identity: the table has no unique key
+on the event identity, and `_recover_live_pending()` replays un-acked items on
+the next start.
+
+Observed in the B01 E2E: `stream_u1 1 → 2`, `stream_hostB 1 → 2`,
+`stream_rows_extra = 6` while `qa_rows_unchanged_after_replay = true`.
+
+B01's contribution: the duplicate is now **detectable** (`event_status`, the
+falsifiable `duplicate` ACK) and the derived layer stays idempotent (duplicates
+skip QA derivation; `qa_pairs.source_id` + `ON CONFLICT DO NOTHING`).
+
+Not fixed here: it needs a durable receipt / source-identity decision on the
+source table, which is exactly what §11 defers. **Re-evaluate before pi (B03)
+starts automatic event collection** — an automatic collector makes the window
+far more likely to be hit than B02's explicit tool calls do.
+
+---
+
+## F3 — `embedding_failures.sql` is packaged but applied by nothing — **OPEN**
+
+`classification = PRODUCT_DEFECT / P2 (fresh-install gap, not a hard blocker)`
+
+- The artifact exists at `src/v3-core/schema/embedding_failures.sql`.
+- It is **not** in `src/v3core/schema/` (the packaged set) and is **not** in
+  `pyproject.toml`'s `package-data` list.
+- No code path applies it: `hippocampus bootstrap` applies only
+  `alpha_bootstrap.sql` (includes) + `upgrade_v0_2.sql`; grep finds no reference
+  to the artifact name anywhere in `src/`.
+- Consequence on a fresh install: `public.embedding_failures` does not exist
+  (verified: `to_regclass('public.embedding_failures')` → NULL after a successful
+  packaged bootstrap), while `v3core/embed_failures.py` INSERTs/UPDATEs it.
+- Doctor does **not** require it (its `required_tables` list is the 7 alpha
+  tables), so a fresh install still reports healthy — this is a reliability
+  blind spot rather than an install blocker.
+
+Not fixed here: adding an include marker is an artifact-coverage change, not the
+ordering fix this task authorised. Candidate one-liner hotfix for a follow-up.
+
+---
+
+## F4 — the two schema copies disagree on line endings, and INSTALL.md claims otherwise — **OPEN**
+
+`classification = DOC/REPO_HYGIENE`
+
+`docs/INSTALL.md` §8 says the repo-root copies are canonical and "the package
+copies are byte-identical to them". Measured at the B01/hotfix baseline:
+
+| artifact | repo-root | packaged | byte-identical |
+| --- | --- | --- | --- |
+| `alpha_bootstrap.sql` | CRLF (332) | LF (0) | ✗ (content identical after normalisation) |
+| `explicit_memories.sql` | CRLF (116) | LF (0) | ✗ |
+| `qa_embedding_chunks.sql` | LF | LF | ✓ |
+| `observation_embedding_chunks.sql` | LF | LF | ✓ |
+| `upgrade_v0_2.sql` | LF | LF | ✓ |
+
+Functionally harmless (SQL does not care), but the documented invariant is false,
+and a byte-identity check cannot currently be used as a packaging gate. The
+hotfix deliberately preserved each file's own convention instead of normalising
+them (normalising would add a large no-op diff on top of a one-line ordering fix).

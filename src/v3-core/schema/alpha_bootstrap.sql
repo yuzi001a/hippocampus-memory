@@ -136,7 +136,6 @@ CREATE INDEX IF NOT EXISTS qa_pairs_embedding_ivfflat
     WITH (lists = 100);
 
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/qa_embedding_chunks.sql <<<
--- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
 
 -- -----------------------------------------------------------------------------
 -- conversation_stream — per-turn message log (replaces the archived
@@ -296,6 +295,8 @@ CREATE INDEX IF NOT EXISTS observation_notes_embedding_ivfflat
     ON public.observation_notes
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
+
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
 
 -- -----------------------------------------------------------------------------
 -- yin_paragraphs — E1 印段落池 (yin_pool.ensure_table). Schema shape comes
