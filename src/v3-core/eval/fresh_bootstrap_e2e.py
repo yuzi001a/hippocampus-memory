@@ -101,6 +101,20 @@ def psql_rc(sql: str):
 # ── 1. build the wheel from the tree (record provenance) ────────────────────
 
 def build_wheel() -> pathlib.Path:
+    provided = os.environ.get("FRESHBOOT_WHEEL")
+    if provided:
+        whl = pathlib.Path(provided)
+        assert whl.exists(), f"FRESHBOOT_WHEEL not found: {whl}"
+        import hashlib
+        S["steps"]["build"] = {
+            "source": "provided_wheel (public release asset / installer artifact)",
+            "wheel": whl.name,
+            "wheel_bytes": whl.stat().st_size,
+            "sha256": hashlib.sha256(whl.read_bytes()).hexdigest(),
+        }
+        log(f"[1] using provided wheel {whl.name} ({whl.stat().st_size} bytes)")
+        return whl
+
     head = run(["git", "-C", str(REPO), "rev-parse", "HEAD"]).stdout.strip()
     dirty = run(["git", "-C", str(REPO), "status", "--porcelain",
                  "--", "src/v3-core/src"]).stdout.strip()
