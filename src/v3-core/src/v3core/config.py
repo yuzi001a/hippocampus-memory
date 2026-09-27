@@ -179,7 +179,17 @@ def _find_config(profile: str = "default", hermes_home: str = "") -> Path | None
       - 老路径 ~/.v3-core/profiles/<profile>/config.yaml 优先 (本机生产零变化)
       - 只有老路径不存在 (全新安装) 才用 hermes_home/.v3-core/profiles/<profile>/config.yaml
       - V3CORE_CONFIG 显式覆盖 > 老路径 > 新路径 > 全局 ~/.v3-core/config.yaml
+
+    2026-09-27 (B02): 未显式传 hermes_home 时取 ``HERMES_HOME`` 环境变量。
+    Installer 把全新安装的 profile 写在 ``<HERMES_HOME>/.v3-core/profiles/<profile>/``,
+    而 install 侧 (distribution_cli / doctor_full / 官方 provider) 都显式传 hermes_home,
+    运行时入口 (``v3-core mcp`` / CLI) 不传 —— 结果是同一个 profile 在直接进程里能解析、
+    在 MCP 子进程里解析不到: 工具面照常列出 13 个工具, 第一次调用才失败 (静默半安装)。
+    把 HERMES_HOME 作为环境默认后, 进程内所有 resolver 只有一份 effective config 真值。
+    老路径仍优先, 既有安装零变化。
     """
+    if not hermes_home:
+        hermes_home = os.environ.get("HERMES_HOME", "") or ""
     candidates = [
         Path.home() / ".v3-core" / "profiles" / profile / "config.yaml",
         Path.home() / ".v3-core" / "config.yaml",

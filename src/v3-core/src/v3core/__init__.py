@@ -343,6 +343,10 @@ class V3Core:
         # hermes_home (官方 MemoryProvider 协议): 全新安装场景下, 数据根放 hermes_home 下.
         # 老路径 ~/.v3-core/profiles/<profile>/ 存在时, _find_config 会优先用它,
         # 所以本机生产路径零变化 (见 config._find_config / resolve_config 的 hermes_home 契约).
+        # B02: 入口没传时取 HERMES_HOME —— 否则同一 profile 在直接进程可解析、在 MCP 子进程
+        # 解析不到 (工具面正常列出、第一次调用才失败)。
+        if not hermes_home:
+            hermes_home = os.environ.get("HERMES_HOME", "") or ""
         self._hermes_home: str = hermes_home or ""
         # Runtime-backed facades receive the already-resolved generation snapshot.
         # Legacy facades keep lazy config resolution for compatibility.
