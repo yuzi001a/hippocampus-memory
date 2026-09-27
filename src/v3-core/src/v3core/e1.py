@@ -1,5 +1,6 @@
 """E1 印合成 — 每日 04:00 cron: 从近 24h 卡片合成新印 (y/ 层)"""
 from __future__ import annotations
+import hashlib
 import json
 import logging
 import os
@@ -10,6 +11,11 @@ from typing import Any, Optional
 
 from .card_store import DeepStore
 from .config import resolve_config, _resolve_prompt as _cfg_prompt
+from .generated_context_contract import (
+    GeneratedContextError,
+    validate_identity_block,
+    validate_situation_overview,
+)
 from .llm import LLMClient
 from .pg_store import _is_undefined_column_error
 
@@ -312,6 +318,37 @@ SITUATION_OVERVIEW_PROMPT = """你是系统态势摘要引擎。读下面这份�
 - 三段顺序固定："## 活跃主题" → "## 当前关注与待办" → "## 状态速记"。
 - 字数 300-500 字（含标点）。
 - 第三人称（"系统"/"近期"/"上次"，不要用"我"）。"""
+
+# 态势总览的 per-call 输出预算。契约要求 300-500 字，因此这里必须给一个小上限：
+# 默认的 131072 会让模型在写完之后继续生成，越出 chat 模板跑到第二个 assistant 轮。
+#
+# 768 的实测依据（tiktoken cl100k_base —— 本机可离线取得的分词器；
+# M3 自身分词器不在环境里，cl100k 是更保守的代理，中文实测 1.10-1.12 token/字）：
+#   * 500 字契约上限 = 559 token；实测 287 字完整三段总览 = 291 token；
+#     134 字短版 = 140 token。768 / 559 = 1.37 → 37% 余量，正常的
+#     300-500 字总览不会被截断（截断会写出结构不全的文件，比写长更糟）。
+#   * 总输出硬上限被压到 ≈686 汉字（cl100k）/≈941 汉字（o200k），
+#     相比默认 131072（≈11.7 万字）收窄约 170 倍：模型写完 500 字契约后
+#     最多只剩 ~186-390 汉字余量，不再有一整轮自由生成的预算。
+#   * 硬边界（拒绝越界/模板标记）由读取侧校验器负责，不在这里。
+SITUATION_OVERVIEW_MAX_OUTPUT_TOKENS = 768
+
+# 身份核心（identity_block.md）的 per-call 输出预算 —— 与态势总览同批补齐
+# （同一缺陷类、同一写路径、同一注入面；此前这里没有 cap，走的是 provider 默认
+# 131072 = 给模型留了写完 500 字后继续生成一整轮的预算）。
+#
+# 1024 的定标依据（tiktoken cl100k_base，1.10-1.14 token/字实测）：
+#   * 契约上限 500 字 ≈ 559-570 token → 1024/559 ≈ **1.83 倍余量**；
+#   * 生产实测合法身份块 = 616 字 / 1695 B ≈ 700 token（五段自由第一人称中文）
+#     → 1024/700 ≈ **1.46 倍余量**：当前真实产物及其同量级产物不会被截断；
+#   * 硬上限 ≈ 900 汉字，相比默认 131072（≈11.7 万字）收窄约 **130 倍**。
+#
+# ⚠️ 为什么这里必须留足余量（比态势总览更保守）：身份块**没有结构契约**
+# （自由散文、无固定标题），所以"被 cap 截断"这件事在校验器里**不可检测** ——
+# 截断后的半句散文仍然是合法形状，会被写盘并注入。cap 定小了 = 静默产出残缺的
+# 身份块。因此 cap 只承担"跑飞兜底"，越界识别的职责在读取侧校验器
+# （validate_identity_block：标记 / 角色边界 / 续写话术）。
+IDENTITY_BLOCK_MAX_OUTPUT_TOKENS = 1024
 
 CATEGORY_INSTRUCTIONS = {
     "decisions": "从这些决策卡中提炼架构脉络和关键权衡，讲为什么做这个决策",
@@ -710,10 +747,36 @@ def synthesize_yin(
         identity_content = client.chat(identity_short_prompt, [
             # 2026-08-09: 去掉 [:4000] 截断 — 完整印喂身份提炼 (用户红线: 禁止默认截断)
             {"role": "user", "content": y_content},
-        ], temperature=0.3)
+        ], temperature=0.3, max_output_tokens=IDENTITY_BLOCK_MAX_OUTPUT_TOKENS)
         identity_content = _THINK_BLOCK_RE.sub("", identity_content).strip()
         if not identity_content:
             raise ValueError("LLM 返回空身份块")
+
+        # ── 输出契约闸门（P0, 2026-09-21）──
+        # 与态势总览同级的注入面：identity_block.md 被逐字注入每个新 session。
+        # 此前写路径唯一的闸门同样是"非空"，坏候选经 os.replace 原子覆盖上一份
+        # 好文件。现在在任何文件写入之前做**整体**校验：失败 = 整体丢弃候选，
+        # 绝不截断、绝不保留"开头看起来还行"的前缀；上一份已验证文件保持不变
+        # （不存在则继续保持不存在）。校验器与读/注入侧共用同一份实现。
+        try:
+            identity_content = validate_identity_block(identity_content)
+        except GeneratedContextError as _id_contract_e:
+            # 只记元信息（类别/长度/sha256 前缀/模型/原因），绝不落盘被拒产物。
+            logger.error(
+                "[e1] 身份核心被输出契约拒绝，整体丢弃且不写文件: reason=%s "
+                "chars=%d bytes=%d sha256_prefix=%s model=%s provider=%s detail=%s",
+                _id_contract_e.reason,
+                len(identity_content),
+                len(identity_content.encode("utf-8", errors="replace")),
+                hashlib.sha256(
+                    identity_content.encode("utf-8", errors="replace")
+                ).hexdigest()[:16],
+                getattr(client, "model", "") or "?",
+                getattr(client, "provider", "") or "?",
+                _id_contract_e.detail,
+            )
+            # 交给外层 except 记录并继续（不阻塞 E1 主流程）。
+            raise
 
         identity_path = base_path / "identity_block.md"
         identity_tmp_path = base_path / "identity_block.md.tmp"
@@ -770,10 +833,39 @@ def synthesize_yin(
 
         _sit_content = client.chat(situation_overview_prompt, [
             {"role": "user", "content": _sit_user},
-        ], temperature=0.3)
+        ], temperature=0.3, max_output_tokens=SITUATION_OVERVIEW_MAX_OUTPUT_TOKENS)
         _sit_content = _THINK_BLOCK_RE.sub("", _sit_content).strip()
         if not _sit_content:
             raise ValueError("LLM 返回空态势总览")
+
+        # ── 输出契约闸门（P0, 2026-09-21）──
+        # 真实事故：LLM 越界逃出 chat 模板，吐出一个新的 assistant turn 并自称
+        # 另一个模型名；当时写路径唯一的闸门是"非空"，于是坏产物经 os.replace
+        # 原子覆盖了上一份好文件，而该文件被逐字注入每个新 session。
+        #
+        # 现在在任何文件写入之前做**整体**校验：失败 = 整体丢弃候选，绝不截断、
+        # 绝不猜结束位置、绝不保留"开头看起来还行"的前缀；上一份已验证文件保持
+        # 不变（不存在则继续保持不存在）。校验器与 prefetch 读/注入侧共用同一份
+        # 实现（generated_context_contract），两侧口径不可能漂移。
+        try:
+            _sit_content = validate_situation_overview(_sit_content)
+        except GeneratedContextError as _sit_contract_e:
+            # 只记元信息（类别/长度/sha256 前缀/模型/原因），绝不落盘被拒产物。
+            logger.error(
+                "[e1] 态势总览被输出契约拒绝，整体丢弃且不写文件: reason=%s "
+                "chars=%d bytes=%d sha256_prefix=%s model=%s provider=%s detail=%s",
+                _sit_contract_e.reason,
+                len(_sit_content),
+                len(_sit_content.encode("utf-8", errors="replace")),
+                hashlib.sha256(
+                    _sit_content.encode("utf-8", errors="replace")
+                ).hexdigest()[:16],
+                getattr(client, "model", "") or "?",
+                getattr(client, "provider", "") or "?",
+                _sit_contract_e.detail,
+            )
+            # 交给外层 except 记录并继续（不阻塞 E1 主流程）。
+            raise
 
         _sit_path = base_path / "situation_overview.md"
         _sit_tmp = base_path / "situation_overview.md.tmp"

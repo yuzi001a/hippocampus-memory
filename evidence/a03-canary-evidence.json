@@ -1,0 +1,681 @@
+{
+  "artifact": {
+    "wheel": "v3_core-4.0.0-py3-none-any.whl",
+    "wheel_sha256": "c13cd4cb39c0c839ee5477b87c1a8d5d5009accb237ec717047052448c02322e",
+    "wheel_member_count_total": 130,
+    "wheel_product_members": 124,
+    "source_product_files": 124,
+    "SOURCE_WHEEL_PRODUCT_DRIFT": 0,
+    "drift_detail": {
+      "only_in_source": [],
+      "only_in_wheel": [],
+      "content_differs": []
+    },
+    "protected_members_identical": {
+      "v3core/__init__.py": true,
+      "v3core/embed_chunks.py": true,
+      "v3core/embedding.py": true,
+      "v3core/generated_context_contract.py": true,
+      "v3core/e1.py": true,
+      "v3core/llm.py": true,
+      "v3core/embed_failures.py": true,
+      "v3core/ingest.py": true,
+      "v3core/observation_chunks.py": true,
+      "v3core/observer.py": true,
+      "v3core/recall_pool.py": true,
+      "v3core/tools/embedding_backfill.py": true
+    },
+    "live_vs_new_wheel": {
+      "live_files": 108,
+      "changed_content": [
+        "__init__.py",
+        "distribution_cli.py",
+        "embed_chunks.py",
+        "embedding.py"
+      ],
+      "only_in_live": [],
+      "new_in_wheel": [
+        "reliability/__init__.py",
+        "reliability/cli.py",
+        "reliability/diagnose.py",
+        "reliability/failure_reader.py",
+        "reliability/health.py",
+        "reliability/models.py",
+        "reliability/redaction.py",
+        "reliability/repair.py",
+        "runtime_integrity/__init__.py",
+        "runtime_integrity/contract.py",
+        "runtime_integrity/discovery.py",
+        "runtime_integrity/identity.py",
+        "runtime_integrity/models.py",
+        "runtime_integrity/plan.py",
+        "runtime_integrity/resolver.py",
+        "runtime_integrity/shadow.py"
+      ],
+      "changed_count": 4,
+      "new_count": 16
+    }
+  },
+  "q01_layer_a": {
+    "summary": {
+      "cases": 16,
+      "selected": [
+        "Q01-01",
+        "Q01-02",
+        "Q01-03",
+        "Q01-04",
+        "Q01-05",
+        "Q01-06",
+        "Q01-07",
+        "Q01-08",
+        "Q01-09",
+        "Q01-10",
+        "Q01-11",
+        "Q01-12",
+        "Q01-13",
+        "Q01-14",
+        "Q01-15",
+        "Q01-16"
+      ],
+      "pass": 12,
+      "fail": 2,
+      "ready_for_canary_judgement": 2,
+      "no_checks": 0,
+      "profile": "default",
+      "config_path": null
+    },
+    "results": [
+      {
+        "case_id": "Q01-01",
+        "mode": "retrieval",
+        "category": "cold_semantic",
+        "query_chars": 40,
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 12404.9,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            40
+          ],
+          "sent_tokens": [
+            27
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-02",
+        "mode": "retrieval",
+        "category": "hot_cache",
+        "query_chars": 40,
+        "verdict": "PASS",
+        "checks": {
+          "additional_provider_calls": true,
+          "same_hit_ids": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 7411.5,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            40
+          ],
+          "sent_tokens": [
+            27
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-03",
+        "mode": "retrieval",
+        "category": "historical_fact",
+        "query_chars": 30,
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 6426.0,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            30
+          ],
+          "sent_tokens": [
+            14
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-04",
+        "mode": "retrieval",
+        "category": "historical_fact",
+        "query_chars": 17,
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 5423.8,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            17
+          ],
+          "sent_tokens": [
+            15
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-05",
+        "mode": "retrieval",
+        "category": "project_continuation",
+        "query_chars": 17,
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 4907.0,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            17
+          ],
+          "sent_tokens": [
+            11
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-06",
+        "mode": "retrieval",
+        "category": "project_continuation",
+        "query_chars": 13,
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 3891.0,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            13
+          ],
+          "sent_tokens": [
+            8
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-07",
+        "mode": "retrieval",
+        "category": "long_query",
+        "query_chars": 27350,
+        "verdict": "FAIL",
+        "checks": {
+          "truncated_true": false,
+          "head_retained": true,
+          "tail_retained": true,
+          "prepared_tokens_max": false,
+          "no_provider_error": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 237669.8,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            27350
+          ],
+          "sent_tokens": 17013,
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-08",
+        "mode": "retrieval",
+        "category": "long_query",
+        "query_chars": 27382,
+        "verdict": "FAIL",
+        "checks": {
+          "min_hits": true,
+          "truncated_true": false,
+          "tail_retained": true,
+          "prepared_tokens_max": false,
+          "no_provider_error": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 245484.4,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            27382
+          ],
+          "sent_tokens": 17037,
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-09",
+        "mode": "retrieval",
+        "category": "embedding_failure",
+        "query_chars": 30,
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "no_crash": true,
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 5499.1,
+          "hit_count": 5,
+          "provider_query_calls": 0,
+          "query_attempts": 1,
+          "sent_chars": [],
+          "sent_tokens": [
+            null
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-10",
+        "mode": "retrieval",
+        "category": "embedding_failure",
+        "query_chars": 17,
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "no_crash": true,
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 4640.6,
+          "hit_count": 5,
+          "provider_query_calls": 0,
+          "query_attempts": 1,
+          "sent_chars": [],
+          "sent_tokens": [
+            null
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-11",
+        "mode": "response",
+        "category": "off_topic",
+        "query_chars": 25,
+        "verdict": "READY_FOR_CANARY_JUDGEMENT",
+        "checks": {},
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 6742.4,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            25
+          ],
+          "sent_tokens": [
+            18
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-12",
+        "mode": "response",
+        "category": "off_topic",
+        "query_chars": 34,
+        "verdict": "READY_FOR_CANARY_JUDGEMENT",
+        "checks": {},
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 4842.1,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            34
+          ],
+          "sent_tokens": [
+            18
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-13",
+        "mode": "retrieval",
+        "category": "cold_semantic",
+        "query_chars": 23,
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 5143.3,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            23
+          ],
+          "sent_tokens": [
+            12
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-14",
+        "mode": "retrieval",
+        "category": "historical_fact",
+        "query_chars": 17,
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 5244.6,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            17
+          ],
+          "sent_tokens": [
+            12
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-15",
+        "mode": "retrieval",
+        "category": "long_query",
+        "query_chars": 23,
+        "verdict": "PASS",
+        "checks": {
+          "truncated_false": true,
+          "prepared_equals_original": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 5116.0,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            23
+          ],
+          "sent_tokens": [
+            16
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-16",
+        "mode": "retrieval",
+        "category": "hot_cache",
+        "query_chars": 13,
+        "verdict": "PASS",
+        "checks": {
+          "additional_provider_calls": true,
+          "same_hit_ids": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 3666.9,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "sent_chars": [
+            13
+          ],
+          "sent_tokens": [
+            8
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      }
+    ]
+  },
+  "q01_hard_gate": {
+    "summary": {
+      "cases": 5,
+      "selected": [
+        "Q01-01",
+        "Q01-02",
+        "Q01-07",
+        "Q01-08",
+        "Q01-15"
+      ],
+      "pass": 5,
+      "fail": 0,
+      "ready_for_canary_judgement": 0,
+      "no_checks": 0,
+      "profile": "default",
+      "config_path": null
+    },
+    "results": [
+      {
+        "case_id": "Q01-01",
+        "mode": "retrieval",
+        "category": "cold_semantic",
+        "query_chars": 40,
+        "verdict": "PASS",
+        "checks": {
+          "embedding_attempted": true,
+          "min_hits": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 11278.8,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "seam_input_chars": [
+            40
+          ],
+          "provider_payloads": 1,
+          "provider_chars": [
+            40
+          ],
+          "provider_tokens": [
+            27
+          ],
+          "seam_input_tokens": [
+            27
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-02",
+        "mode": "retrieval",
+        "category": "hot_cache",
+        "query_chars": 40,
+        "verdict": "PASS",
+        "checks": {
+          "additional_provider_calls": true,
+          "same_hit_ids": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 8193.9,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "seam_input_chars": [
+            40
+          ],
+          "provider_payloads": 0,
+          "provider_chars": [],
+          "provider_tokens": [
+            null
+          ],
+          "seam_input_tokens": [
+            27
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-07",
+        "mode": "retrieval",
+        "category": "long_query",
+        "query_chars": 27350,
+        "verdict": "PASS",
+        "checks": {
+          "truncated_true": true,
+          "head_retained": true,
+          "tail_retained": true,
+          "prepared_tokens_max": true,
+          "no_provider_error": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 251826.4,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "seam_input_chars": [
+            27350
+          ],
+          "provider_payloads": 1,
+          "provider_chars": [
+            12145
+          ],
+          "provider_tokens": 7678,
+          "seam_input_tokens": [
+            17013
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-08",
+        "mode": "retrieval",
+        "category": "long_query",
+        "query_chars": 27382,
+        "verdict": "PASS",
+        "checks": {
+          "min_hits": true,
+          "truncated_true": true,
+          "tail_retained": true,
+          "prepared_tokens_max": true,
+          "no_provider_error": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 239650.0,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "seam_input_chars": [
+            27382
+          ],
+          "provider_payloads": 1,
+          "provider_chars": [
+            12131
+          ],
+          "provider_tokens": 7678,
+          "seam_input_tokens": [
+            17037
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      },
+      {
+        "case_id": "Q01-15",
+        "mode": "retrieval",
+        "category": "long_query",
+        "query_chars": 23,
+        "verdict": "PASS",
+        "checks": {
+          "truncated_false": true,
+          "prepared_equals_original": true
+        },
+        "observed": {
+          "raised": null,
+          "elapsed_ms": 4905.7,
+          "hit_count": 5,
+          "provider_query_calls": 1,
+          "query_attempts": 1,
+          "seam_input_chars": [
+            23
+          ],
+          "provider_payloads": 1,
+          "provider_chars": [
+            23
+          ],
+          "provider_tokens": [
+            16
+          ],
+          "seam_input_tokens": [
+            16
+          ],
+          "trace_built": true,
+          "trace_error": null
+        }
+      }
+    ]
+  },
+  "note": "Production hit ids and trace bodies withheld; full reports live in the private vault."
+}

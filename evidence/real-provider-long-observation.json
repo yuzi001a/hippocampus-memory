@@ -1,0 +1,40 @@
+{
+  "model": "BAAI/bge-m3",
+  "fingerprint": "bf32771ecbd1",
+  "endpoint_host": "api.siliconflow.cn",
+  "cases": [
+    {
+      "label": "10k",
+      "source_tokens": 10013,
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        2334
+      ],
+      "all_child_safe": true,
+      "vectors": 2,
+      "dimension": [
+        1024
+      ],
+      "errors": [],
+      "elapsed_s": 6.161
+    },
+    {
+      "label": "20k",
+      "source_tokens": 20513,
+      "chunk_count": 3,
+      "child_tokens": [
+        7680,
+        7680,
+        5154
+      ],
+      "all_child_safe": true,
+      "vectors": 3,
+      "dimension": [
+        1024
+      ],
+      "errors": [],
+      "elapsed_s": 3.813
+    }
+  ]
+}

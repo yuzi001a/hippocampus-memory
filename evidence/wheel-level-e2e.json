@@ -1,0 +1,11 @@
+{
+  "interpreter": "C:\\hp-testbed\\wheel-env\\Scripts\\python.exe",
+  "v3core_file": "C:\\hp-testbed\\wheel-env\\Lib\\site-packages\\v3core\\__init__.py",
+  "p0_identity_validator": "PASS",
+  "forward_embedding_import": "PASS",
+  "observation_short": "PASS",
+  "observation_long": "PASS",
+  "child_parent_merge": "PASS",
+  "long_qa": "PASS",
+  "backfill_cli_help": "PASS"
+}

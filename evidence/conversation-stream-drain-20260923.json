@@ -1,0 +1,152 @@
+{
+  "phase": "B3",
+  "table": "conversation_stream",
+  "batches": [
+    {
+      "batch": "A",
+      "selected": 20,
+      "repaired": 20,
+      "null_before": 1052,
+      "null_after": 1032,
+      "elapsed_s": 22.0,
+      "throughput_rows_per_min": 54.5,
+      "source_integrity": {
+        "checked": 20,
+        "unchanged": 20,
+        "mutated": []
+      },
+      "vector_ok": 20,
+      "recall_hits": 1,
+      "recall_sampled": 3,
+      "canonical_cosines": [
+        0.999905,
+        1.0,
+        1.0,
+        0.999922,
+        1.0
+      ],
+      "stats": {
+        "selected": 20,
+        "repaired": 20,
+        "failed_retryable": 0,
+        "failed_permanent": 0,
+        "skipped_nonretryable": 0,
+        "sidecar_written": 0,
+        "elapsed_s": 21.34
+      },
+      "ledger_unresolved_after": 0,
+      "stop_conditions": [],
+      "verdict": "BATCH_OK"
+    },
+    {
+      "batch": "B",
+      "selected": 100,
+      "repaired": 100,
+      "null_before": 1032,
+      "null_after": 932,
+      "elapsed_s": 113.1,
+      "throughput_rows_per_min": 53.1,
+      "source_integrity": {
+        "checked": 100,
+        "unchanged": 100,
+        "mutated": []
+      },
+      "vector_ok": 100,
+      "recall_hits": 3,
+      "recall_sampled": 3,
+      "canonical_cosines": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "stats": {
+        "selected": 100,
+        "repaired": 100,
+        "failed_retryable": 0,
+        "failed_permanent": 0,
+        "skipped_nonretryable": 0,
+        "sidecar_written": 0,
+        "elapsed_s": 112.49
+      },
+      "ledger_unresolved_after": 0,
+      "stop_conditions": [],
+      "verdict": "BATCH_OK"
+    },
+    {
+      "batch": "C",
+      "selected": 300,
+      "repaired": 300,
+      "null_before": 932,
+      "null_after": 632,
+      "elapsed_s": 346.2,
+      "throughput_rows_per_min": 52.0,
+      "source_integrity": {
+        "checked": 300,
+        "unchanged": 300,
+        "mutated": []
+      },
+      "vector_ok": 300,
+      "recall_hits": 3,
+      "recall_sampled": 3,
+      "canonical_cosines": [
+        1.0,
+        1.0,
+        1.0,
+        0.999942,
+        1.0
+      ],
+      "stats": {
+        "selected": 300,
+        "repaired": 300,
+        "failed_retryable": 0,
+        "failed_permanent": 0,
+        "skipped_nonretryable": 0,
+        "sidecar_written": 0,
+        "elapsed_s": 345.58
+      },
+      "ledger_unresolved_after": 0,
+      "stop_conditions": [],
+      "verdict": "BATCH_OK"
+    },
+    {
+      "batch": "D",
+      "selected": 632,
+      "repaired": 632,
+      "null_before": 632,
+      "null_after": 0,
+      "elapsed_s": 705.3,
+      "throughput_rows_per_min": 53.8,
+      "source_integrity": {
+        "checked": 632,
+        "unchanged": 632,
+        "mutated": []
+      },
+      "vector_ok": 632,
+      "recall_hits": 3,
+      "recall_sampled": 3,
+      "canonical_cosines": [
+        1.0,
+        1.0,
+        0.999944,
+        1.0,
+        1.0
+      ],
+      "stats": {
+        "selected": 632,
+        "repaired": 632,
+        "failed_retryable": 0,
+        "failed_permanent": 0,
+        "skipped_nonretryable": 0,
+        "sidecar_written": 0,
+        "elapsed_s": 704.71
+      },
+      "ledger_unresolved_after": 0,
+      "stop_conditions": [],
+      "verdict": "BATCH_OK"
+    }
+  ],
+  "total_repaired": 1052,
+  "stop_conditions_triggered": []
+}

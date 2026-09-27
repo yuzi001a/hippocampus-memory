@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
+import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -37,6 +40,21 @@ PROD_PROFILE_LEAF = "profiles/default"
 
 # 真实 HOME 只在本模块加载时捕获一次（此刻 monkeypatch 还未生效）
 _REAL_HOME = Path.home()
+
+# ── 文件系统隔离守卫（tests/_harness_guard.py）──────────────────────────────
+# 在 conftest 加载期（session 级 fake HOME 生效之前）import，保证 _harness_guard
+# 在模块加载时捕获的 real_home() 是真实 HOME。
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _harness_guard import (  # noqa: E402
+    ALLOW_LIVE_OUTBOX_ENV_VAR,
+    guarded_outbox_paths,
+    is_inside_production,
+    tree_fingerprint,
+    tree_names,
+    tree_recent,
+)
 
 
 def _prod_profile_dir() -> Path:
@@ -158,6 +176,86 @@ def _guard_prod_profile():
             f"P0-A 守卫：本测试修改了生产 profile 文件 {t} — "
             f"before={before[t.name]} after={after}"
         )
+
+
+# ────────────────────────────────────────────────────────────
+# 防线 3b：生产 durable outbox 树守卫（每测试前后 tree_fingerprint 比对）
+#
+# 为什么需要这一层：上面的 _guard_prod_profile 只盯两个**文件**
+# （observer_state.json / config.yaml），因此**看不到** durable outbox 的写入。
+# 真实事故正是从这条缝里漏出去的：harness 用 fake pg + plain dict 构造
+# LiveBuffer，_persist_live_item 把 marker 写进真实生产
+# ~/.v3-core/profiles/default/j/pending_live_buffer（9 个文件），
+# 两个被盯的文件毫无变化 → 全绿。本 fixture 把整棵 outbox 树（含 j/ 一层的
+# 条目名集合）纳入快照，任何新增/删除/触碰都会 fail 该测试。
+# ────────────────────────────────────────────────────────────
+def _j_entry_names() -> tuple:
+    """<prod>/j 一层的条目名集合 — 捕获新建 journal/live-buffer 目录。"""
+    try:
+        j = _prod_profile_dir() / "j"
+        if not j.is_dir():
+            return ()
+        return tuple(sorted(p.name for p in j.iterdir()))
+    except OSError:
+        return ()
+
+
+@pytest.fixture(autouse=True)
+def _guard_prod_outbox_tree():
+    targets = guarded_outbox_paths()          # pending/accepted/_lost + j 本身
+    for t in targets:
+        # fail closed：若守卫盯错了根（例如 real_home() 被误捕成 pytest 沙箱），
+        # 这层防线就是空的 —— 宁可让每个测试都炸，也不能静默放行。
+        assert is_inside_production(t), (
+            f"P0-A 守卫配置错误：{t} 不在真实生产根内 — 守卫会形同虚设"
+        )
+    before = {str(t): tree_fingerprint(t) for t in targets}
+    before_names = {str(t): tree_names(t) for t in targets}
+    before_j_entries = _j_entry_names()
+    for path, fp in before.items():
+        assert fp[0] >= 0, f"P0-A 守卫：无法对生产 outbox 取指纹 {path} — {fp}"
+    yield
+    diffs = []
+    for path, fp in before.items():
+        after = tree_fingerprint(Path(path))
+        if after == fp:
+            continue
+        after_names = tree_names(Path(path))
+        added = sorted(set(after_names) - set(before_names[path]))
+        removed = sorted(set(before_names[path]) - set(after_names))
+        detail = (f"added={added[:8]} removed={removed[:8]}" if (added or removed)
+                  else "no name change — content/mtime touched")
+        written = tree_recent(Path(path), fp[2])
+        diffs.append(
+            f"  - {path}: {detail}\n"
+            f"      before={fp}\n      after ={after}\n"
+            f"      written during this test (mtime newer than before-snapshot): "
+            f"{written if written else 'none found'}"
+        )
+    after_j_entries = _j_entry_names()
+    if after_j_entries != before_j_entries:
+        diffs.append(
+            f"  - {_prod_profile_dir() / 'j'} (one level): "
+            f"added={sorted(set(after_j_entries) - set(before_j_entries))[:8]} "
+            f"removed={sorted(set(before_j_entries) - set(after_j_entries))[:8]}"
+        )
+    if not diffs:
+        return
+    report = (
+        "P0-A 守卫：本测试期间真实生产 durable outbox 发生了变化：\n"
+        + "\n".join(diffs)
+        + "\n  fake DB 不等于 fake filesystem —— 测试要碰 LiveBuffer/outbox 时请用 "
+          "tests/_harness_guard.py 的 isolate()。\n"
+        + f"  （若本机真实 gateway 正在运行，它自己也会写 j/journal_<date>/ 与 live-buffer "
+          f"marker；这种环境下的比对无法区分两者，可显式设 {ALLOW_LIVE_OUTBOX_ENV_VAR}=1 "
+          f"把本守卫降级为 warning —— 默认关闭。）"
+    )
+    if os.environ.get(ALLOW_LIVE_OUTBOX_ENV_VAR) == "1":
+        logger.warning("[P0-A] 生产 outbox 变化（已按 %s=1 降级）:\n%s",
+                       ALLOW_LIVE_OUTBOX_ENV_VAR, report)
+        warnings.warn(report, stacklevel=1)
+        return
+    assert False, report
 
 
 # ────────────────────────────────────────────────────────────

@@ -1,0 +1,176 @@
+{
+  "a02_coverage": {
+    "head": "543ce5934a8a679750b70d983f0656e8b6121c0c",
+    "old_call_sites": 9,
+    "new_seam_calls_in___init__": 9,
+    "raw_call_embedding_left_in___init__": [],
+    "old_to_new_mapping": [
+      {
+        "old_line": 1980,
+        "old_function": "search_cards",
+        "new_seam_line": 1985,
+        "new_function": "search_cards"
+      },
+      {
+        "old_line": 2287,
+        "old_function": "prefetch",
+        "new_seam_line": 2299,
+        "new_function": "prefetch"
+      },
+      {
+        "old_line": 2290,
+        "old_function": "prefetch",
+        "new_seam_line": 2302,
+        "new_function": "prefetch"
+      },
+      {
+        "old_line": 2388,
+        "old_function": "prefetch",
+        "new_seam_line": 2400,
+        "new_function": "prefetch"
+      },
+      {
+        "old_line": 2392,
+        "old_function": "prefetch",
+        "new_seam_line": 2404,
+        "new_function": "prefetch"
+      },
+      {
+        "old_line": 2500,
+        "old_function": "prefetch_to_context_block",
+        "new_seam_line": 2512,
+        "new_function": "prefetch_to_context_block"
+      },
+      {
+        "old_line": 2503,
+        "old_function": "prefetch_to_context_block",
+        "new_seam_line": 2515,
+        "new_function": "prefetch_to_context_block"
+      },
+      {
+        "old_line": 2769,
+        "old_function": "prefetch_to_context_block",
+        "new_seam_line": 2781,
+        "new_function": "prefetch_to_context_block"
+      },
+      {
+        "old_line": 2772,
+        "old_function": "prefetch_to_context_block",
+        "new_seam_line": 2784,
+        "new_function": "prefetch_to_context_block"
+      }
+    ],
+    "seam_calls": [
+      {
+        "line": 1985,
+        "function": "search_cards",
+        "call": "q_emb = call_query_embedding(query, embed_cfg, cache=True)"
+      },
+      {
+        "line": 2299,
+        "function": "prefetch",
+        "call": "q_emb = call_query_embedding(query, embed_cfg, cache=True)"
+      },
+      {
+        "line": 2302,
+        "function": "prefetch",
+        "call": "q_emb = call_query_embedding("
+      },
+      {
+        "line": 2400,
+        "function": "prefetch",
+        "call": "q_emb = call_query_embedding(query, embed_cfg, cache=True,"
+      },
+      {
+        "line": 2404,
+        "function": "prefetch",
+        "call": "q_emb = call_query_embedding(query, embed_cfg, cache=True)"
+      },
+      {
+        "line": 2512,
+        "function": "prefetch_to_context_block",
+        "call": "q_emb = call_query_embedding(query, embed_cfg, cache=True, timeout=3, retries=0)"
+      },
+      {
+        "line": 2515,
+        "function": "prefetch_to_context_block",
+        "call": "q_emb = call_query_embedding("
+      },
+      {
+        "line": 2781,
+        "function": "prefetch_to_context_block",
+        "call": "q_emb = call_query_embedding(query, embed_cfg, cache=True)"
+      },
+      {
+        "line": 2784,
+        "function": "prefetch_to_context_block",
+        "call": "q_emb = call_query_embedding("
+      }
+    ],
+    "search_cards_contract": {
+      "inverted_cache_guard_present": false,
+      "embed_cfg_gate_present": true,
+      "degradation_present": true
+    },
+    "seam_definition": {
+      "embed_chunks.prepare_query_embedding_text": true,
+      "embedding.call_query_embedding": true,
+      "seam_is_query_only": true
+    },
+    "query_sites_outside___init__": [
+      {
+        "file": "recall_pool.py",
+        "line": 3355,
+        "arg": "query[:1000]",
+        "capped": true
+      },
+      {
+        "file": "recall_pool.py",
+        "line": 3358,
+        "arg": "query[:1000]",
+        "capped": true
+      },
+      {
+        "file": "topic_recall.py",
+        "line": 467,
+        "arg": "query[:1000]",
+        "capped": true
+      },
+      {
+        "file": "topic_recall.py",
+        "line": 475,
+        "arg": "query[:1000]",
+        "capped": true
+      },
+      {
+        "file": "topic_recall.py",
+        "line": 664,
+        "arg": "query[:1000]",
+        "capped": true
+      }
+    ],
+    "query_sites_outside_note": "every query-derived embedding call outside the core query path is capped at 1e3 chars by construction (<= ~1e3 tokens << 8192 window), so no query path can hand an over-window payload to the provider",
+    "source_paths_untouched": {
+      "ingest.py": {
+        "uses_query_seam": false,
+        "uses_call_embedding": false
+      },
+      "observer.py": {
+        "uses_query_seam": false,
+        "uses_call_embedding": true
+      },
+      "e1.py": {
+        "uses_query_seam": false,
+        "uses_call_embedding": false
+      },
+      "yin_pool.py": {
+        "uses_query_seam": false,
+        "uses_call_embedding": false
+      },
+      "active_memory_store.py": {
+        "uses_query_seam": false,
+        "uses_call_embedding": true
+      }
+    }
+  }
+}

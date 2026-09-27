@@ -1,0 +1,12 @@
+{
+  "artifact": "LONG_OBSERVATION_PRODUCTION_CANDIDATE",
+  "old_manifest_source_head": "9c4d191017620e9edbd81ca8fd85d232f4faf23c",
+  "product_code_head": "2f23e34574880e3c61ed0e9a2d73ded4e685edac",
+  "artifact_build_head": "75e7d1297927fa932bf766fddbf06407660f23d2",
+  "final_documentation_head_at_build": "75e7d1297927fa932bf766fddbf06407660f23d2",
+  "old_wheel_sha256": "9bb82c792a0d1ccbd62ed1511b3b5502afc8f751a8273397c7beb60629544d4a",
+  "new_wheel_sha256": "25a3bb46296b4aae261e8eed686b9d0fcd96e6bda1761343af75979d4d67fc5c",
+  "old_vs_new_product_blobs": "IDENTICAL",
+  "source_wheel_product_drift": 0,
+  "resolution": "REBUILT_WHEEL_AND_REGENERATED_MANIFEST"
+}

@@ -1,0 +1,617 @@
+{
+  "status": "LONG_OBSERVATION_PIPELINE_IN_PROGRESS",
+  "scope": "read_only_production_census_and_local_evidence_only",
+  "production_writes": 0,
+  "integration": {
+    "branch": "feature/long-observation-index-v1",
+    "head": "9c4d191017620e9edbd81ca8fd85d232f4faf23c"
+  },
+  "backfill_operator": {
+    "repo": "C:\\Users\\servi\\workspace\\wt-p0-embed-integration",
+    "head": "9c4d191017620e9edbd81ca8fd85d232f4faf23c",
+    "wheel": "C:\\Users\\servi\\workspace\\artifacts\\backfill-operator-20260921\\v3_core-4.0.0-py3-none-any.whl",
+    "wheel_sha256": "d3c4083db5c2cf3c9b7fc9520daf504683b49b36c513f7e0430e1c55fec061a6",
+    "wheel_members": 112
+  },
+  "production_runtime_identity": {
+    "live_manifest": {
+      "baseline_available": true,
+      "live_package_path": "C:\\Users\\servi\\AppData\\Local\\hermes\\hermes-agent\\venv\\Lib\\site-packages\\v3core",
+      "expected_live_wheel_sha256": "8f5fecdf5c9af049011f925c3bd14c5175e727ec33996a61e22981daee6dbb88",
+      "baseline_manifest_sha256": "eb651215c5739e21cbefd818db4f28ad999abc0ea8f647e7c5f47055ac23c30d",
+      "current_manifest_sha256": "c767d33bc5637d40eeb18e683810a8944307db05aa3fb1980a54860ec36a9a36",
+      "baseline_file_count": 102,
+      "current_file_count": 102,
+      "missing": [],
+      "extra": [],
+      "changed": [],
+      "manifest_unchanged": true
+    },
+    "process_snapshot": [
+      {
+        "image": "python.exe",
+        "pid": "6936",
+        "memory": "3,668 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "8760",
+        "memory": "11,796 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "16268",
+        "memory": "260,948 K"
+      },
+      {
+        "image": "pythonw.exe",
+        "pid": "6472",
+        "memory": "1,572 K"
+      },
+      {
+        "image": "pythonw.exe",
+        "pid": "13704",
+        "memory": "48 K"
+      },
+      {
+        "image": "pythonw.exe",
+        "pid": "704",
+        "memory": "48 K"
+      },
+      {
+        "image": "pythonw.exe",
+        "pid": "15864",
+        "memory": "5,984 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "3924",
+        "memory": "4,320 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "15408",
+        "memory": "528,960 K"
+      },
+      {
+        "image": "Hermes.exe",
+        "pid": "5580",
+        "memory": "153,288 K"
+      },
+      {
+        "image": "Hermes.exe",
+        "pid": "17364",
+        "memory": "142,964 K"
+      },
+      {
+        "image": "Hermes.exe",
+        "pid": "17428",
+        "memory": "56,540 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "6548",
+        "memory": "4,256 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "18172",
+        "memory": "1,037,308 K"
+      },
+      {
+        "image": "Hermes.exe",
+        "pid": "9616",
+        "memory": "33,456 K"
+      },
+      {
+        "image": "Hermes.exe",
+        "pid": "6796",
+        "memory": "653,492 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "19964",
+        "memory": "4,260 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "20436",
+        "memory": "29,512 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "2356",
+        "memory": "4,260 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "17608",
+        "memory": "16,048 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "20200",
+        "memory": "3,712 K"
+      },
+      {
+        "image": "python.exe",
+        "pid": "20104",
+        "memory": "315,240 K"
+      }
+    ],
+    "live_runtime_wheel_untouched_claim_basis": "manifest comparison only"
+  },
+  "target_db": {
+    "host": "localhost",
+    "port": 5433,
+    "database": "v3embeddings",
+    "user": "v3user",
+    "current_database": "v3embeddings",
+    "current_user": "v3user",
+    "transaction_read_only": "on"
+  },
+  "embed": {
+    "embed_model": "BAAI/bge-m3",
+    "embed_fingerprint": "bf32771ecbd1",
+    "max_input_tokens": 8192,
+    "chunk_safety_margin": 512,
+    "safe_token_target": 7680
+  },
+  "operator_identity": {
+    "sys_executable": "C:\\Users\\servi\\workspace\\backups\\operator-env\\Scripts\\python.exe",
+    "pythonpath": null,
+    "operator_venv_expected": true,
+    "v3core_file": "C:\\Users\\servi\\workspace\\backups\\operator-env\\Lib\\site-packages\\v3core\\__init__.py",
+    "v3core_from_operator_venv": true,
+    "embed_model": "BAAI/bge-m3",
+    "embed_fingerprint": "bf32771ecbd1",
+    "max_input_tokens": 8192,
+    "chunk_safety_margin": 512,
+    "safe_token_target": 7680
+  },
+  "observation_notes_null_rows": [
+    {
+      "id": 634,
+      "version": "v634",
+      "chars": 26002,
+      "bytes": 33582,
+      "token_count": 10965,
+      "source_sha256": "02b47ae49db3a0fa5d863fd0e6d2aab2918a0f78d23b9052be42f71f8df1a4fb",
+      "current_embedding": {
+        "is_null": true,
+        "dim": null,
+        "embed_model": ""
+      },
+      "links_metadata": {
+        "count": 6,
+        "kinds": [
+          "qa",
+          "topics",
+          "trigger",
+          "snapshot",
+          "event_time",
+          "oversize_batch"
+        ],
+        "key_shapes": [
+          [
+            "first",
+            "kind",
+            "last"
+          ],
+          [
+            "kind",
+            "topic_ids"
+          ],
+          [
+            "data",
+            "kind",
+            "reason"
+          ],
+          [
+            "kind",
+            "version"
+          ],
+          [
+            "end",
+            "kind",
+            "start"
+          ],
+          [
+            "char_count",
+            "kind",
+            "max_chars",
+            "qa_count"
+          ]
+        ],
+        "sha256": "a6380f22d00eb98998bd59b6f1dea8acc23a914c154f95584c655c9e8d0e2d3e"
+      },
+      "source_qa_range": "[247800,247804)",
+      "prev_id": 633,
+      "created_at": "2026-09-03T15:33:15.068959+00:00",
+      "live_canonical_input": {
+        "kind": "observation_notes.content",
+        "source_hash_identical": true,
+        "canonical_sha256": "02b47ae49db3a0fa5d863fd0e6d2aab2918a0f78d23b9052be42f71f8df1a4fb",
+        "bounded": false
+      },
+      "over_safe_target": true,
+      "over_provider_hard_window": true
+    },
+    {
+      "id": 726,
+      "version": "v726",
+      "chars": 16168,
+      "bytes": 24518,
+      "token_count": 8909,
+      "source_sha256": "5851a2da31549680ef4737f68de87042b538c5c4337ae0e358381d0ca4f0e17b",
+      "current_embedding": {
+        "is_null": true,
+        "dim": null,
+        "embed_model": ""
+      },
+      "links_metadata": {
+        "count": 6,
+        "kinds": [
+          "qa",
+          "topics",
+          "trigger",
+          "snapshot",
+          "event_time",
+          "oversize_batch"
+        ],
+        "key_shapes": [
+          [
+            "first",
+            "kind",
+            "last"
+          ],
+          [
+            "kind",
+            "topic_ids"
+          ],
+          [
+            "data",
+            "kind",
+            "reason"
+          ],
+          [
+            "kind",
+            "version"
+          ],
+          [
+            "end",
+            "kind",
+            "start"
+          ],
+          [
+            "char_count",
+            "kind",
+            "max_chars",
+            "qa_count"
+          ]
+        ],
+        "sha256": "b926e135d56f1cc69e99c58e86bc52cdda1e5cb1f8f851de8072bc7d86e2d3e2"
+      },
+      "source_qa_range": "[248340,248357)",
+      "prev_id": 725,
+      "created_at": "2026-09-20T09:38:02.235764+00:00",
+      "live_canonical_input": {
+        "kind": "observation_notes.content",
+        "source_hash_identical": true,
+        "canonical_sha256": "5851a2da31549680ef4737f68de87042b538c5c4337ae0e358381d0ca4f0e17b",
+        "bounded": false
+      },
+      "over_safe_target": true,
+      "over_provider_hard_window": true
+    },
+    {
+      "id": 732,
+      "version": "v732",
+      "chars": 22228,
+      "bytes": 32452,
+      "token_count": 11631,
+      "source_sha256": "62ed033513c08743f381201769f323b9fc77724386e207c34cf444919728bdc7",
+      "current_embedding": {
+        "is_null": true,
+        "dim": null,
+        "embed_model": ""
+      },
+      "links_metadata": {
+        "count": 6,
+        "kinds": [
+          "qa",
+          "topics",
+          "trigger",
+          "snapshot",
+          "event_time",
+          "oversize_batch"
+        ],
+        "key_shapes": [
+          [
+            "first",
+            "kind",
+            "last"
+          ],
+          [
+            "kind",
+            "topic_ids"
+          ],
+          [
+            "data",
+            "kind",
+            "reason"
+          ],
+          [
+            "kind",
+            "version"
+          ],
+          [
+            "end",
+            "kind",
+            "start"
+          ],
+          [
+            "char_count",
+            "kind",
+            "max_chars",
+            "qa_count"
+          ]
+        ],
+        "sha256": "7d3ea0a8ad5692dd75856564001e72b9a7fc8ad1dcf726f9abc31d94713a0479"
+      },
+      "source_qa_range": "[248395,248403)",
+      "prev_id": 731,
+      "created_at": "2026-09-20T15:02:57.428177+00:00",
+      "live_canonical_input": {
+        "kind": "observation_notes.content",
+        "source_hash_identical": true,
+        "canonical_sha256": "62ed033513c08743f381201769f323b9fc77724386e207c34cf444919728bdc7",
+        "bounded": false
+      },
+      "over_safe_target": true,
+      "over_provider_hard_window": true
+    },
+    {
+      "id": 743,
+      "version": "v743",
+      "chars": 23326,
+      "bytes": 31756,
+      "token_count": 11028,
+      "source_sha256": "a5e5e0e4fcbea35d7c0f5b6d0df9a9f689600a138fadf034e9bb232586396414",
+      "current_embedding": {
+        "is_null": true,
+        "dim": null,
+        "embed_model": ""
+      },
+      "links_metadata": {
+        "count": 6,
+        "kinds": [
+          "qa",
+          "topics",
+          "trigger",
+          "snapshot",
+          "event_time",
+          "oversize_batch"
+        ],
+        "key_shapes": [
+          [
+            "first",
+            "kind",
+            "last"
+          ],
+          [
+            "kind",
+            "topic_ids"
+          ],
+          [
+            "data",
+            "kind",
+            "reason"
+          ],
+          [
+            "kind",
+            "version"
+          ],
+          [
+            "end",
+            "kind",
+            "start"
+          ],
+          [
+            "char_count",
+            "kind",
+            "max_chars",
+            "qa_count"
+          ]
+        ],
+        "sha256": "3b3d6f3b92df532fa0b6e0a9e6b8e1c48d7f40c2c71a3008190206e593fcb9a0"
+      },
+      "source_qa_range": "[248431,248440)",
+      "prev_id": 742,
+      "created_at": "2026-09-21T05:03:16.577673+00:00",
+      "live_canonical_input": {
+        "kind": "observation_notes.content",
+        "source_hash_identical": true,
+        "canonical_sha256": "a5e5e0e4fcbea35d7c0f5b6d0df9a9f689600a138fadf034e9bb232586396414",
+        "bounded": false
+      },
+      "over_safe_target": true,
+      "over_provider_hard_window": true
+    },
+    {
+      "id": 746,
+      "version": "v745",
+      "chars": 21699,
+      "bytes": 31563,
+      "token_count": 11074,
+      "source_sha256": "7693c7787800cf8af72a43ed8f680b2009a9ce0117adae6749f1635c22516c97",
+      "current_embedding": {
+        "is_null": true,
+        "dim": null,
+        "embed_model": ""
+      },
+      "links_metadata": {
+        "count": 6,
+        "kinds": [
+          "qa",
+          "topics",
+          "trigger",
+          "snapshot",
+          "event_time",
+          "oversize_batch"
+        ],
+        "key_shapes": [
+          [
+            "first",
+            "kind",
+            "last"
+          ],
+          [
+            "kind",
+            "topic_ids"
+          ],
+          [
+            "data",
+            "kind",
+            "reason"
+          ],
+          [
+            "kind",
+            "version"
+          ],
+          [
+            "end",
+            "kind",
+            "start"
+          ],
+          [
+            "char_count",
+            "kind",
+            "max_chars",
+            "qa_count"
+          ]
+        ],
+        "sha256": "4148b153a5aa441f39d6f683ad853b50c648796c0ca5612f0ce8d1ccf5475258"
+      },
+      "source_qa_range": "[248440,248445)",
+      "prev_id": 744,
+      "created_at": "2026-09-21T07:01:35.999616+00:00",
+      "live_canonical_input": {
+        "kind": "observation_notes.content",
+        "source_hash_identical": true,
+        "canonical_sha256": "7693c7787800cf8af72a43ed8f680b2009a9ce0117adae6749f1635c22516c97",
+        "bounded": false
+      },
+      "over_safe_target": true,
+      "over_provider_hard_window": true
+    },
+    {
+      "id": 759,
+      "version": "v759",
+      "chars": 16282,
+      "bytes": 24738,
+      "token_count": 8514,
+      "source_sha256": "9adee801b4d5a9860b0ea78cd1fd5c7d432c03902e6c3c1e81f319ec969d7838",
+      "current_embedding": {
+        "is_null": true,
+        "dim": null,
+        "embed_model": ""
+      },
+      "links_metadata": {
+        "count": 6,
+        "kinds": [
+          "qa",
+          "topics",
+          "trigger",
+          "snapshot",
+          "event_time",
+          "oversize_batch"
+        ],
+        "key_shapes": [
+          [
+            "first",
+            "kind",
+            "last"
+          ],
+          [
+            "kind",
+            "topic_ids"
+          ],
+          [
+            "data",
+            "kind",
+            "reason"
+          ],
+          [
+            "kind",
+            "version"
+          ],
+          [
+            "end",
+            "kind",
+            "start"
+          ],
+          [
+            "char_count",
+            "kind",
+            "max_chars",
+            "qa_count"
+          ]
+        ],
+        "sha256": "53726a212a41ee1f44b5fe8a56f9c3b2cf8fadcc80c439333c19de7b5e45f815"
+      },
+      "source_qa_range": "[248461,248469)",
+      "prev_id": 758,
+      "created_at": "2026-09-21T11:57:14.011800+00:00",
+      "live_canonical_input": {
+        "kind": "observation_notes.content",
+        "source_hash_identical": true,
+        "canonical_sha256": "9adee801b4d5a9860b0ea78cd1fd5c7d432c03902e6c3c1e81f319ec969d7838",
+        "bounded": false
+      },
+      "over_safe_target": true,
+      "over_provider_hard_window": true
+    }
+  ],
+  "observation_notes_null_count": 6,
+  "all_over_safe_target": true,
+  "all_over_provider_hard_window": true,
+  "ledger_observation_notes": {
+    "total": 0,
+    "unresolved": 0
+  },
+  "pg_stat_counters": {
+    "embedding_failures": {
+      "ins": 0,
+      "upd": 0,
+      "del": 0
+    },
+    "observation_notes": {
+      "ins": 65,
+      "upd": 89,
+      "del": 0
+    }
+  },
+  "production_schema_fingerprint": {
+    "sha256": "78f145aa4c18c7e96c94aa642d4897895221e9c28fa9be9f912d7b702145a772",
+    "table_count": 1,
+    "column_count": 149,
+    "index_count": 38,
+    "constraint_count": 24,
+    "extensions": [
+      [
+        "extname",
+        "extversion"
+      ],
+      [
+        "extname",
+        "extversion"
+      ],
+      [
+        "extname",
+        "extversion"
+      ]
+    ]
+  },
+  "source_truth_policy": "observation_notes.content is not modified; source hash is the invariant"
+}

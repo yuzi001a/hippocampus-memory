@@ -1,0 +1,136 @@
+{
+  "artifact": "LONG_OBSERVATION_PRODUCTION_CANDIDATE",
+  "round": "production canary (1 row) + additive sidecar migration + live deploy/restart",
+  "provenance": {
+    "product_code_head": "2f23e34574880e3c61ed0e9a2d73ded4e685edac",
+    "artifact_build_head": "75e7d1297927fa932bf766fddbf06407660f23d2",
+    "final_documentation_head_at_build": "75e7d1297927fa932bf766fddbf06407660f23d2",
+    "wheel_sha256": "25a3bb46296b4aae261e8eed686b9d0fcd96e6bda1761343af75979d4d67fc5c",
+    "wheel_member_count": 114,
+    "source_wheel_product_drift": 0,
+    "old_manifest_source_head": "9c4d191017620e9edbd81ca8fd85d232f4faf23c",
+    "old_wheel_sha256": "9bb82c792a0d1ccbd62ed1511b3b5502afc8f751a8273397c7beb60629544d4a",
+    "old_vs_new_product_blobs": "IDENTICAL",
+    "root_cause": "ARTIFACT_BLOBS_CORRECT_PROVENANCE_METADATA_STALE"
+  },
+  "wheel_targeted_gates": {
+    "long_observation_and_policy": "48 passed",
+    "p0_and_forward_embedding": "161 passed",
+    "backfill_cli_help_and_dry_run": "PASS",
+    "disposable_pg_write_to_recall_smoke": "PASS (row removed after; 0 residue)",
+    "installed_member_byte_equality": "108/108"
+  },
+  "migration": {
+    "sql": "schema/observation_embedding_chunks.sql",
+    "sql_sha256": "4f9dd8925255c9e094ae5f35aa5b49e139a0a911cccff71460f3c8b0d31b2998",
+    "result": "PASS",
+    "table_created": true,
+    "foreign_key": "observation_id -> observation_notes(id) ON DELETE CASCADE",
+    "unique_constraint": "observation_id, observation_version, chunk_index",
+    "parent_index": "observation_embedding_chunks_parent_idx",
+    "vector_index": "observation_embedding_chunks_embedding_ivfflat (ivfflat, vector_cosine_ops, lists=100)",
+    "rows_after_migration": 0,
+    "observation_notes_unchanged": true,
+    "source_hashes_unchanged": true,
+    "embedding_failures_unchanged": true
+  },
+  "deploy": {
+    "target": "live Hermes venv site-packages",
+    "direct_url_after": "file:///C:/hp-testbed/artifacts/LONG_OBSERVATION_PRODUCTION_CANDIDATE/v3_core-4.0.0-py3-none-any.whl",
+    "member_byte_equality": "108/108, drift=0",
+    "p0_forward_and_d1_d5_not_degraded": true
+  },
+  "restart": {
+    "gateway_old_pids": [3924, 15408],
+    "gateway_new_pids": [3772, 5252],
+    "serve_old_pids": [6548, 18172],
+    "serve_new_pids": [2864, 19988],
+    "old_pids_absent": true,
+    "heartbeat_fresh": true,
+    "feishu_inbound_after_restart": true
+  },
+  "forward_smoke": {
+    "p0_validator": "ACTIVE (rejects malformed generated context with SECTION_MISSING)",
+    "embed_policies": {"realtime": [3.0, 0], "stream": [5.0, 0], "durable": [10.0, 2]},
+    "new_observation_after_restart": {"id": 778, "chars": 3247, "vector": true, "dim": 1024, "model": "bf32771ecbd1"},
+    "short_observation_sidecar_children": 0,
+    "unexplained_new_null": 0
+  },
+  "six_row_dry_run": {
+    "selected": 6,
+    "source_sha_drift": 0,
+    "all_long": true,
+    "rows": [
+      {"id": 634, "tokens": 10963, "chunks": 2},
+      {"id": 726, "tokens": 8907, "chunks": 2},
+      {"id": 732, "tokens": 11629, "chunks": 2},
+      {"id": 743, "tokens": 11026, "chunks": 2},
+      {"id": 746, "tokens": 11072, "chunks": 2},
+      {"id": 759, "tokens": 8512, "chunks": 2}
+    ],
+    "verdict": "DRY_RUN_OK"
+  },
+  "canary": {
+    "observation_id": 759,
+    "selector": "explicit single-row selection through the shipped _repair_observation_row (shipped CLI has no id selector; --limit 1 would have picked id=634)",
+    "source_sha_before": "9adee801b4d5a9860b0ea78cd1fd5c7d432c03902e6c3c1e81f319ec969d7838",
+    "source_sha_after": "9adee801b4d5a9860b0ea78cd1fd5c7d432c03902e6c3c1e81f319ec969d7838",
+    "source_unchanged": true,
+    "children": [
+      {"chunk_index": 0, "tokens": 7680, "source_start": 0, "source_end": 14844, "representation_version": "v1-long-observation", "embed_model": "bf32771ecbd1"},
+      {"chunk_index": 1, "tokens": 833, "source_start": 14844, "source_end": 16282, "representation_version": "v1-long-observation", "embed_model": "bf32771ecbd1"}
+    ],
+    "children_tokens_all_within_safe_window": true,
+    "offsets_contiguous": true,
+    "coverage_chars": 16282,
+    "coverage_complete": true,
+    "parent": {"vector": true, "dim": 1024, "embed_model": "bf32771ecbd1", "aggregated_from_all_children": true},
+    "ledger_unresolved": 0,
+    "recall_tail_only_query": {
+      "parent_only_cosine": 0.6631,
+      "best_child_cosine": 0.7035,
+      "merged_rank": 1,
+      "merged_cosine": 0.7035,
+      "merged_content_chars": 16282,
+      "merged_content_is_full_parent": true,
+      "merged_content_sha256": "9adee801b4d5a9860b0ea78cd1fd5c7d432c03902e6c3c1e81f319ec969d7838"
+    },
+    "recall_head_query": {
+      "merged_hit_found": false,
+      "cause": "PRE_EXISTING_NEWEST_PER_DAY_SEMANTICS: observation 751 (v750-compressed, cosine 0.5906) won 2026-09-21 over 759 (0.5737); DISTINCT ON created_at::date keeps one observation per day. Not a long-observation regression."
+    }
+  },
+  "post_canary_health": {
+    "observation_total": 778,
+    "observation_null_parent": 5,
+    "remaining_null_ids": [634, 726, 732, 743, 746],
+    "sidecar_rows": 2,
+    "sidecar_parents": ["759"],
+    "embedding_failures": 0,
+    "new_null_last_6h": 0,
+    "parents_with_unexpected_model": 0,
+    "children_with_unexpected_model_or_version": 0,
+    "observer_activity": "normal (recall_for_new_session, observer singleton on the new serve pid)",
+    "provider_429_or_timeout_after_canary": 0,
+    "recall_errors_after_canary": 0
+  },
+  "production_mutations": {
+    "schema": ["CREATE TABLE observation_embedding_chunks", "CREATE INDEX x3"],
+    "data_writes": ["observation_notes.id=759 embedding + embed_model", "observation_embedding_chunks 2 rows for 759"],
+    "rows_repaired": 1,
+    "rows_remaining": 5,
+    "other_tables_touched": 0
+  },
+  "rollback_package": {
+    "dir": "C:/Users/servi/workspace/backups/long-observation-canary-20260922",
+    "dump": "production-pre-cutover.dump",
+    "dump_bytes": 213365256,
+    "dump_sha256": "67c9c8ec12d5312a4a21fa125d8476b67d552318b694f75c958a89721bacf14a",
+    "pg_restore_list_entries": 206,
+    "live_wheel_backup": "live-wheel-current-8f5fecdf...whl",
+    "dist_info_backup": "live-dist-info"
+  },
+  "real_y400_full_differential": "NOT_AVAILABLE",
+  "verdict": "LONG_OBSERVATION_PRODUCTION_CANARY = PASS",
+  "state": "DECISION_REQUIRED"
+}

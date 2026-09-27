@@ -157,6 +157,7 @@ def _full_shape():
         "explicit_memories",
         "schema_versions",
         "qa_embedding_chunks",
+        "observation_embedding_chunks",
     }
     cols = {
         ("qa_pairs", "source_id"),
@@ -466,14 +467,14 @@ def test_production_dry_run_emits_exact_plan_and_sha(monkeypatch):
     }
     assert payload["plan"]["destructive_scan"]["clean"] is True
     assert payload["plan"]["transaction_boundary"]["single_transaction"] is True
-    for k in ("upgrade_v0_2.sql", "explicit_memories.sql", "qa_embedding_chunks.sql"):
+    for k in ("upgrade_v0_2.sql", "explicit_memories.sql", "qa_embedding_chunks.sql", "observation_embedding_chunks.sql"):
         sha = payload["plan"]["artifacts"].get(k)
         assert sha and re.fullmatch(r"[0-9a-f]{64}", sha), k
     assert payload["plan"]["combined_sql"]["bytes"] > 0
     tables_after = payload["plan"]["expected_objects_after_apply"]["tables"]
     # Tables may be schema-qualified (``public.explicit_memories``)
     # — match by suffix so the assertion is robust either way.
-    for t in ("explicit_memories", "schema_versions", "qa_embedding_chunks"):
+    for t in ("explicit_memories", "schema_versions", "qa_embedding_chunks", "observation_embedding_chunks"):
         assert any(t in name for name in tables_after), (t, tables_after)
     apply_cmd = payload["recommended_commands"]["apply"]
     assert "--allow-production-write" in apply_cmd

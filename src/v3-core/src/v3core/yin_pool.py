@@ -113,16 +113,30 @@ def ingest_yin(yin_content: str, yin_version: str, pg, embed_cfg: dict | None = 
     for title, body in sections:
         emb_text = None
         if embed_cfg is not None:
-            try:
-                from .embedding import call_embedding
-                ev = call_embedding(f"{title}. {body[:1500]}", embed_cfg)
-                if ev:
-                    emb_text = "[" + ",".join(str(x) for x in ev) + "]"
-            except ValueError:
-                # 配置错误不允许吞 — 必须冒泡
-                raise
-            except Exception as e:
-                logger.debug("yin_pool: 段 embedding 失败: %s", str(e)[:100])
+            # Each paragraph's embedding is DERIVED; the paragraph text is the asset.
+            # Record a durable marker instead of a debug-level shrug, and name the
+            # durable policy so a slow provider does not silently cost the paragraph
+            # its vector. entity_id is the natural key (yin_version/section), because
+            # yin_paragraphs' PK is a SERIAL assigned by the INSERT itself.
+            from .embedding import DURABLE_WRITE_EMBED_POLICY
+            from .embed_failures import embed_for_write
+            _out = embed_for_write(
+                f"{title}. {body[:1500]}", embed_cfg,
+                entity_table="yin_paragraphs",
+                entity_id=f"{yin_version}/{title}",
+                phase="yin_ingest",
+                conn_factory=getattr(pg, "open_side_connection", None),
+                policy=DURABLE_WRITE_EMBED_POLICY,
+            )
+            if _out.vector:
+                emb_text = "[" + ",".join(str(x) for x in _out.vector) + "]"
+            else:
+                logger.warning(
+                    "yin_pool: 段 embedding %s (段文本已写入, 向量待修复): section=%s "
+                    "class=%s retryable=%s marker_recorded=%s",
+                    _out.status.value, title, _out.error_class, _out.retryable,
+                    _out.marker_recorded,
+                )
         try:
             with conn.cursor() as cur:
                 if emb_text:

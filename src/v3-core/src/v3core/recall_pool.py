@@ -1755,6 +1755,215 @@ def _qa_keyword_cache_lookup(
         return frequencies, rows
 
 
+# ── Long-observation derived index v1: parent/child union recall ──
+# docs/LONG-OBSERVATION-INDEX.md §8. Parent candidates come from
+# observation_notes.embedding; child candidates from the additive
+# observation_embedding_chunks sidecar joined to the parent. A child hit maps
+# to the FULL parent content; candidates group by (observation_id,
+# observation_version) with score=max(parent/child cosine). The sidecar table
+# is optional: absent → parent-only legacy path (migration-first safe).
+_OBSERVATION_CHILD_LIMIT_FACTOR = 4
+_OBSERVATION_NOTE_COSINE_FLOOR = 0.30
+
+
+def _fetch_observation_child_candidates(cur, emb_str: str, limit: int) -> list:
+    """Fetch sidecar child candidates; [] when the table is absent.
+
+    Never raises: pre-migration runtimes fall back to the parent-only path.
+    All SQL is parameterized (SQL-safe); source_sha256 is validated in Python
+    by the merge step, never interpolated.
+    """
+    try:
+        cur.execute("SELECT to_regclass('observation_embedding_chunks')")
+        _probe = cur.fetchone()
+        if not (_probe and _probe[0]):
+            return []
+        _child_limit = max(int(limit or 0), 3) * _OBSERVATION_CHILD_LIMIT_FACTOR
+        cur.execute(
+            "SELECT c.observation_id, n.version, n.content, n.created_at, "
+            " 1 - (c.embedding <=> %s::vector) AS cosine, "
+            " c.source_sha256, c.representation_version "
+            "FROM observation_embedding_chunks c "
+            "JOIN observation_notes n ON n.id = c.observation_id "
+            "WHERE c.embedding IS NOT NULL AND n.embedding IS NOT NULL "
+            "  AND c.observation_version = n.version "
+            "ORDER BY c.embedding <=> %s::vector LIMIT %s",
+            (emb_str, emb_str, _child_limit),
+        )
+        return list(cur.fetchall() or [])
+    except Exception:
+        return []
+
+
+def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list:
+    """Group parent/child observation candidates into one hit per parent.
+
+    Returns RecallHit list (full parent content, cosine=max lane score),
+    newest-per-day, ordered by cosine desc, capped at max(limit, 3) with the
+    standing 0.30 note floor applied. Child rows are eligible only when their
+    source_sha256 equals the sha256 of the CURRENT parent content, their
+    representation version is current, and the score is usable. Planner module
+    absent → parent-only legacy merge.
+    """
+    import hashlib as _hashlib
+    try:
+        from .observation_chunks import (
+            OBSERVATION_REPRESENTATION_VERSION as _OBS_VERSION,
+            merge_observation_recall_hits as _merge_hits,
+        )
+    except Exception:
+        _OBS_VERSION = None  # type: ignore[assignment]
+        _merge_hits = None  # type: ignore[assignment]
+
+    _cap = max(int(limit or 0), 3)
+    _cands: list[dict] = []
+    _created: dict[tuple, object] = {}
+    for _row in parent_rows or []:
+        _nid, _ver, _content, _cos = _row[0], _row[1], _row[2], _row[3]
+        _ts = _row[4] if len(_row) > 4 else None
+        try:
+            _sim = float(_cos) if _cos is not None else float("-inf")
+        except (TypeError, ValueError):
+            _sim = float("-inf")
+        _cands.append({
+            "observation_id": _nid, "observation_version": _ver,
+            "cosine": _sim, "content": _content or "", "kind": "parent",
+        })
+        _created.setdefault((_nid, _ver), _ts)
+    for _row in child_rows or []:
+        try:
+            _cid, _cver, _ccontent = _row[0], _row[1], _row[2]
+            _cts, _ccos, _csha, _crep = _row[3], _row[4], _row[5], _row[6]
+        except (IndexError, TypeError, ValueError):
+            continue
+        if not (_ccontent or ""):
+            continue
+        if _OBS_VERSION is not None and _crep != _OBS_VERSION:
+            continue
+        try:
+            _actual = _hashlib.sha256(
+                (_ccontent or "").encode("utf-8")).hexdigest()
+        except Exception:
+            continue
+        if not _csha or _csha != _actual:
+            continue
+        try:
+            _csim = float(_ccos) if _ccos is not None else float("-inf")
+        except (TypeError, ValueError):
+            continue
+        if _csim == float("-inf"):
+            continue
+        _cands.append({
+            "observation_id": _cid, "observation_version": _cver,
+            "cosine": _csim, "content": _ccontent or "", "kind": "child",
+        })
+        _created.setdefault((_cid, _cver), _cts)
+
+    if _merge_hits is not None:
+        _merged = _merge_hits(_cands)
+    else:  # parent-only legacy merge (group + max, no child lane)
+        _groups: dict[tuple, dict] = {}
+        for _c in _cands:
+            if _c.get("kind") != "parent":
+                continue
+            _k = (_c.get("observation_id"), _c.get("observation_version"))
+            _g = _groups.get(_k)
+            if _g is None or _c["cosine"] > _g["cosine"]:
+                _groups[_k] = {
+                    "observation_id": _k[0], "observation_version": _k[1],
+                    "cosine": _c["cosine"], "content": _c.get("content") or "",
+                }
+        _merged = sorted(
+            _groups.values(),
+            key=lambda _e: (-_e["cosine"], str(_e["observation_id"]),
+                            str(_e["observation_version"])),
+        )
+
+    # newest-per-day (existing DISTINCT ON date semantics), then cap+floor.
+    def _day(_ts) -> object:
+        try:
+            if _ts is None:
+                return None
+            if hasattr(_ts, "date") and not isinstance(_ts, str):
+                return _ts.date().isoformat()
+            return str(_ts)[:10]
+        except Exception:
+            return None
+
+    _best: dict[object, dict] = {}
+    _nos: list[dict] = []
+    for _e in _merged:
+        _k = (_e.get("observation_id"), _e.get("observation_version"))
+        _ts = _created.get(_k)
+        _d = _day(_ts)
+        if _d is None:
+            _nos.append(_e)
+            continue
+        _prev = _best.get(_d)
+        if _prev is None:
+            _best[_d] = _e
+            continue
+        _prev_kinds = set(_prev.get("source_kinds") or [])
+        _new_kinds = set(_e.get("source_kinds") or [])
+        if "child" in (_prev_kinds | _new_kinds):
+            # A distinctive child hit must not be discarded merely because
+            # a newer same-day observation has a weaker score. Preserve the
+            # existing short-parent path below; long-child retrieval uses max
+            # score, with timestamp only as a tie breaker.
+            try:
+                _prev_score = float(_prev.get("cosine", 0))
+                _new_score = float(_e.get("cosine", 0))
+                if _new_score > _prev_score:
+                    _best[_d] = _e
+                elif _new_score == _prev_score:
+                    _pts = _created.get(
+                        (_prev.get("observation_id"), _prev.get("observation_version")))
+                    if _ts is not None and (_pts is None or _ts >= _pts):
+                        _best[_d] = _e
+            except (TypeError, ValueError):
+                pass
+            continue
+        _pts = _created.get(
+            (_prev.get("observation_id"), _prev.get("observation_version")))
+        try:
+            if _ts is not None and (_pts is None or _ts >= _pts):
+                _best[_d] = _e
+        except Exception:
+            if _e.get("cosine", 0) > _prev.get("cosine", 0):
+                _best[_d] = _e
+    _daily = sorted(
+        list(_best.values()),
+        key=lambda _e: (-_e.get("cosine", 0), str(_e.get("observation_id")),
+                        str(_e.get("observation_version"))),
+    )
+    _out: list = []
+    for _e in list(_daily) + sorted(
+            _nos, key=lambda _x: -_x.get("cosine", 0))[:max(_cap - len(_daily), 0)]:
+        if len(_out) >= _cap:
+            break
+        try:
+            _sim = float(_e.get("cosine") or 0)
+        except (TypeError, ValueError):
+            continue
+        if _sim < _OBSERVATION_NOTE_COSINE_FLOOR:
+            continue
+        _ver = _e.get("observation_version")
+        _full = _e.get("content") or ""
+        _out.append(RecallHit(
+            source_id=f"note:{_ver}",
+            title=f"记忆印·{_ver}",
+            content_preview=(_full or "")[:500],
+            content=_full,  # 2026-08-08: 全文通道 — 子行命中也回全量 parent
+            category="note",
+            tags=[],
+            cosine=_sim,
+            rrf_score=0.0,
+            kind="note",
+            created_at="",
+        ))
+    return _out
+
+
 def recall_pool(
     query,
     card_index=None,
@@ -3201,31 +3410,23 @@ def recall_pool(
                     with conn.cursor() as cur:
                         cur.execute(
                             "SELECT DISTINCT ON (created_at::date) id, version, content, "
-                            " 1 - (embedding <=> %s::vector) AS cosine "
+                            " 1 - (embedding <=> %s::vector) AS cosine, created_at "
                             " FROM observation_notes WHERE embedding IS NOT NULL "
                             " ORDER BY created_at::date DESC, embedding <=> %s::vector LIMIT %s",
                             (emb_str, emb_str, max(limit, 3)),
                         )
-                        for row in cur.fetchall():
-                            note_id, version, full_content, cosine = row
-                            sid = f"note:{version}"
-                            sim = float(cosine or 0)
-                            if sim < 0.30:  # 低相关不注入（观察者印是叙事, 阈值放宽到 0.3）
-                                continue
-                            notes_ids.add(sid)
-                            if sid not in hits:
-                                hits[sid] = RecallHit(
-                                    source_id=sid,
-                                    title=f"记忆印·{version}",
-                                    content_preview=(full_content or "")[:500],
-                                    content=full_content or "",  # 2026-08-08: 全文通道
-                                    category="note",
-                                    tags=[],
-                                    cosine=sim,
-                                    rrf_score=0.0,
-                                    kind="note",
-                                    created_at="",
-                                )
+                        _obs_parent_rows = list(cur.fetchall() or [])
+                        _obs_child_rows = _fetch_observation_child_candidates(
+                            cur, emb_str, limit)
+                    # parent/child union merge (full parent content, one hit
+                    # per parent, newest-per-day, 0.30 floor); sidecar absent
+                    # → parent-only legacy result.
+                    for _obs_hit in _merge_observation_note_hits(
+                            _obs_parent_rows, _obs_child_rows, limit=limit):
+                        _sid = _obs_hit.source_id
+                        notes_ids.add(_sid)
+                        if _sid not in hits:
+                            hits[_sid] = _obs_hit
         except PrefetchDeadlineExceeded:
             # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
             # observation_notes handler — part of the vector lane family.

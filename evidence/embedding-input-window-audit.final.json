@@ -1,0 +1,570 @@
+{
+  "status": "READ_ONLY_STATIC_AND_PRODUCTION_AUDIT",
+  "source_root": "src/v3-core/src/v3core",
+  "categories": [
+    "TOKEN_SAFE",
+    "BOUNDED_BY_CANONICAL_SLICE",
+    "CHUNKED",
+    "POTENTIALLY_UNBOUNDED",
+    "UNKNOWN"
+  ],
+  "entries": [
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 1924,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                f\"{title}\\n{content}\"[:2000], _embed_cfg,\n                entity_table=\"topics\", entity_id=_tid,\n                phase=\"topic_derived_sync\",\n                conn_factory=getattr(self.pg, \"open_side_connection\", None),\n                policy=DURABLE_WRITE_EMBED_POLICY,\n            )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 1980,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2769,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2772,
+      "function": "call_embedding",
+      "call": "call_embedding(\n                        query, embed_cfg,\n                        cache=True,\n                        timeout=max(0.001, min(3.0, deadline.remaining())),\n                        retries=0,\n                    )",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 3927,
+      "function": "embed_batch",
+      "call": "embed_batch(\n                        chunk_texts, embed_cfg, collision_safe_key=True,\n                    )",
+      "category": "CHUNKED",
+      "rationale": "token-safe planner/derived child path"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 3946,
+      "function": "embed_batch",
+      "call": "embed_batch([representation.embed_text], embed_cfg)",
+      "category": "CHUNKED",
+      "rationale": "token-safe planner/derived child path"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2287,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2290,
+      "function": "call_embedding",
+      "call": "call_embedding(\n                            query,\n                            embed_cfg,\n                            cache=True,\n                            timeout=max(0.001, min(3.0, deadline.remaining())),\n                            retries=0,\n                        )",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2388,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True,\n                                           timeout=_legacy_timeout, retries=0)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2392,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2500,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True, timeout=3, retries=0)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2503,
+      "function": "call_embedding",
+      "call": "call_embedding(\n                            query,\n                            embed_cfg,\n                            cache=True,\n                            timeout=max(0.001, min(3.0, deadline.remaining())),\n                            retries=0,\n                        )",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "query embedding has no local maximum visible at the call site"
+    },
+    {
+      "file": "src/v3-core/src/v3core/card_store.py",
+      "line": 209,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                content.replace(\"\\n\", \" \")[:2000], embed_cfg,\n                entity_table=\"topics\", entity_id=source_id, phase=\"card_write\",\n                conn_factory=getattr(pg, \"open_side_connection\", None),\n                policy=DURABLE_WRITE_EMBED_POLICY,\n            )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/card_store.py",
+      "line": 441,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                    content.replace(\"\\n\", \" \")[:2000], embed_cfg,\n                    entity_table=\"topics\", entity_id=source_id, phase=\"card_write\",\n                    conn_factory=getattr(pg, \"open_side_connection\", None),\n                    policy=DURABLE_WRITE_EMBED_POLICY,\n                )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/embed_failures.py",
+      "line": 477,
+      "function": "call_embedding",
+      "call": "call_embedding(text, embed_cfg, cache=cache, policy=pol, stats=stats)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "single embedding call has no local token-safe planner visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/embed_topics.py",
+      "line": 62,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                text, embed_cfg,\n                entity_table=\"topic_blocks\", entity_id=str(t['id']),\n                phase=\"topic_backfill\",\n                policy=BATCH_EMBED_POLICY,\n            )",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "durable writer input is delegated but no local window proof is visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/first_run.py",
+      "line": 1358,
+      "function": "embed_batch",
+      "call": "embed_batch([text], _cfg)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "single embedding call has no local token-safe planner visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/ingest.py",
+      "line": 772,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                (content[:2000] if content else \"\"),\n                self._embed_cfg or {},\n                entity_table=\"conversation_stream\",\n                entity_id=source_id,\n                phase=\"live_ingest\",\n                conn_factory=getattr(self._pg, \"open_side_connection\", None),\n                policy=STREAM_PRIMARY_EMBED_POL",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/ingest.py",
+      "line": 986,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                        content[:2000],\n                        embed_cfg or {},\n                        entity_table=\"conversation_stream\",\n                        entity_id=source_id,\n                        phase=\"j_import\",\n                        conn_factory=getattr(pg, \"open_side_connection\", None),\n                        policy=BATC",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/observer.py",
+      "line": 1463,
+      "function": "call_embedding",
+      "call": "call_embedding(qa_text[:1000], embed_cfg, timeout=2.5, retries=0)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/observer.py",
+      "line": 1903,
+      "function": "embed_batch",
+      "call": "embed_batch([text], embed_cfg, retries=2,\n                            collision_safe_key=True)",
+      "category": "CHUNKED",
+      "rationale": "observer planner has already classified this full source as short/long"
+    },
+    {
+      "file": "src/v3-core/src/v3core/observer.py",
+      "line": 2145,
+      "function": "embed_batch",
+      "call": "embed_batch([content], embed_cfg, retries=2)",
+      "category": "CHUNKED",
+      "rationale": "observer planner has already classified this full source as short/long"
+    },
+    {
+      "file": "src/v3-core/src/v3core/recall_pool.py",
+      "line": 3355,
+      "function": "call_embedding",
+      "call": "call_embedding(query[:1000], embed_cfg, timeout=2.5, retries=0)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/recall_pool.py",
+      "line": 3358,
+      "function": "call_embedding",
+      "call": "call_embedding(query[:1000], embed_cfg,\n                                              timeout=_yin_timeout, retries=0)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/session_summary.py",
+      "line": 359,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                summary[:500].replace(\"\\n\", \" \"), embed_cfg,\n                entity_table=\"effective_pool\", entity_id=sid,\n                phase=\"session_summary\",\n                conn_factory=getattr(pg, \"open_side_connection\", None),\n                policy=DURABLE_WRITE_EMBED_POLICY,\n            )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/session_summary.py",
+      "line": 513,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                body_text[:500].replace(\"\\n\", \" \"), embed_cfg,\n                entity_table=\"effective_pool\", entity_id=source_id,\n                phase=\"session_summary\",\n                conn_factory=getattr(pg, \"open_side_connection\", None),\n                policy=DURABLE_WRITE_EMBED_POLICY,\n            )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/session_summary.py",
+      "line": 281,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                    summary[:500].replace(\"\\n\", \" \"), embed_cfg,\n                    entity_table=\"deep_store_cards\", entity_id=source_id,\n                    phase=\"session_summary_card\",\n                    policy=DURABLE_WRITE_EMBED_POLICY,\n                )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 392,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n        txt, embed_cfg,\n        entity_table=table, entity_id=str(marker_id),\n        phase=\"backfill\", policy=BATCH_EMBED_POLICY, cache=False,\n    )",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "durable writer input is delegated but no local window proof is visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 444,
+      "function": "embed_batch",
+      "call": "embed_batch(chunk_texts, embed_cfg, collision_safe_key=True)",
+      "category": "CHUNKED",
+      "rationale": "token-safe planner/derived child path"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 453,
+      "function": "embed_batch",
+      "call": "embed_batch([short_text], embed_cfg)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "single embedding call has no local token-safe planner visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 561,
+      "function": "embed_batch",
+      "call": "embed_batch([plan.embed_text], embed_cfg)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "single embedding call has no local token-safe planner visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 539,
+      "function": "embed_batch",
+      "call": "embed_batch(\n                        [chunk.embed_text],\n                        embed_cfg,\n                        collision_safe_key=True,\n                    )",
+      "category": "CHUNKED",
+      "rationale": "token-safe planner/derived child path"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/health.py",
+      "line": 412,
+      "function": "call_embedding",
+      "call": "call_embedding(\"health check\", ec, policy=HEALTH_EMBED_POLICY)",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "single embedding call has no local token-safe planner visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/import_.py",
+      "line": 517,
+      "function": "call_embedding",
+      "call": "call_embedding(\n                    candidate[\"question\"][:1000], embed_cfg, cache=True,\n                    policy=BATCH_EMBED_POLICY,\n                )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/import_.py",
+      "line": 994,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                                    text[:2000], embed_cfg,\n                                    entity_table=\"topics\", entity_id=source_id,\n                                    phase=\"seed_import\",\n                                    conn_factory=getattr(pg, \"open_side_connection\", None),\n                                    policy=BATCH_EMBED",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/topic_create.py",
+      "line": 89,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                vec_text, embed_cfg,\n                entity_table=\"topic_blocks\",\n                entity_id=store._topic_id(title[:50]),\n                phase=\"topic_create\",\n                policy=DURABLE_WRITE_EMBED_POLICY,\n            )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/tools/topic_edit.py",
+      "line": 123,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                    vec_text, embed_cfg,\n                    entity_table=\"topic_blocks\", entity_id=raw_id,\n                    phase=\"topic_edit\",\n                    policy=DURABLE_WRITE_EMBED_POLICY,\n                )",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "durable writer input is delegated but no local window proof is visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_cluster.py",
+      "line": 209,
+      "function": "call_embedding",
+      "call": "call_embedding(text[:2000], embed_cfg, cache=True, policy=BATCH_EMBED_POLICY)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_maintain.py",
+      "line": 112,
+      "function": "call_embedding",
+      "call": "call_embedding(text[:1000], embed_cfg, policy=BATCH_EMBED_POLICY)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_maintain.py",
+      "line": 260,
+      "function": "call_embedding",
+      "call": "call_embedding(t[:1000], embed_cfg, policy=BATCH_EMBED_POLICY)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_recall.py",
+      "line": 467,
+      "function": "call_embedding",
+      "call": "call_embedding(query[:1000], self._embed_cfg,\n                                          timeout=2.5, retries=1)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_recall.py",
+      "line": 475,
+      "function": "call_embedding",
+      "call": "call_embedding(query[:1000], self._embed_cfg,\n                                          timeout=timeout, retries=0)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_recall.py",
+      "line": 664,
+      "function": "call_embedding",
+      "call": "call_embedding(query[:1000], self._embed_cfg,\n                                           timeout=2.5, retries=1)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_refine.py",
+      "line": 163,
+      "function": "call_embedding",
+      "call": "call_embedding(text[:1000], self._embed_cfg)",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_refine.py",
+      "line": 736,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                        text, embed_cfg,\n                        entity_table=\"topic_blocks\", entity_id=str(topic_id),\n                        phase=\"card_sync\",\n                        policy=BATCH_EMBED_POLICY,\n                    )",
+      "category": "POTENTIALLY_UNBOUNDED",
+      "rationale": "durable writer input is delegated but no local window proof is visible"
+    },
+    {
+      "file": "src/v3-core/src/v3core/topic_store.py",
+      "line": 233,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                        text[:1000], embed_cfg,\n                        entity_table=\"topic_blocks\", entity_id=tid,\n                        phase=\"topic_upsert\",\n                        policy=DURABLE_WRITE_EMBED_POLICY,\n                    )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    },
+    {
+      "file": "src/v3-core/src/v3core/yin_pool.py",
+      "line": 123,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                f\"{title}. {body[:1500]}\", embed_cfg,\n                entity_table=\"yin_paragraphs\",\n                entity_id=f\"{yin_version}/{title}\",\n                phase=\"yin_ingest\",\n                conn_factory=getattr(pg, \"open_side_connection\", None),\n                policy=DURABLE_WRITE_EMBED_POLICY,\n            )",
+      "category": "BOUNDED_BY_CANONICAL_SLICE",
+      "rationale": "explicit canonical slice before embedding"
+    }
+  ],
+  "summary": {
+    "TOKEN_SAFE": 0,
+    "BOUNDED_BY_CANONICAL_SLICE": 23,
+    "CHUNKED": 6,
+    "POTENTIALLY_UNBOUNDED": 18,
+    "UNKNOWN": 0
+  },
+  "production_census": {
+    "target": "v3embeddings",
+    "tables": [
+      {
+        "table": "conversation_stream",
+        "rows": 13625,
+        "embedding_null": 1072
+      },
+      {
+        "table": "explicit_memories",
+        "rows": 0,
+        "embedding_null": 0
+      },
+      {
+        "table": "observation_notes",
+        "rows": 773,
+        "embedding_null": 6
+      },
+      {
+        "table": "qa_embedding_chunks",
+        "rows": 188,
+        "embedding_null": 0
+      },
+      {
+        "table": "qa_pairs",
+        "rows": 14007,
+        "embedding_null": 11
+      },
+      {
+        "table": "topic_entries",
+        "rows": 12546,
+        "embedding_null": 0
+      },
+      {
+        "table": "topics",
+        "rows": 346,
+        "embedding_null": 0
+      },
+      {
+        "table": "yin_paragraphs",
+        "rows": 1285,
+        "embedding_null": 7
+      }
+    ],
+    "sidecar_present": false
+  },
+  "next_issues": [
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 1980,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2769,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2772,
+      "function": "call_embedding",
+      "call": "call_embedding(\n                        query, embed_cfg,\n                        cache=True,\n                        timeout=max(0.001, min(3.0, deadline.remaining())),\n                        retries=0,\n                    )"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2287,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2290,
+      "function": "call_embedding",
+      "call": "call_embedding(\n                            query,\n                            embed_cfg,\n                            cache=True,\n                            timeout=max(0.001, min(3.0, deadline.remaining())),\n                            retries=0,\n                        )"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2388,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True,\n                                           timeout=_legacy_timeout, retries=0)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2392,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2500,
+      "function": "call_embedding",
+      "call": "call_embedding(query, embed_cfg, cache=True, timeout=3, retries=0)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/__init__.py",
+      "line": 2503,
+      "function": "call_embedding",
+      "call": "call_embedding(\n                            query,\n                            embed_cfg,\n                            cache=True,\n                            timeout=max(0.001, min(3.0, deadline.remaining())),\n                            retries=0,\n                        )"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/embed_failures.py",
+      "line": 477,
+      "function": "call_embedding",
+      "call": "call_embedding(text, embed_cfg, cache=cache, policy=pol, stats=stats)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/embed_topics.py",
+      "line": 62,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                text, embed_cfg,\n                entity_table=\"topic_blocks\", entity_id=str(t['id']),\n                phase=\"topic_backfill\",\n                policy=BATCH_EMBED_POLICY,\n            )"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/first_run.py",
+      "line": 1358,
+      "function": "embed_batch",
+      "call": "embed_batch([text], _cfg)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 392,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n        txt, embed_cfg,\n        entity_table=table, entity_id=str(marker_id),\n        phase=\"backfill\", policy=BATCH_EMBED_POLICY, cache=False,\n    )"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 453,
+      "function": "embed_batch",
+      "call": "embed_batch([short_text], embed_cfg)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/tools/embedding_backfill.py",
+      "line": 561,
+      "function": "embed_batch",
+      "call": "embed_batch([plan.embed_text], embed_cfg)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/tools/health.py",
+      "line": 412,
+      "function": "call_embedding",
+      "call": "call_embedding(\"health check\", ec, policy=HEALTH_EMBED_POLICY)"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/tools/topic_edit.py",
+      "line": 123,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                    vec_text, embed_cfg,\n                    entity_table=\"topic_blocks\", entity_id=raw_id,\n                    phase=\"topic_edit\",\n                    policy=DURABLE_WRITE_EMBED_POLICY,\n                )"
+    },
+    {
+      "category": "POTENTIALLY_UNBOUNDED",
+      "file": "src/v3-core/src/v3core/topic_refine.py",
+      "line": 736,
+      "function": "embed_for_write",
+      "call": "embed_for_write(\n                        text, embed_cfg,\n                        entity_table=\"topic_blocks\", entity_id=str(topic_id),\n                        phase=\"card_sync\",\n                        policy=BATCH_EMBED_POLICY,\n                    )"
+    }
+  ]
+}

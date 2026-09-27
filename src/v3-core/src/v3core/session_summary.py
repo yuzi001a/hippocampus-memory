@@ -267,13 +267,33 @@ def summarize_j_file(
         try:
             embed_cfg = _safe_embed_cfg(cfg)
             if embed_cfg is not None:
-                head = summary[:500].replace("\n", " ")
-                ev = call_embedding(head, embed_cfg)
-                embedding = ev if ev and len(ev) > 0 else None
+                # This card's embedding is derived; the summary text is the asset. Name
+                # the durable policy explicitly and record a durable marker — the old
+                # bare `except Exception: pass` produced an unexplained NULL.
+                #
+                # entity_table is the LOGICAL store here ("deep_store_cards" = the SQLite
+                # card store behind DeepStore), not a PG table: this embedding does not
+                # live in PG, so the PG join in count_unexplained_nulls does not apply.
+                # The marker still carries the two things that matter — why it failed and
+                # whether retrying can help.
+                from .embedding import DURABLE_WRITE_EMBED_POLICY
+                from .embed_failures import embed_for_write
+                _out = embed_for_write(
+                    summary[:500].replace("\n", " "), embed_cfg,
+                    entity_table="deep_store_cards", entity_id=source_id,
+                    phase="session_summary_card",
+                    policy=DURABLE_WRITE_EMBED_POLICY,
+                )
+                embedding = _out.vector
+                if not _out.ok:
+                    logger.warning(
+                        "session_summary card embedding %s: source_id=%s class=%s "
+                        "retryable=%s marker_recorded=%s — 卡已写入, 向量待修复",
+                        _out.status.value, source_id, _out.error_class,
+                        _out.retryable, _out.marker_recorded,
+                    )
         except ValueError:
             raise
-        except Exception:
-            pass
 
         store.write_card(
             category="session_summary",
@@ -331,13 +351,26 @@ def summarize_j_file(
         sid = f"session_summary_{meta['session_date']}_{meta['session_time']}"
         ev = None
         if embed_cfg is not None:
-            try:
-                head = summary[:500].replace("\n", " ")
-                ev = call_embedding(head, embed_cfg)
-            except ValueError:
-                raise
-            except Exception as _emb_e:
-                logger.debug("session_summary effective embedding skipped: %s", _safe_err(_emb_e)[:120])
+            # The summary text is the asset; its embedding is derived. Name the durable
+            # policy explicitly (this path used to inherit call_embedding's 3s/0 realtime
+            # default) and record a durable marker instead of a debug-level shrug.
+            from .embedding import DURABLE_WRITE_EMBED_POLICY
+            from .embed_failures import embed_for_write
+            _out = embed_for_write(
+                summary[:500].replace("\n", " "), embed_cfg,
+                entity_table="effective_pool", entity_id=sid,
+                phase="session_summary",
+                conn_factory=getattr(pg, "open_side_connection", None),
+                policy=DURABLE_WRITE_EMBED_POLICY,
+            )
+            ev = _out.vector
+            if not _out.ok:
+                logger.warning(
+                    "session_summary effective embedding %s: source_id=%s class=%s "
+                    "retryable=%s marker_recorded=%s — 摘要已写入, 向量待修复",
+                    _out.status.value, sid, _out.error_class, _out.retryable,
+                    _out.marker_recorded,
+                )
         pg.insert_effective(
             source_id=sid,
             pool_role="session_summary",
@@ -475,13 +508,23 @@ def _write_summary_to_stores(
         # embedding；disabled 或请求失败都保持 None，不制造零向量
         ev = None
         if embed_cfg is not None:
-            try:
-                head = body_text[:500].replace("\n", " ")
-                ev = call_embedding(head, embed_cfg)
-            except ValueError:
-                raise
-            except Exception as _emb_e:
-                logger.debug("session_summary PG embedding skipped: %s", _safe_err(_emb_e)[:120])
+            from .embedding import DURABLE_WRITE_EMBED_POLICY
+            from .embed_failures import embed_for_write
+            _out = embed_for_write(
+                body_text[:500].replace("\n", " "), embed_cfg,
+                entity_table="effective_pool", entity_id=source_id,
+                phase="session_summary",
+                conn_factory=getattr(pg, "open_side_connection", None),
+                policy=DURABLE_WRITE_EMBED_POLICY,
+            )
+            ev = _out.vector
+            if not _out.ok:
+                logger.warning(
+                    "session_summary PG embedding %s: source_id=%s class=%s "
+                    "retryable=%s marker_recorded=%s — 摘要已写入, 向量待修复",
+                    _out.status.value, source_id, _out.error_class,
+                    _out.retryable, _out.marker_recorded,
+                )
 
         # effective_pool — 让 prefetch 能召回
         try:

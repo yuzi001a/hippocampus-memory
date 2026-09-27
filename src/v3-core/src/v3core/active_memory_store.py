@@ -213,8 +213,13 @@ def _resolve_model(embed_cfg: dict) -> str:
 
 def _default_embedder(text: str, embed_cfg: dict) -> list[float]:
     from .embedding import call_embedding as _call_embedding
+    from .embedding import DURABLE_WRITE_EMBED_POLICY
 
-    return _call_embedding(text, embed_cfg)
+    # Explicit-memory writes are durable, not realtime: name the policy so they do not
+    # inherit call_embedding's 3s/0 default. No marker is written here because this
+    # module already surfaces failure explicitly to its caller (`return [msg], msg`)
+    # rather than swallowing it — the accounting requirement is satisfied upstream.
+    return _call_embedding(text, embed_cfg, policy=DURABLE_WRITE_EMBED_POLICY)
 
 
 _EMBED_CFG_SENTINEL = object()

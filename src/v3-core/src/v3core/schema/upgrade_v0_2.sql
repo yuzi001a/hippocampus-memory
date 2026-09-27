@@ -118,6 +118,8 @@ ALTER TABLE public.observation_notes
 ALTER TABLE public.yin_paragraphs
     ADD COLUMN IF NOT EXISTS embed_model TEXT NOT NULL DEFAULT '';
 
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
+
 COMMIT;
 
 -- =============================================================================

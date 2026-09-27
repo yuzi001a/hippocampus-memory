@@ -852,6 +852,44 @@ def _char_estimate_offsets(
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
+# ── Generic single-field span API ──────────────────────────────────────────
+
+
+def split_text_into_token_safe_spans(
+    field_name: str,
+    field_text: str,
+    embed_cfg: Optional[Dict[str, Any]],
+    *,
+    tokenizer_override: Optional[Any] = None,
+    target_tokens: Optional[int] = None,
+    starting_chunk_index: int = 0,
+) -> List[EmbedChunk]:
+    """Split one free-text field into token-safe non-overlapping spans.
+
+    Thin seam over :func:`_encode_field_offsets` +
+    :func:`_split_field_with_offsets` — no tokenizer algorithm is
+    duplicated here. The long-QA path
+    (:func:`split_into_token_safe_chunks`) and the long-observation
+    planner (``v3core.observation_chunks``) share this entry so both
+    stay byte-identical in split semantics.
+    """
+    if target_tokens is None:
+        target_tokens = safe_token_target(embed_cfg)
+    if not (field_text or ""):
+        return []
+    offsets, is_real = _encode_field_offsets(
+        field_text, embed_cfg, tokenizer_override=tokenizer_override
+    )
+    return _split_field_with_offsets(
+        field_name,
+        field_text,
+        offsets=offsets,
+        is_real=is_real,
+        target_tokens=target_tokens,
+        starting_chunk_index=starting_chunk_index,
+    )
+
+
 def split_into_token_safe_chunks(
     question: str,
     answer: str,
@@ -1063,4 +1101,123 @@ def build_qa_embedding_representation(
         is_long=True,
         embedding=[],
         chunks=chunks,
+    )
+
+# ── Query embedding representation (A02 / P2-2) ─────────────────────────────
+#
+# A retrieval query is a *representation* the caller may cap; durable source text is not (source
+# lives on the chunked derived-index path). This helper is the single place where a query may be
+# reduced, so no call site invents its own `[:N]` slice.
+
+QUERY_TRUNCATION_STRATEGY = "head60_tail40"
+QUERY_IDENTITY_STRATEGY = "identity"
+QUERY_HEAD_RATIO = 0.6
+QUERY_TAIL_RATIO = 0.4
+QUERY_OMISSION_SEPARATOR = "\n"
+
+
+@dataclass(frozen=True)
+class QueryEmbeddingText:
+    """Result of :func:`prepare_query_embedding_text` — counts only, never content."""
+
+    text: str
+    original_tokens: int
+    prepared_tokens: int
+    truncated: bool
+    strategy: str
+
+
+def prepare_query_embedding_text(
+    query: str,
+    embed_cfg: Optional[Dict[str, Any]],
+    *,
+    tokenizer_override: Optional[Any] = None,
+    target_tokens: Optional[int] = None,
+) -> QueryEmbeddingText:
+    """Token-safe representation for a *retrieval query* embedding call.
+
+    Contract:
+
+    * ``token_count(query) <= target`` → the text is returned **byte-for-byte** (no strip, no
+      normalisation, no marker, no re-encoding). Hard contract.
+    * ``> target`` → head ≈ 60% / tail ≈ 40% of the budget, joined by a minimal non-semantic
+      separator, original order preserved, the middle omitted, and the join re-counted. If it still
+      exceeds the target the budgets shrink deterministically at the same 60/40 ratio until it fits
+      — never by probing the provider for a 400.
+    * Never used for durable source text (messages / conversation_stream / observation / QA / yin /
+      topic / explicit memory). Those keep their canonical slice + chunked derived index.
+
+    Token accounting comes from the shared planning helpers; this function adds no tokenizer of its
+    own.
+    """
+    original = query if isinstance(query, str) else ("" if query is None else str(query))
+    target = max(1, int(target_tokens if target_tokens is not None
+                       else safe_token_target(embed_cfg)))
+    counter = _get_token_counter(embed_cfg, tokenizer_override=tokenizer_override)
+    original_tokens = int(counter(original))
+
+    if original_tokens <= target:
+        return QueryEmbeddingText(
+            text=original,
+            original_tokens=original_tokens,
+            prepared_tokens=original_tokens,
+            truncated=False,
+            strategy=QUERY_IDENTITY_STRATEGY,
+        )
+
+    offsets, _is_real = _encode_field_offsets(original, embed_cfg,
+                                              tokenizer_override=tokenizer_override)
+    n_tokens = len(offsets) or 1
+    sep_tokens = max(0, int(counter(QUERY_OMISSION_SEPARATOR)))
+    budget = target - sep_tokens
+
+    def _head_only(limit_tokens: int) -> str:
+        limit = max(1, min(limit_tokens, n_tokens))
+        return original[: offsets[limit - 1][1]]
+
+    if budget < 2:
+        # Degenerate target (misconfigured margin): a deterministic head window that still respects
+        # the cap beats emitting something over the window.
+        head_only = _head_only(target)
+        return QueryEmbeddingText(
+            text=head_only,
+            original_tokens=original_tokens,
+            prepared_tokens=int(counter(head_only)),
+            truncated=True,
+            strategy=QUERY_TRUNCATION_STRATEGY,
+        )
+
+    head_budget = min(max(1, int(budget * QUERY_HEAD_RATIO)), n_tokens - 1)
+    tail_budget = min(max(1, budget - int(budget * QUERY_HEAD_RATIO)), n_tokens - head_budget)
+    prepared = ""
+    prepared_tokens = 0
+
+    for _attempt in range(8):
+        head_text = original[: offsets[head_budget - 1][1]]
+        tail_text = original[offsets[n_tokens - tail_budget][0]:]
+        prepared = f"{head_text}{QUERY_OMISSION_SEPARATOR}{tail_text}"
+        prepared_tokens = int(counter(prepared))
+        if prepared_tokens <= target:
+            break
+        shrink = (prepared_tokens - target) + 1
+        shrink_head = max(1, int(shrink * QUERY_HEAD_RATIO))
+        shrink_tail = max(1, shrink - shrink_head) if shrink > 1 else 0
+        new_head = max(1, head_budget - shrink_head)
+        new_tail = max(1, tail_budget - shrink_tail)
+        if new_head == head_budget and new_tail == tail_budget:
+            break
+        head_budget, tail_budget = new_head, new_tail
+
+    if prepared_tokens > target:
+        # Final clamp: unreachable with production targets (margin 512); kept so the cap holds even
+        # under a pathological configuration.
+        prepared = _head_only(target)
+        prepared_tokens = int(counter(prepared))
+
+    return QueryEmbeddingText(
+        text=prepared,
+        original_tokens=original_tokens,
+        prepared_tokens=prepared_tokens,
+        truncated=True,
+        strategy=QUERY_TRUNCATION_STRATEGY,
     )

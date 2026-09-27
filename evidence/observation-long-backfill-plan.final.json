@@ -1,0 +1,254 @@
+{
+  "status": "READ_ONLY_PLAN",
+  "production_writes": 0,
+  "target": {
+    "database": "v3embeddings",
+    "host": "localhost",
+    "port": 5433,
+    "user": "v3user"
+  },
+  "embed": {
+    "model": "BAAI/bge-m3",
+    "fingerprint": "bf32771ecbd1",
+    "safe_token_target": 7680,
+    "max_input_tokens": 8192
+  },
+  "rows": [
+    {
+      "id": 634,
+      "version": "v634",
+      "source_sha256": "02b47ae49db3a0fa5d863fd0e6d2aab2918a0f78d23b9052be42f71f8df1a4fb",
+      "chars": 26002,
+      "bytes": 33582,
+      "tokens": 10963,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        3284
+      ],
+      "source_offsets": [
+        [
+          0,
+          18114
+        ],
+        [
+          18114,
+          26002
+        ]
+      ],
+      "child_source_sha256": [
+        "14619178bdce95fcce1b7a3265afb224aa167285356cc989d5b52ba93991315b",
+        "3d1c03dab4ce2430a4fd75437104b6f393bcf70cc1c33f443727ca27ac5ba9b5"
+      ],
+      "estimated_provider_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "current_parent_vector": false,
+      "current_embed_model": "",
+      "existing_chunks": 0,
+      "sidecar_present": false,
+      "created_at": "2026-09-03T15:33:15.068959+00:00"
+    },
+    {
+      "id": 726,
+      "version": "v726",
+      "source_sha256": "5851a2da31549680ef4737f68de87042b538c5c4337ae0e358381d0ca4f0e17b",
+      "chars": 16168,
+      "bytes": 24518,
+      "tokens": 8907,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        1228
+      ],
+      "source_offsets": [
+        [
+          0,
+          13946
+        ],
+        [
+          13946,
+          16168
+        ]
+      ],
+      "child_source_sha256": [
+        "b84c506a55474d9ed03955038d99d75c29e8c484dd1ffe4758f2c9c87333cb54",
+        "fa5335aa834f0969580b1b94ad46853ce298ea9b2091204904b602039272ef5e"
+      ],
+      "estimated_provider_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "current_parent_vector": false,
+      "current_embed_model": "",
+      "existing_chunks": 0,
+      "sidecar_present": false,
+      "created_at": "2026-09-20T09:38:02.235764+00:00"
+    },
+    {
+      "id": 732,
+      "version": "v732",
+      "source_sha256": "62ed033513c08743f381201769f323b9fc77724386e207c34cf444919728bdc7",
+      "chars": 22228,
+      "bytes": 32452,
+      "tokens": 11629,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        3950
+      ],
+      "source_offsets": [
+        [
+          0,
+          14516
+        ],
+        [
+          14516,
+          22228
+        ]
+      ],
+      "child_source_sha256": [
+        "8248ddf22b3b1bb3bba1274608f31db4c99d126fffb4229d382263a616591a7e",
+        "fa9f1190f527a5db64ab4a0e32520728a119ba1ea99ddbe1e77d14f880786936"
+      ],
+      "estimated_provider_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "current_parent_vector": false,
+      "current_embed_model": "",
+      "existing_chunks": 0,
+      "sidecar_present": false,
+      "created_at": "2026-09-20T15:02:57.428177+00:00"
+    },
+    {
+      "id": 743,
+      "version": "v743",
+      "source_sha256": "a5e5e0e4fcbea35d7c0f5b6d0df9a9f689600a138fadf034e9bb232586396414",
+      "chars": 23326,
+      "bytes": 31756,
+      "tokens": 11026,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        3347
+      ],
+      "source_offsets": [
+        [
+          0,
+          16247
+        ],
+        [
+          16247,
+          23326
+        ]
+      ],
+      "child_source_sha256": [
+        "f0ed37e31b7e7ee37ae93b94b5512705dd46824a3b65117a753dfcd1368cf4f9",
+        "a79271b152b5eb20be8342223c2f96fac53c03c111bc3937b218ff28d8e0fc14"
+      ],
+      "estimated_provider_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "current_parent_vector": false,
+      "current_embed_model": "",
+      "existing_chunks": 0,
+      "sidecar_present": false,
+      "created_at": "2026-09-21T05:03:16.577673+00:00"
+    },
+    {
+      "id": 746,
+      "version": "v745",
+      "source_sha256": "7693c7787800cf8af72a43ed8f680b2009a9ce0117adae6749f1635c22516c97",
+      "chars": 21699,
+      "bytes": 31563,
+      "tokens": 11072,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        3393
+      ],
+      "source_offsets": [
+        [
+          0,
+          14848
+        ],
+        [
+          14848,
+          21699
+        ]
+      ],
+      "child_source_sha256": [
+        "2f26eb8904434def0ac0cf8e5ff2d9fbf001474ab3a8ea7447cf26cfaa4ce7bf",
+        "a4d9b10e538919057e894893696dfe6eeca356f6c94dcf47ced2b79b8a5fcee1"
+      ],
+      "estimated_provider_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "current_parent_vector": false,
+      "current_embed_model": "",
+      "existing_chunks": 0,
+      "sidecar_present": false,
+      "created_at": "2026-09-21T07:01:35.999616+00:00"
+    },
+    {
+      "id": 759,
+      "version": "v759",
+      "source_sha256": "9adee801b4d5a9860b0ea78cd1fd5c7d432c03902e6c3c1e81f319ec969d7838",
+      "chars": 16282,
+      "bytes": 24738,
+      "tokens": 8512,
+      "is_long": true,
+      "representation_version": "v1-long-observation",
+      "chunk_count": 2,
+      "child_tokens": [
+        7680,
+        833
+      ],
+      "source_offsets": [
+        [
+          0,
+          14844
+        ],
+        [
+          14844,
+          16282
+        ]
+      ],
+      "child_source_sha256": [
+        "779783c71e7269f4cc066bc8ade3250b120e75b217d3070a5cf21f0b40eab7dd",
+        "e54db5ec73bdcf1a69053510d8334205a523e3cdf6a6f22dcef797779638176d"
+      ],
+      "estimated_provider_calls": 2,
+      "current_ledger": {
+        "unresolved": 0,
+        "phases": []
+      },
+      "current_parent_vector": false,
+      "current_embed_model": "",
+      "existing_chunks": 0,
+      "sidecar_present": false,
+      "created_at": "2026-09-21T11:57:14.011800+00:00"
+    }
+  ],
+  "row_count": 6,
+  "all_plannable": true
+}

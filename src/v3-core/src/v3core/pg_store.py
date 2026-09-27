@@ -227,6 +227,40 @@ class PgEmbedStore:
             pass
         return False
 
+    def open_side_connection(self):
+        """Open an INDEPENDENT connection for rare side-writes.
+
+        Failure accounting (``public.embedding_failures``) must be able to record a
+        marker even when this store is pool-backed — in which case ``_connect()``
+        deliberately refuses and callers are required to ``lease()``. Borrowing a
+        lease and holding it across a 10s × 3 embedding attempt would be worse than
+        opening one short-lived connection. Callers own the returned connection and
+        must close it.
+
+        Returns None (never raises) if a connection cannot be established; the
+        caller is responsible for reporting that it could not record the failure.
+        """
+        try:
+            import psycopg2
+        except Exception:
+            logger.error("open_side_connection: psycopg2 不可用", exc_info=True)
+            return None
+        pg_cfg = self._get_pg_config()
+        try:
+            conn = psycopg2.connect(
+                host=pg_cfg.get("host", "localhost"),
+                port=pg_cfg.get("port", 5433),
+                dbname=pg_cfg.get("database", "v3embeddings"),
+                user=pg_cfg.get("user", "v3user"),
+                password=pg_cfg.get("password", ""),
+                connect_timeout=5,
+            )
+            conn.autocommit = True
+            return conn
+        except Exception as e:
+            logger.warning("open_side_connection 失败: %s", _safe_err(e)[:200])
+            return None
+
     def _ensure_schema(self):
         """建表 + hnsw 索引"""
         if not self._conn:

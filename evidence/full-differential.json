@@ -1,0 +1,41 @@
+{
+  "baseline": {
+    "passed": 801,
+    "failed": 4,
+    "skipped": 4,
+    "failed_tests": [
+      "tests/test_importers_contract.py::test_hermes_discover_finds_state_db_and_jsonl",
+      "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+      "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+      "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+    ]
+  },
+  "candidate_original_only": {
+    "passed": 802,
+    "failed": 3,
+    "skipped": 4,
+    "failed_tests": [
+      "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+      "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+      "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+    ]
+  },
+  "candidate_full": {
+    "passed": 854,
+    "failed": 3,
+    "skipped": 4,
+    "failed_tests": [
+      "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+      "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+      "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+    ]
+  },
+  "new_regression_count": 0,
+  "new_regressions": [],
+  "inherited_failures": [
+    "tests/test_importers_contract.py::test_hermes_oldest_newest_computed_from_parsed_items",
+    "tests/test_importers_contract.py::test_hermes_parse_state_db_emits_raw_messages",
+    "tests/test_importers_contract.py::test_hermes_rerun_records_zero_new_rows"
+  ],
+  "method": "same test corpus; candidate original-only excludes four newly added long-observation test modules; full candidate includes them"
+}

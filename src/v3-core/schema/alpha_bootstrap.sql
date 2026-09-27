@@ -136,6 +136,7 @@ CREATE INDEX IF NOT EXISTS qa_pairs_embedding_ivfflat
     WITH (lists = 100);
 
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/qa_embedding_chunks.sql <<<
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
 
 -- -----------------------------------------------------------------------------
 -- conversation_stream — per-turn message log (replaces the archived

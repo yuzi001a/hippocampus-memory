@@ -1,0 +1,367 @@
+{
+  "parents": 12,
+  "total_child_chunks": 28,
+  "model_fingerprint": "bf32771ecbd1",
+  "plan": [
+    {
+      "qa_id": 247449,
+      "is_long": true,
+      "chunk_count": 2,
+      "parent_input_sha": "511f6f7c33cb0c61",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 18019,
+          "token_count": 7253,
+          "source_sha256": "54f9e2cfe404082494ce75555dad7fa0a213efcbcc40986e9b4b047859de19e2",
+          "embed_text_len": 18019
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 4375,
+          "token_count": 2672,
+          "source_sha256": "ace930347f29256b9325132cc59765fa301f32c6c457a83ad2043ec77f69a387",
+          "embed_text_len": 4375
+        }
+      ]
+    },
+    {
+      "qa_id": 247710,
+      "is_long": true,
+      "chunk_count": 2,
+      "parent_input_sha": "90056de0dd645b09",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 10930,
+          "token_count": 3834,
+          "source_sha256": "3e52c57c37cde9fc1a8ef4b86f73d6cdc6e51d2827a1848a431fb75ea509826c",
+          "embed_text_len": 10930
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 9947,
+          "token_count": 5126,
+          "source_sha256": "129ed8bb481290170b82b88dcef9907d153f9923db4ce2d50cdd273917d77d3d",
+          "embed_text_len": 9947
+        }
+      ]
+    },
+    {
+      "qa_id": 247728,
+      "is_long": true,
+      "chunk_count": 2,
+      "parent_input_sha": "1f2f990cd0f713dd",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 7717,
+          "token_count": 2623,
+          "source_sha256": "8945e1a7bafad4e9d8a52fc915322b499fe692317996ce9a0225188c7619f390",
+          "embed_text_len": 7717
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 12756,
+          "token_count": 5828,
+          "source_sha256": "e5996e42369babd4de6f3fd674426d126fcfcf5a2263fb56b522e231ff345cd2",
+          "embed_text_len": 12756
+        }
+      ]
+    },
+    {
+      "qa_id": 247733,
+      "is_long": true,
+      "chunk_count": 2,
+      "parent_input_sha": "2ee4161be3d7cae9",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 8558,
+          "token_count": 2952,
+          "source_sha256": "695a3535a89d422503f0b6ee0070308da9f8326caff8b997fb9ac809a55e64e9",
+          "embed_text_len": 8558
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 12756,
+          "token_count": 5828,
+          "source_sha256": "e5996e42369babd4de6f3fd674426d126fcfcf5a2263fb56b522e231ff345cd2",
+          "embed_text_len": 12756
+        }
+      ]
+    },
+    {
+      "qa_id": 247945,
+      "is_long": true,
+      "chunk_count": 2,
+      "parent_input_sha": "289bf1c639aed010",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 11468,
+          "token_count": 2881,
+          "source_sha256": "166074ef6d708cf49e11e73e2291ef3ab141cc8a0a7a7ef9925c28558ba821b1",
+          "embed_text_len": 11468
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 16959,
+          "token_count": 7459,
+          "source_sha256": "3e3809d06ba613c3c6f07a65b7e6fa76f3782ac2f2856bf5bea7c3eb847d7eee",
+          "embed_text_len": 16959
+        }
+      ]
+    },
+    {
+      "qa_id": 247947,
+      "is_long": true,
+      "chunk_count": 3,
+      "parent_input_sha": "7a3c071f25ccb1af",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 17607,
+          "token_count": 4101,
+          "source_sha256": "012997e100df938bd06fac0150ac4dbd33f985fc7f0cfa46e90a0e505c6a1925",
+          "embed_text_len": 17607
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 18449,
+          "token_count": 7680,
+          "source_sha256": "70f931c83e3a1a9e179953cf67b09a5da90fee087a0059ff5289be563144401a",
+          "embed_text_len": 18449
+        },
+        {
+          "chunk_index": 2,
+          "source_field": "answer",
+          "source_start": 18449,
+          "source_end": 23234,
+          "token_count": 1972,
+          "source_sha256": "2de8d7430cf1cd3d2d288518f6a0b220faf29e47beac534c54dcb3db447081aa",
+          "embed_text_len": 4785
+        }
+      ]
+    },
+    {
+      "qa_id": 247948,
+      "is_long": true,
+      "chunk_count": 3,
+      "parent_input_sha": "73631ae00217c086",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 17607,
+          "token_count": 4101,
+          "source_sha256": "012997e100df938bd06fac0150ac4dbd33f985fc7f0cfa46e90a0e505c6a1925",
+          "embed_text_len": 17607
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 18449,
+          "token_count": 7680,
+          "source_sha256": "70f931c83e3a1a9e179953cf67b09a5da90fee087a0059ff5289be563144401a",
+          "embed_text_len": 18449
+        },
+        {
+          "chunk_index": 2,
+          "source_field": "answer",
+          "source_start": 18449,
+          "source_end": 27310,
+          "token_count": 3764,
+          "source_sha256": "fc2dcfeb897a2aef154b7cf763fa08646eb7c93ba1e7d66d259c9ec1ae03fc7d",
+          "embed_text_len": 8861
+        }
+      ]
+    },
+    {
+      "qa_id": 247951,
+      "is_long": true,
+      "chunk_count": 2,
+      "parent_input_sha": "9f62a92318059d55",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 19765,
+          "token_count": 4752,
+          "source_sha256": "11bb999323685974b39a0664e97f467660196f5d27eff5acc8acc7536213c02a",
+          "embed_text_len": 19765
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 13343,
+          "token_count": 4954,
+          "source_sha256": "a3cfb4d6479e5693ee005387394e52d764cf617b3f476bd51c270da289a28259",
+          "embed_text_len": 13343
+        }
+      ]
+    },
+    {
+      "qa_id": 247952,
+      "is_long": true,
+      "chunk_count": 2,
+      "parent_input_sha": "3c9ebec26eac7fef",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 19765,
+          "token_count": 4752,
+          "source_sha256": "11bb999323685974b39a0664e97f467660196f5d27eff5acc8acc7536213c02a",
+          "embed_text_len": 19765
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 14353,
+          "token_count": 5404,
+          "source_sha256": "0149d0efa1250ad04b76107cce0bdd22a83f9762ae00d673f93d7446880a636c",
+          "embed_text_len": 14353
+        }
+      ]
+    },
+    {
+      "qa_id": 247953,
+      "is_long": true,
+      "chunk_count": 2,
+      "parent_input_sha": "ad1ec3795f7ae63c",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 19765,
+          "token_count": 4752,
+          "source_sha256": "11bb999323685974b39a0664e97f467660196f5d27eff5acc8acc7536213c02a",
+          "embed_text_len": 19765
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 19401,
+          "token_count": 7647,
+          "source_sha256": "f5511ea0d1e36527e32edfdb5526f8f0455ee084be646ef35d754b3cb70d6f3c",
+          "embed_text_len": 19401
+        }
+      ]
+    },
+    {
+      "qa_id": 247954,
+      "is_long": true,
+      "chunk_count": 3,
+      "parent_input_sha": "267cb5d90f719a81",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 19765,
+          "token_count": 4752,
+          "source_sha256": "11bb999323685974b39a0664e97f467660196f5d27eff5acc8acc7536213c02a",
+          "embed_text_len": 19765
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 19463,
+          "token_count": 7680,
+          "source_sha256": "30a839246e99400d50737b02e6b00ff6d7db78661bb850b771a72c1e9322052a",
+          "embed_text_len": 19463
+        },
+        {
+          "chunk_index": 2,
+          "source_field": "answer",
+          "source_start": 19463,
+          "source_end": 21836,
+          "token_count": 1023,
+          "source_sha256": "beaca55e92433b95051ee9d8b6ca655024df743dff4a42c15219d279603bebeb",
+          "embed_text_len": 2373
+        }
+      ]
+    },
+    {
+      "qa_id": 247955,
+      "is_long": true,
+      "chunk_count": 3,
+      "parent_input_sha": "2d5b731928b43b50",
+      "representation_version": "v0.2.0-long-qa",
+      "chunks": [
+        {
+          "chunk_index": 0,
+          "source_field": "question",
+          "source_start": 0,
+          "source_end": 19765,
+          "token_count": 4752,
+          "source_sha256": "11bb999323685974b39a0664e97f467660196f5d27eff5acc8acc7536213c02a",
+          "embed_text_len": 19765
+        },
+        {
+          "chunk_index": 1,
+          "source_field": "answer",
+          "source_start": 0,
+          "source_end": 19463,
+          "token_count": 7680,
+          "source_sha256": "30a839246e99400d50737b02e6b00ff6d7db78661bb850b771a72c1e9322052a",
+          "embed_text_len": 19463
+        },
+        {
+          "chunk_index": 2,
+          "source_field": "answer",
+          "source_start": 19463,
+          "source_end": 25911,
+          "token_count": 2745,
+          "source_sha256": "fbb1d912a1a07303d51c245e6645f0212481e620ed11e79b4a936b6df9d43e4d",
+          "embed_text_len": 6448
+        }
+      ]
+    }
+  ]
+}

@@ -88,7 +88,7 @@ The following rows summarize current evidence from a fresh disposable Windows 10
 |---|---|
 | Fresh non-editable wheel install of `v3-core` + `v3-hermes-plugin`; imports succeed; plugin tool schema count = 13. | **PASS** |
 | `V3CORE_PG_PASSWORD` honored as the required credential. | **PASS** |
-| Packaged `hippocampus bootstrap` creates the 7-table disposable schema and is idempotent on re-run. | **PASS** |
+| Packaged `hippocampus bootstrap` creates the 9-table disposable schema (six core tables — `qa_pairs`, `conversation_stream`, `topics`, `topic_entries`, `observation_notes`, `yin_paragraphs` — plus `explicit_memories` and the two derived-index sidecars `qa_embedding_chunks` / `observation_embedding_chunks`) and is idempotent on re-run. | **PASS** |
 | `sync_turn` durably writes source rows into `conversation_stream`; focused QA pairing tests pass separately. | **PASS** |
 | Exact retry of an already-recorded turn deduplicates instead of duplicating the source row. | **PASS** |
 | Restarted process can read back previously written active-memory markers; focused ingest recovery tests cover cursor/orphan behavior. | **PASS / EVIDENCE** |
@@ -156,7 +156,17 @@ $env:PGPASSWORD        = $pgPassword
 # 6. Static read-only install check
 hippocampus doctor --static
 
-# 7. Explicit database bootstrap against the disposable target.
+# 7. Runtime integrity — verify the host ACTUALLY loads this install.
+#    Version strings cannot tell builds apart (both read "4.0.0"); the check
+#    compares CONTENT fingerprints under the live process environment.
+hippocampus doctor --runtime --wheel .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
+#    Expect: "runtime integrity: HEALTHY" (exit 0).
+#    warn exit  = a restart is still pending (stale process).
+#    error exit = the host resolves to a different (shadowed) copy — fix the
+#                 environment before trusting the install.
+#    See docs/RUNTIME-INTEGRITY.md and docs/UPGRADE.md.
+
+# 8. Explicit database bootstrap against the disposable target.
 #    Port 5433 and local `v3embeddings` are unconditionally refused — no override.
 hippocampus bootstrap --target "postgres://postgres@127.0.0.1:${pgPort}/v3embeddings_alpha"
 ```

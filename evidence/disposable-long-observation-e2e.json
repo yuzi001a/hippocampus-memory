@@ -1,0 +1,148 @@
+{
+  "provider": {
+    "dimension": 1024,
+    "fingerprint": "disposable-test-fp",
+    "calls": 26,
+    "call_lengths": [
+      26,
+      15360,
+      4647,
+      15360,
+      15360,
+      10287,
+      15360,
+      4650,
+      15360,
+      4650,
+      15360,
+      4650,
+      15360,
+      4653,
+      15360,
+      4647,
+      15360,
+      15360,
+      5293,
+      10000,
+      10000,
+      10000,
+      6013,
+      15360,
+      15360,
+      5293
+    ]
+  },
+  "cases": {
+    "A_short": {
+      "parent": true,
+      "source_sha256": "052ad07f65e3c6e06730f41125b96da59b9185b66307e595541ccb4283d40add",
+      "child_count": 0,
+      "indexes": [],
+      "unresolved": 0,
+      "unresolved_phases": []
+    },
+    "B_10k": {
+      "parent": true,
+      "source_sha256": "e7d2d64b2f153a181e691ae19c377ae7fdd55edfbfb1305d54e83f6be34f9dc2",
+      "child_count": 2,
+      "indexes": [
+        0,
+        1
+      ],
+      "unresolved": 0,
+      "unresolved_phases": []
+    },
+    "C_20k": {
+      "parent": true,
+      "source_sha256": "0b5cc00a7846c59743d69c79ab9f07ae8d54be3f5891924c78a3f287dfd89f8f",
+      "child_count": 3,
+      "indexes": [
+        0,
+        1,
+        2
+      ],
+      "unresolved": 0,
+      "unresolved_phases": []
+    },
+    "D_retry": {
+      "first": {
+        "parent": false,
+        "source_sha256": "7cf0adebd339ad2191083f3122909a7d1c423a270b6ee17b904866eb2804cb8d",
+        "child_count": 0,
+        "indexes": [],
+        "unresolved": 1,
+        "unresolved_phases": [
+          "observation_long_child"
+        ]
+      },
+      "after_retry": {
+        "parent": true,
+        "source_sha256": "7cf0adebd339ad2191083f3122909a7d1c423a270b6ee17b904866eb2804cb8d",
+        "child_count": 2,
+        "indexes": [
+          0,
+          1
+        ],
+        "unresolved": 0,
+        "unresolved_phases": []
+      }
+    },
+    "E_permanent": {
+      "parent": false,
+      "source_sha256": "99e1e11c9594ed975d6d9077b362cc985b6b6e8b310dc0398f359f1452a67a0e",
+      "child_count": 0,
+      "indexes": [],
+      "unresolved": 1,
+      "unresolved_phases": [
+        "observation_long_child"
+      ]
+    },
+    "F_sidecar_failure": {
+      "source_retained": true,
+      "parent_absent": true
+    },
+    "G_rerun": {
+      "parent": true,
+      "source_sha256": "e7d2d64b2f153a181e691ae19c377ae7fdd55edfbfb1305d54e83f6be34f9dc2",
+      "child_count": 2,
+      "indexes": [
+        0,
+        1
+      ],
+      "unresolved": 0,
+      "unresolved_phases": []
+    },
+    "H_stale_replace": {
+      "before": {
+        "parent": true,
+        "source_sha256": "cc0cdfa64374667a078efd294f64e66a3ecda0ce6cf0dd1c99ae17e5a1c9365c",
+        "child_count": 4,
+        "indexes": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "unresolved": 0,
+        "unresolved_phases": []
+      },
+      "after": {
+        "parent": true,
+        "source_sha256": "cc0cdfa64374667a078efd294f64e66a3ecda0ce6cf0dd1c99ae17e5a1c9365c",
+        "child_count": 3,
+        "indexes": [
+          0,
+          1,
+          2
+        ],
+        "unresolved": 0,
+        "unresolved_phases": []
+      }
+    }
+  },
+  "tail_recall": {
+    "hit": true,
+    "source_id": "note:e2e-10k",
+    "full_parent": true
+  }
+}

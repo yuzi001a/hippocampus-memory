@@ -1,0 +1,27 @@
+{
+  "totals": {
+    "candidate": {
+      "count": 1136,
+      "failed": 3,
+      "passed": 1126,
+      "skipped": 7
+    },
+    "baseline": {
+      "count": 861,
+      "failed": 3,
+      "passed": 853,
+      "skipped": 5
+    }
+  },
+  "tests_only_in_candidate": 275,
+  "tests_only_in_baseline": [],
+  "new_regressions": [],
+  "inherited_failures": [
+    "tests.test_importers_contract::test_hermes_oldest_newest_computed_from_parsed_items",
+    "tests.test_importers_contract::test_hermes_parse_state_db_emits_raw_messages",
+    "tests.test_importers_contract::test_hermes_rerun_records_zero_new_rows"
+  ],
+  "new_tests_failing": [],
+  "baseline_failures_now_passing": [],
+  "NEW_REGRESSION": 0
+}

@@ -1,0 +1,84 @@
+{
+  "planner": [
+    {
+      "label": "short",
+      "chars": 500,
+      "is_long": false,
+      "chunks": 0,
+      "planner_p50_ms": 0.035,
+      "planner_max_ms": 0.093,
+      "peak_bytes_max": 4162
+    },
+    {
+      "label": "10k_tokens_synthetic",
+      "chars": 20000,
+      "is_long": true,
+      "chunks": 2,
+      "planner_p50_ms": 82.762,
+      "planner_max_ms": 97.016,
+      "peak_bytes_max": 1161290
+    },
+    {
+      "label": "20k_tokens_synthetic",
+      "chars": 40000,
+      "is_long": true,
+      "chunks": 3,
+      "planner_p50_ms": 162.696,
+      "planner_max_ms": 184.508,
+      "peak_bytes_max": 2179312
+    }
+  ],
+  "production_six": {
+    "rows": 6,
+    "total_content_tokens": 62109,
+    "total_chunks": 12,
+    "provider_calls_estimate": 12,
+    "max_child_tokens": 7680,
+    "estimated_serial_provider_seconds_range": [
+      15.252,
+      36.966
+    ]
+  },
+  "real_provider_observations": {
+    "cases": [
+      {
+        "label": "10k",
+        "source_tokens": 10013,
+        "chunk_count": 2,
+        "child_tokens": [
+          7680,
+          2334
+        ],
+        "all_child_safe": true,
+        "vectors": 2,
+        "dimension": [
+          1024
+        ],
+        "errors": [],
+        "elapsed_s": 6.161
+      },
+      {
+        "label": "20k",
+        "source_tokens": 20513,
+        "chunk_count": 3,
+        "child_tokens": [
+          7680,
+          7680,
+          5154
+        ],
+        "all_child_safe": true,
+        "vectors": 3,
+        "dimension": [
+          1024
+        ],
+        "errors": [],
+        "elapsed_s": 3.813
+      }
+    ],
+    "seconds_per_child_observed": [
+      3.0805,
+      1.2710000000000001
+    ]
+  },
+  "method": "planner benchmark is offline char_estimate; provider timing is real non-production BAAI/bge-m3 run"
+}

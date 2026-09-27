@@ -1,0 +1,88 @@
+{
+  "summary": {
+    "cases": 3,
+    "selected": [
+      "Q01-01",
+      "Q01-02",
+      "Q01-15"
+    ],
+    "pass": 3,
+    "fail": 0,
+    "ready_for_canary_judgement": 0,
+    "no_checks": 0,
+    "profile": "default",
+    "config_path": null
+  },
+  "results": [
+    {
+      "case_id": "Q01-01",
+      "verdict": "PASS",
+      "checks": {
+        "embedding_attempted": true,
+        "min_hits": true
+      },
+      "observed": {
+        "provider_query_calls": 1,
+        "query_attempts": 1,
+        "sent_chars": [
+          40
+        ],
+        "sent_tokens": [
+          27
+        ],
+        "hit_count": 5,
+        "trace_built": true,
+        "trace_error": null,
+        "elapsed_ms": 11040.0,
+        "raised": null
+      }
+    },
+    {
+      "case_id": "Q01-02",
+      "verdict": "PASS",
+      "checks": {
+        "additional_provider_calls": true,
+        "same_hit_ids": true
+      },
+      "observed": {
+        "provider_query_calls": 1,
+        "query_attempts": 1,
+        "sent_chars": [
+          40
+        ],
+        "sent_tokens": [
+          27
+        ],
+        "hit_count": 5,
+        "trace_built": true,
+        "trace_error": null,
+        "elapsed_ms": 9006.8,
+        "raised": null
+      }
+    },
+    {
+      "case_id": "Q01-15",
+      "verdict": "PASS",
+      "checks": {
+        "truncated_false": true,
+        "prepared_equals_original": true
+      },
+      "observed": {
+        "provider_query_calls": 1,
+        "query_attempts": 1,
+        "sent_chars": [
+          23
+        ],
+        "sent_tokens": [
+          16
+        ],
+        "hit_count": 5,
+        "trace_built": true,
+        "trace_error": null,
+        "elapsed_ms": 5140.6,
+        "raised": null
+      }
+    }
+  ],
+  "note": "Runner smoke on the live profile (3 of the 16 frozen cases), read-only. Hit ids and trace bodies are withheld here; the full report with ids lives in the private vault."
+}

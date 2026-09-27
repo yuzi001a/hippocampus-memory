@@ -22,7 +22,7 @@ from .config import resolve_config, _resolve_prompt
 from .card_store import DeepStore
 from .pg_store import PgEmbedStore
 from .embedding import (
-    _EMBED_CACHE, call_embedding,
+    _EMBED_CACHE, call_embedding, call_query_embedding,
     build_embed_cfg, safe_embed_cfg,
     get_embed_fingerprint, get_embed_profile, EmbedProfile,
 )
@@ -31,6 +31,11 @@ from ._deadline import PrefetchDeadlineExceeded, bind_store_deadline, coerce_dea
 from .ingest import LiveBuffer
 from .types import CardResult
 from .llm import LLMClient
+from .generated_context_contract import (
+    GeneratedContextError,
+    validate_identity_block,
+    validate_situation_overview,
+)
 from .scheduler import E1Scheduler
 from .injector import MemoryInjector
 from .session_context import V3SessionContext
@@ -104,6 +109,21 @@ _PWD_SIG = re.compile(r'(password|passwd|pwd)\s*[=:]\s*\S+', re.IGNORECASE)
 _DSN_SIG = re.compile(r'://[^:]+:[^@]+@')
 _BEARER_SIG = re.compile(r'Bearer\s+\S+', re.IGNORECASE)
 _APIKEY_SIG = re.compile(r'(api[_-]?key)\s*[=:]\s*\S+', re.IGNORECASE)
+
+
+# -- 系统态势总览注入前缀 (手帐机制 C) --
+# 注入格式与身份块的"## 我是谁"段平级。定义在这里是因为读侧需要在**加前缀之前**
+# 校验产物，而缓存里存的是已加前缀的成品 —— 退化路径（读异常）要用同一个常量
+# 把 payload 剥回来再校验一次。
+_SITUATION_INJECT_PREFIX = "## 系统态势\n"
+
+
+def _situation_payload_of(injected_block: str) -> str:
+    """从"已加注入前缀"的成品里剥回可校验的 payload（校验器只认 payload）。"""
+    text = injected_block or ""
+    if text.startswith(_SITUATION_INJECT_PREFIX):
+        return text[len(_SITUATION_INJECT_PREFIX):]
+    return text
 
 
 def _extract_base_path(cfg) -> str:
@@ -1492,7 +1512,21 @@ class V3Core:
         保留作向后兼容，新代码请调用 build_memory_context('')。
 
         身份块由 E1 每天写时生成（identity_block.md），本方法纯读；
-        文件缺失时截断最新印兜底。
+        文件缺失时截断最新印兜底 —— 但**兜底也必须通过输出契约校验**。
+
+        P0 (2026-09-21): ``identity_block.md`` 与 ``situation_overview.md`` 是同一
+        缺陷类的两个注入面（同一写路径、同一 provider、同样被逐字注入每个新
+        session）。读侧与写侧共用
+        ``generated_context_contract.validate_identity_block`` 做**同一份**校验 ——
+        校验在内容被返回（即将注入）之前进行。
+
+        fail-closed 语义：
+          * 校验失败 → 返回 ""，绝不返回原文；
+          * mtime 缓存只可能持有**通过校验**的值；
+          * 磁盘上是"更新但非法"的文件 → 返回 ""，绝不回退到更旧的缓存块；
+          * 读异常不再无条件回退缓存 —— 缓存值必须在**本次调用**同样通过校验
+            才允许返回；
+          * 缺文件的 legacy 印截断兜底走同一个校验器：兜底不得绕过注入边界。
         """
         base_path = self._get_base_path()
         identity_path = base_path / "identity_block.md"
@@ -1505,21 +1539,39 @@ class V3Core:
                     self._identity_block is not None
                     and identity_mtime <= self._identity_block_mtime
                 ):
+                    # 缓存只可能持有通过校验的成品（见下方写入缓存的唯一位置）。
                     return self._identity_block
 
                 block = identity_path.read_text(
                     encoding="utf-8", errors="replace"
                 ).strip()
-                self._identity_block = block
+                if not block:
+                    return ""
+
+                # ── 输出契约闸门（读/注入侧，P0 2026-09-21）──
+                # 校验失败 → ""，绝不注入原文；也绝不回退到更旧的缓存块。
+                try:
+                    validated = validate_identity_block(block)
+                except GeneratedContextError as _contract_e:
+                    logger.warning(
+                        "身份核心未通过输出契约，已拒绝注入 (来源=%s, reason=%s, "
+                        "chars=%d, detail=%s)",
+                        identity_path.name, _contract_e.reason, len(block),
+                        _contract_e.detail,
+                    )
+                    return ""
+
+                self._identity_block = validated
                 self._identity_block_mtime = identity_mtime
                 logger.info("身份核心已读取 (来源=%s)", identity_path.name)
-                return block
+                return validated
             except Exception as e:
                 logger.warning("身份块读取失败: %s", _safe_err(e))
-                return self._identity_block or ""
+                return self._validated_identity_cache()
 
+        # 文件缺失：缓存若已存在，也必须在**本次调用**通过校验才允许返回。
         if self._identity_block is not None:
-            return self._identity_block
+            return self._validated_identity_cache()
 
         logger.warning("E1 未生成身份块，用截断兜底")
         y_dir = base_path / "y"
@@ -1547,13 +1599,42 @@ class V3Core:
                     cut = cut[:boundary + 1]
                 block = cut.rstrip() + "\n（截断自印原文，500 字以内）"
 
+            # ── 兜底也必须过同一道闸门（P0 2026-09-21）──
+            # 缺文件不等于可以绕过注入边界：截断自印原文同样是"将被逐字注入"
+            # 的内容，校验不通过就返回 ""（宁可不注入，也不注入未校验内容）。
+            try:
+                block = validate_identity_block(block)
+            except GeneratedContextError as _fallback_e:
+                logger.warning(
+                    "身份核心兜底（截断自印原文）未通过输出契约，拒绝注入 "
+                    "(来源=%s, reason=%s, chars=%d, detail=%s)",
+                    latest.name, _fallback_e.reason, len(block), _fallback_e.detail,
+                )
+                return ""
+
             self._identity_block = block
             self._identity_block_mtime = 0.0
             logger.info("身份核心使用截断兜底 (%d 字, 来源=%s)", len(block), latest.name)
             return block
         except Exception as e:
             logger.warning("身份核心截断兜底失败: %s", _safe_err(e))
-            return self._identity_block or ""
+            return self._validated_identity_cache()
+
+    def _validated_identity_cache(self) -> str:
+        """退化路径：缓存值必须在**本次调用**通过校验才允许返回。
+
+        不允许把"读到坏东西"降级成"继续用可能也是坏的东西" —— 缓存校验失败即
+        清空缓存并返回 ""（fail-closed）。
+        """
+        cached = self._identity_block
+        if cached:
+            try:
+                validate_identity_block(cached)
+                return cached
+            except Exception:
+                self._identity_block = None
+                self._identity_block_mtime = 0.0
+        return ""
 
     # ── 系统态势总览（手帐机制 C） ──
     # 态势总览由 E1 写印后顺带生成（situation_overview.md），本方法纯读。
@@ -1562,9 +1643,20 @@ class V3Core:
     def _read_situation_overview(self) -> str:
         """读取 E1 生成的系统态势总览（手帐机制 C：prefetch 固定注入）
 
+        P0 (2026-09-21): 该产物被逐字注入每个新 session，所以读侧与写侧共用
+        ``generated_context_contract.validate_situation_overview`` 做**同一份**
+        校验 —— 校验在加 ``## 系统态势`` 前缀**之前**进行。
+
+        fail-closed 语义：
+          * 校验失败 → 返回 ""，绝不返回原文；
+          * mtime 缓存只可能持有**通过校验**的值；
+          * 读异常不再无条件回退缓存 —— 缓存值必须在**本次调用**同样通过校验
+            才允许返回；
+          * 磁盘上是"更新但非法"的文件 → 返回 ""，绝不回退到更旧的缓存块。
+
         Returns:
-            "## 系统态势\n{content}" — 文件存在且 mtime 变化时。
-            "" — 文件不存在或读取失败时（静默，不阻塞注入链路）。
+            "## 系统态势\n{content}" — 文件存在、mtime 变化且通过校验时。
+            "" — 文件不存在、内容为空、未通过校验或读取失败时（静默，不阻塞注入链路）。
         """
         base_path = self._get_base_path()
         situation_path = base_path / "situation_overview.md"
@@ -1576,6 +1668,7 @@ class V3Core:
         try:
             situation_mtime = situation_path.stat().st_mtime
             # mtime 未变 → 直接返回进程内缓存（毫秒级）
+            # 缓存只可能持有通过校验的成品（见下方写入缓存的唯一位置）。
             if (
                 self._situation_overview is not None
                 and situation_mtime <= self._situation_overview_mtime
@@ -1588,15 +1681,40 @@ class V3Core:
             if not block:
                 return ""
 
+            # ── 输出契约闸门（读/注入侧，P0 2026-09-21）──
+            # 必须在加注入前缀之前校验：前缀本身是一个 level-2 标题，加上去之后
+            # 就再也过不了结构校验了。校验失败 → ""，绝不注入原文。
+            try:
+                validated = validate_situation_overview(block)
+            except GeneratedContextError as _contract_e:
+                logger.warning(
+                    "系统态势总览未通过输出契约，已拒绝注入 (来源=%s, reason=%s, "
+                    "chars=%d, detail=%s)",
+                    situation_path.name, _contract_e.reason, len(block),
+                    _contract_e.detail,
+                )
+                # fail-closed: 绝不回退到更旧的缓存块，也绝不污染缓存。
+                return ""
+
             # 注入格式: 与身份块的"## 我是谁"平级
-            formatted = "## 系统态势\n" + block
+            formatted = _SITUATION_INJECT_PREFIX + validated
             self._situation_overview = formatted
             self._situation_overview_mtime = situation_mtime
             logger.info("系统态势总览已读取 (来源=%s, %d 字)", situation_path.name, len(formatted))
             return formatted
         except Exception as e:
             logger.warning("系统态势总览读取失败: %s", _safe_err(e))
-            return self._situation_overview or ""
+            # 退化路径：缓存值必须在**本次调用**同样通过校验才允许返回，
+            # 否则清掉缓存并返回 ""（不再无条件回退）。
+            cached = self._situation_overview
+            if cached:
+                try:
+                    validate_situation_overview(_situation_payload_of(cached))
+                    return cached
+                except Exception:
+                    self._situation_overview = None
+                    self._situation_overview_mtime = 0.0
+            return ""
 
     # ── 卡库操作 ──
 
@@ -1796,20 +1914,32 @@ class V3Core:
         _emb = None
         _embed_cfg = safe_embed_cfg(self.config)
         if _embed_cfg is not None:
-            try:
-                from .embedding import call_embedding
-                _emb = call_embedding(f"{title}\n{content}"[:2000], _embed_cfg)
-            except ValueError:
-                # 配置/调用契约错误 — 这是 contract violation, 必须抛
-                raise
-            except Exception as _e:
-                # 嵌入失败是**可选派生侧**问题, 不致命 — 仍允许无 emb
-                # 写入 topics (旧契约保留, 不视为硬失败). 但 P2a 边界:
-                # 不能 swallow, 必须让 caller 看见这条 warning, 升级
-                # status 为 DERIVED_WARNING, 不抹掉 PG 真值.
-                logger.debug("_sync_card_to_topics embedding 失败: %s", _safe_err(_e))
+            # Derived side: the card is already durable, so a failed embedding is not a
+            # hard failure — but it must be ACCOUNTED FOR, not merely warned about. A
+            # `warnings` entry lives in memory and dies with the process, so a repair pass
+            # could never find the row; the durable marker is what makes it findable. The
+            # old code also inherited call_embedding's 3s/0 realtime default here.
+            from .embedding import DURABLE_WRITE_EMBED_POLICY
+            from .embed_failures import embed_for_write
+            _out = embed_for_write(
+                f"{title}\n{content}"[:2000], _embed_cfg,
+                entity_table="topics", entity_id=_tid,
+                phase="topic_derived_sync",
+                conn_factory=getattr(self.pg, "open_side_connection", None),
+                policy=DURABLE_WRITE_EMBED_POLICY,
+            )
+            _emb = _out.vector
+            if not _out.ok:
+                logger.warning(
+                    "_sync_card_to_topics embedding %s for %s: class=%s retryable=%s "
+                    "marker_recorded=%s — topics 行仍写入 (派生侧降级)",
+                    _out.status.value, _tid, _out.error_class, _out.retryable,
+                    _out.marker_recorded,
+                )
                 warnings.append(
-                    f"topic derived sync embedding failed: {_safe_err(_e)[:200]}"
+                    f"topic derived sync embedding {_out.error_class} after "
+                    f"{_out.attempts} attempt(s); retryable={_out.retryable}; "
+                    f"durable_marker_recorded={_out.marker_recorded}"
                 )
         _emb_str = "[" + ",".join(str(x) for x in _emb) + "]" if _emb else None
         # lease 拿不到 → 抛 (派生侧问题, caller 升级为 DERIVED_WARNING).
@@ -1846,8 +1976,20 @@ class V3Core:
         cfg = self.config
         embed_cfg = safe_embed_cfg(cfg)
         q_emb = None
-        if embed_cfg is not None and query in _EMBED_CACHE:
-            q_emb = call_embedding(query, embed_cfg, cache=True)
+        # A02 / P2-1: no `query in _EMBED_CACHE` pre-check. A caller must not duplicate the cache's
+        # internal state — `cache=True` already reuses a hot query, and a cold query must reach the
+        # semantic lane on its first call (the contract the prefetch path already follows).
+        # Failure keeps this public path's existing degradation: q_emb=None, keyword lanes continue.
+        if embed_cfg is not None:
+            try:
+                q_emb = call_query_embedding(query, embed_cfg, cache=True)
+            except ValueError:
+                raise
+            except PrefetchDeadlineExceeded:
+                raise
+            except Exception as _qe:
+                logger.debug("search_cards: query embedding 失败, 走纯关键词: %s", str(_qe)[:80])
+                q_emb = None
         index = self.store.get_index()
         files_meta = index.get("files", {})
         card_index = {}
@@ -2154,10 +2296,10 @@ class V3Core:
             if embed_cfg is not None:
                 try:
                     if deadline is None:
-                        q_emb = call_embedding(query, embed_cfg, cache=True)
+                        q_emb = call_query_embedding(query, embed_cfg, cache=True)
                     else:
                         deadline.check(context="query embedding")
-                        q_emb = call_embedding(
+                        q_emb = call_query_embedding(
                             query,
                             embed_cfg,
                             cache=True,
@@ -2255,11 +2397,11 @@ class V3Core:
                 if deadline is not None:
                     deadline.check(context="core prefetch legacy fallback")
                     _legacy_timeout = max(0.001, min(3.0, deadline.remaining()))
-                    q_emb = call_embedding(query, embed_cfg, cache=True,
+                    q_emb = call_query_embedding(query, embed_cfg, cache=True,
                                            timeout=_legacy_timeout, retries=0)
                     deadline.check(context="core prefetch legacy fallback post-call")
                 else:
-                    q_emb = call_embedding(query, embed_cfg, cache=True)
+                    q_emb = call_query_embedding(query, embed_cfg, cache=True)
             index = self.store.get_index()
             return _prefetch(
                 query, limit, self.config, index.get("files", {}), self.pg, q_emb,
@@ -2367,10 +2509,10 @@ class V3Core:
                 try:
                     from .recall_pool import recall_pool
                     if deadline is None:
-                        q_emb = call_embedding(query, embed_cfg, cache=True, timeout=3, retries=0)
+                        q_emb = call_query_embedding(query, embed_cfg, cache=True, timeout=3, retries=0)
                     else:
                         deadline.check(context="context query embedding")
-                        q_emb = call_embedding(
+                        q_emb = call_query_embedding(
                             query,
                             embed_cfg,
                             cache=True,
@@ -2636,10 +2778,10 @@ class V3Core:
             q_emb = None
             if embed_cfg is not None:
                 if deadline is None:
-                    q_emb = call_embedding(query, embed_cfg, cache=True)
+                    q_emb = call_query_embedding(query, embed_cfg, cache=True)
                 else:
                     deadline.check(context="legacy context embedding")
-                    q_emb = call_embedding(
+                    q_emb = call_query_embedding(
                         query, embed_cfg,
                         cache=True,
                         timeout=max(0.001, min(3.0, deadline.remaining())),

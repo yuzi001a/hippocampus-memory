@@ -1,0 +1,46 @@
+=== tips ===
+main                               0bd9e1ee7f42
+v0-2-first-user-release            82600e335230
+v0-2-1-deployment-contract         0bd9e1ee7f42
+e1-generated-context-boundary      7808b8923978
+embedding-write-reliability        b344b801bac0
+embedding-backfill-operator        9c4d19101762
+p0-embedding-integration           22606e447785
+runtime-integrity                  a007d72d32a0
+reliability-recovery-v1            36c6e01fcf44
+long-observation-index-v1          425c42f527e2
+embedding-reliability-recovery     8d7a32f08e56
+installer-execution-v2             5ea7e392b22f
+
+=== ancestry matrix (rows = ancestor?, cols = descendant) ===
+                                         main  v0-2-firs  v0-2-1-de  e1-genera  embedding  embedding  p0-embedd  runtime-i  reliabili  long-obse  embedding  installer
+main                                        -no(82600e3)        YES        YES        YES        YES        YES        YES        YES        YES        YES        YES
+v0-2-first-user-release                   YES          -        YES        YES        YES        YES        YES        YES        YES        YES        YES        YES
+v0-2-1-deployment-contract                YESno(82600e3)          -        YES        YES        YES        YES        YES        YES        YES        YES        YES
+e1-generated-context-boundary     no(0bd9e1e)no(82600e3)no(0bd9e1e)          -no(0bd9e1e)        YES        YESno(0bd9e1e)no(0bd9e1e)        YES        YESno(0bd9e1e)
+embedding-write-reliability       no(0bd9e1e)no(82600e3)no(0bd9e1e)no(0bd9e1e)          -no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)
+embedding-backfill-operator       no(0bd9e1e)no(82600e3)no(0bd9e1e)no(7808b89)no(0bd9e1e)          -no(22606e4)no(0bd9e1e)no(0bd9e1e)        YES        YESno(0bd9e1e)
+p0-embedding-integration          no(0bd9e1e)no(82600e3)no(0bd9e1e)no(7808b89)no(0bd9e1e)        YES          -no(0bd9e1e)no(0bd9e1e)        YES        YESno(0bd9e1e)
+runtime-integrity                 no(0bd9e1e)no(82600e3)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)          -no(36c6e01)no(0bd9e1e)no(0bd9e1e)        YES
+reliability-recovery-v1           no(0bd9e1e)no(82600e3)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)        YES          -no(0bd9e1e)no(0bd9e1e)        YES
+long-observation-index-v1         no(0bd9e1e)no(82600e3)no(0bd9e1e)no(7808b89)no(0bd9e1e)no(9c4d191)no(22606e4)no(0bd9e1e)no(0bd9e1e)          -        YESno(0bd9e1e)
+embedding-reliability-recovery    no(0bd9e1e)no(82600e3)no(0bd9e1e)no(7808b89)no(0bd9e1e)no(9c4d191)no(22606e4)no(0bd9e1e)no(0bd9e1e)no(425c42f)          -no(0bd9e1e)
+installer-execution-v2            no(0bd9e1e)no(82600e3)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(0bd9e1e)no(a007d72)no(36c6e01)no(0bd9e1e)no(0bd9e1e)          -
+
+=== product blob identity per ref (vs recovery tip) ===
+generated_context_contract.py          main=absent v0-2-firs=absent v0-2-1-de=absent e1-genera== embedding=absent embedding== p0-embedd== runtime-i=absent reliabili=absent long-obse== embedding== installer=absent
+llm.py                                 main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera== embedding=diff embedding== p0-embedd== runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+e1.py                                  main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera== embedding=diff embedding== p0-embedd== runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+embedding.py                           main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera=diff embedding== embedding== p0-embedd== runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+embed_failures.py                      main=absent v0-2-firs=absent v0-2-1-de=absent e1-genera=absent embedding=diff embedding=diff p0-embedd=diff runtime-i=absent reliabili=absent long-obse== embedding== installer=absent
+ingest.py                              main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera=diff embedding== embedding== p0-embedd== runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+embed_chunks.py                        main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera=diff embedding=diff embedding=diff p0-embedd=diff runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+observation_chunks.py                  main=absent v0-2-firs=absent v0-2-1-de=absent e1-genera=absent embedding=absent embedding=absent p0-embedd=absent runtime-i=absent reliabili=absent long-obse== embedding== installer=absent
+observer.py                            main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera=diff embedding=diff embedding=diff p0-embedd=diff runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+recall_pool.py                         main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera=diff embedding=diff embedding=diff p0-embedd=diff runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+embedding_backfill.py                  main=absent v0-2-firs=absent v0-2-1-de=absent e1-genera=absent embedding=diff embedding=diff p0-embedd=diff runtime-i=absent reliabili=absent long-obse== embedding== installer=absent
+qa_embedding_chunks.sql                main== v0-2-firs== v0-2-1-de== e1-genera== embedding== embedding== p0-embedd== runtime-i== reliabili== long-obse== embedding== installer==
+observation_embedding_chunks.sql       main=absent v0-2-firs=absent v0-2-1-de=absent e1-genera=absent embedding=absent embedding=absent p0-embedd=absent runtime-i=absent reliabili=absent long-obse== embedding== installer=absent
+upgrade_v0_2.sql                       main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera=diff embedding=diff embedding=diff p0-embedd=diff runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+distribution_cli.py                    main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera=diff embedding=diff embedding=diff p0-embedd=diff runtime-i=diff reliabili=diff long-obse== embedding== installer=diff
+health.py                              main=diff v0-2-firs=diff v0-2-1-de=diff e1-genera=diff embedding== embedding== p0-embedd== runtime-i=diff reliabili=diff long-obse== embedding== installer=diff

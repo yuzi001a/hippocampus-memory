@@ -27,7 +27,8 @@ except (ImportError, AttributeError):
 
 logger = logging.getLogger("v3core.ingest")
 import hashlib
-from .embedding import call_embedding
+from .embedding import call_embedding, STREAM_PRIMARY_EMBED_POLICY, BATCH_EMBED_POLICY
+from .embed_failures import embed_for_write, EmbedOutcomeStatus
 from .config import resolve_config, _resolve_data_dir
 
 # ── LiveBuffer (实时 ingest) ──
@@ -753,20 +754,41 @@ class LiveBuffer:
             # check fence before embedding
             if getattr(self, '_fenced', False) or getattr(self, '_closed', False):
                 break
-            try:
-                if content and self._embed_cfg:
-                    try:
-                        ev = call_embedding(content[:2000], self._embed_cfg)
-                    except ValueError:
-                        raise
-                    except Exception:
-                        ev = None
-                else:
-                    ev = None
-            except ValueError:
-                raise
-            except Exception:
-                ev = None
+            # Embedding is a DERIVED index; the source row is the asset. A failure
+            # here must not destroy the row, must not be swallowed, and must leave a
+            # durable marker — an *unexplained* NULL is the production memory hole
+            # this replaces.
+            #
+            # `_flush` runs on the v3-live-writer DAEMON THREAD (sync_turn → queue →
+            # writer), NOT inside the user's 8s realtime budget, so it uses the
+            # bounded stream-primary policy (5s/0 single shot) instead of
+            # silently inheriting the 3s/0 realtime default — which is exactly
+            # how 3.5–5s provider responses used to become permanent holes.
+            # A 10s/2 chain inline would head-of-line-block the single-threaded
+            # serial writer (worst case ~33s/item vs ~13 rows/min peak arrival),
+            # so the patient 10s/2 retry lives on the deferred repair/backfill
+            # path: on primary failure the source row is kept, a retryable
+            # marker is recorded, and the writer moves to the next item.
+            outcome = embed_for_write(
+                (content[:2000] if content else ""),
+                self._embed_cfg or {},
+                entity_table="conversation_stream",
+                entity_id=source_id,
+                phase="live_ingest",
+                conn_factory=getattr(self._pg, "open_side_connection", None),
+                policy=STREAM_PRIMARY_EMBED_POLICY,
+            )
+            ev = outcome.vector
+            if not outcome.ok:
+                _log = (logger.error if outcome.status is EmbedOutcomeStatus.FAILED
+                        else logger.warning)
+                _log(
+                    "LiveBuffer embedding %s: source_id=%s class=%s retryable=%s "
+                    "attempts=%s policy=%s marker_recorded=%s — 源记录保留, embedding 待修复",
+                    outcome.status.value, source_id, outcome.error_class,
+                    outcome.retryable, outcome.attempts, outcome.policy,
+                    outcome.marker_recorded,
+                )
             # fence re-check after embedding (late return must not use PG)
             if getattr(self, '_fenced', False) or getattr(self, '_closed', False):
                 break
@@ -958,13 +980,27 @@ def ingest_session(j_dir: Path, pg, embed_cfg: dict, max_count: int = 100):
                 source_id = msg.get("id", "")
                 content = msg.get("content", "")
                 if source_id and content:
-                    try:
-                        ev = call_embedding(content[:2000], embed_cfg) if embed_cfg else None
-                    except ValueError:
-                        raise
-                    except Exception:
-                        ev = None
-                    pg.insert_message(source_id, content, embedding=ev)
+                    # j/ file import is a BATCH path, not the 8s realtime budget, so
+                    # it takes the batch policy and records failures durably rather
+                    # than writing an unexplained NULL.
+                    outcome = embed_for_write(
+                        content[:2000],
+                        embed_cfg or {},
+                        entity_table="conversation_stream",
+                        entity_id=source_id,
+                        phase="j_import",
+                        conn_factory=getattr(pg, "open_side_connection", None),
+                        policy=BATCH_EMBED_POLICY,
+                    )
+                    if not outcome.ok:
+                        logger.warning(
+                            "j import embedding %s: source_id=%s class=%s "
+                            "retryable=%s attempts=%s marker_recorded=%s",
+                            outcome.status.value, source_id, outcome.error_class,
+                            outcome.retryable, outcome.attempts,
+                            outcome.marker_recorded,
+                        )
+                    pg.insert_message(source_id, content, embedding=outcome.vector)
                     count += 1
         except ValueError:
             raise

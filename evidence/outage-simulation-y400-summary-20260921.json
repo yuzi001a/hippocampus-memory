@@ -1,0 +1,28 @@
+{
+  "date": "2026-09-21 Asia/Shanghai",
+  "machine": "y400",
+  "source": "candidate-fullrepo (current branch product code)",
+  "observed_provider_tail_s": 3.488,
+  "cells": 12,
+  "isolation": {
+    "production_outbox_fingerprint_unchanged": true,
+    "provider_calls_off_live_writer_thread": 0,
+    "writer_cells_left_alive": 0,
+    "enqueue_rejections": 0,
+    "cell_invariant_drained_plus_deferred_equals_items": true
+  },
+  "slow_tail": {
+    "realtime_3s_0": {"drain_per_min": 12.28, "null_rows": 9, "markers": 9, "unexplained_null": 0},
+    "stream_primary_5s_0": {"drain_per_min": 12.31, "null_rows": 0, "markers": 0, "unexplained_null": 0},
+    "durable_10s_0": {"drain_per_min": 12.38, "null_rows": 0, "markers": 0, "unexplained_null": 0},
+    "durable_10s_2": {"drain_per_min": 12.33, "null_rows": 0, "markers": 0, "unexplained_null": 0}
+  },
+  "sustained_timeout": {
+    "realtime_3s_0": {"drain_per_min": 12.48, "queue_peak": 6, "deferred": 0, "null_rows": 72, "markers": 72},
+    "stream_primary_5s_0": {"drain_per_min": 10.40, "queue_peak": 19, "deferred": 12, "null_rows": 60, "markers": 62},
+    "durable_10s_0": {"drain_per_min": 5.52, "queue_peak": 40, "deferred": 40, "null_rows": 32, "markers": 33},
+    "durable_10s_2": {"drain_per_min": 1.72, "queue_peak": 56, "deferred": 62, "null_rows": 10, "markers": 11}
+  },
+  "verdict": "5s/0 is selected for conversation_stream primary; 10s/2 remains deferred repair/backfill and is not inline in the stream writer.",
+  "production_mutations": {"migration": 0, "deploy": 0, "restart": 0, "db_backfill": 0}
+}

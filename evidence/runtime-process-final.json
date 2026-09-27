@@ -1,0 +1,34 @@
+{
+  "status": "READ_ONLY_PROCESS_OBSERVATION",
+  "processes": [
+    {
+      "pid": 3924,
+      "name": "python.exe",
+      "executable": "C:\\Users\\servi\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\python.exe",
+      "role": "gateway"
+    },
+    {
+      "pid": 15408,
+      "name": "python.exe",
+      "executable": "C:\\Users\\servi\\AppData\\Local\\hermes\\hermes-agent\\.hermes-runtime\\python\\cpython-3.11.16-windows-x86_64-none\\python.exe",
+      "role": "gateway"
+    },
+    {
+      "pid": 6548,
+      "name": "python.exe",
+      "executable": "C:\\Users\\servi\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\python.exe",
+      "role": "serve"
+    },
+    {
+      "pid": 18172,
+      "name": "python.exe",
+      "executable": "C:\\Users\\servi\\AppData\\Local\\hermes\\hermes-agent\\.hermes-runtime\\python\\cpython-3.11.16-windows-x86_64-none\\python.exe",
+      "role": "serve"
+    }
+  ],
+  "agent_actions": {
+    "gateway_restart": false,
+    "serve_restart": false,
+    "live_venv_reinstall": false
+  }
+}
