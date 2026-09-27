@@ -90,13 +90,62 @@ def handle_hm_get(args: dict, **kw) -> str:
                 ensure_ascii=False,
             )
 
-        # 2. V3Core path (PG messages -> PG cards -> file fallback)
+        # 2. Active-memory source path: v3_search returns
+        # ``explicit_memories.memory_id`` as source_id. Read it before the
+        # historical message/card fallbacks so search -> source-read is one
+        # coherent contract.
         from .. import V3Core
 
         core = kw.get("core") or V3Core(
             effective_config=kw.get("effective_config"),
             pg_pool=kw.get("pool") if kw.get("pool") is not None else kw.get("pg_pool"),
         )
+        try:
+            pg = getattr(core, "_pg", None)
+            if pg is None:
+                pg = getattr(core, "pg", None)
+            if pg is not None:
+                columns = (
+                    "memory_id", "category", "title", "content", "tags",
+                    "provenance", "status", "created_at", "updated_at",
+                )
+                with pg.lease() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT memory_id, category, title, content, tags,
+                                   provenance, status, created_at, updated_at
+                              FROM public.explicit_memories
+                             WHERE memory_id = %s
+                            """,
+                            (source_id,),
+                        )
+                        row = cur.fetchone()
+                if row:
+                    record = dict(row) if hasattr(row, "keys") else dict(zip(columns, row))
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "source_id": source_id,
+                            "content": record.get("content", ""),
+                            "source": "explicit_memories",
+                            "metadata": {
+                                "title": record.get("title", ""),
+                                "category": record.get("category", ""),
+                                "tags": record.get("tags", []) or [],
+                                "provenance": record.get("provenance", {}) or {},
+                                "status": record.get("status", ""),
+                                "created_at": str(record.get("created_at", "") or ""),
+                                "updated_at": str(record.get("updated_at", "") or ""),
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+        except Exception as e:
+            logger.debug("explicit memory source read unavailable: %s", _safe_err(e))
+
+        # 3. V3Core path (PG messages -> PG cards -> file fallback)
+
         raw = core.get_message_context(source_id)
         result = json.loads(raw)
 

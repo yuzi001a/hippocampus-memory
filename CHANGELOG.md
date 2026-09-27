@@ -7,6 +7,31 @@
 
 ---
 
+## [0.2.4] — B02 MCP prerequisite fixes
+
+> **Scope:** make the existing v3-core stdio MCP path usable from a clean install.
+> This is not a DSH adapter, not automatic recording/injection, and not a production
+> deployment.
+
+### Fixed
+- Declare the official MCP SDK as `mcp>=1.0,<2`; the server uses the FastMCP 1.x
+  API and a clean wheel install must not require a manual dependency repair.
+- Preserve the selected profile/config through HTTP `/tool` and stdio MCP dispatch;
+  non-default profiles no longer silently fall back to the default database.
+- Make `v3_get(target=hm, source_id=...)` read active-memory ids returned by
+  `v3_search` from `explicit_memories`, completing the search → source-read path.
+
+### Added
+- B02 TOOL-support contract and scope: `docs/B02-DSH-TOOL-SUPPORT.md`.
+- Regression coverage for packaged MCP dependencies, profile scoping, and active-memory
+  source reads.
+
+### Not changed
+- No database schema, production data, gateway process, automatic recording, or
+  automatic recall injection.
+
+---
+
 ## [0.2.3] — B01 minimal host contract + fresh-database bootstrap fix
 
 > **Scope:** transport/identity/host-contract work. Not deployed to production;

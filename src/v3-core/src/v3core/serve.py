@@ -48,9 +48,24 @@ def _dispatch_tool(core, name: str, args: dict) -> str:
             return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"success": False, "error": _safe_err(e)}, ensure_ascii=False)
-    # 其余走 v3core.tools._handle_tool (与 v3hermes 一致)
+    # 其余走 v3core.tools._handle_tool (与 v3hermes 一致)，并把 core 作用域
+    # 一并转发：契约见 v3hermes/provider.py —— 工具内部不得再无参
+    # resolve_config()，否则非默认 profile 的 MCP/HTTP 调用会静默落到
+    # default profile 的库上（跨 profile 读写错误 DB）。
     from .tools import handle_tool_call as _core_handle_tool
-    return _core_handle_tool(name, args)
+    _cfg = getattr(core, "config", None)
+    _pool = getattr(core, "pg_pool", None)
+    if _pool is None:
+        _pool = getattr(core, "_pg_pool", None)
+    return _core_handle_tool(
+        name,
+        args,
+        core=core,
+        effective_config=_cfg,
+        pool=_pool,
+        pg_pool=_pool,
+        runtime_context=_pool is not None,
+    )
 
 
 # ── 健康状态检测 ──
