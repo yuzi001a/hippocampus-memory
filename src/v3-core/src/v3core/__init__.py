@@ -2033,6 +2033,7 @@ class V3Core:
         pg_fail = self._pg_was_connected and not pg_connected
         
         hits, _ = recall_pool(query, card_index=card_index, pg=self.pg, q_emb=q_emb,
+                           include_card_vector=True,
                            rerank_top_n=10 if rerank_cfg.get("endpoint") else None,
                            rerank_cfg=rerank_cfg, limit=limit,
                            pg_was_connected=self._pg_was_connected,
