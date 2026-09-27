@@ -326,6 +326,8 @@ gateway                3772/5252 (2026-09-22) → 5420/17068 (2026-09-27 08:37:2
                        live-env probe resolves venv site-packages with prepare/call_query/runtime_integrity
 readiness fence        2026-09-27 08:38:47 (feishu connected after one transient 30s timeout)
 rollback               workspace/backups/a03-canary-20260926/rollback (108+2+10+10 files, readback-verified)
+serve                  in-app backend replacement at 09:14:49 (+08) (17280/20244 → 7968/9944) under the
+                       same Electron PID; postdates the install, probe resolves the installed bytes
 ```
 
 ### Q01 canary (frozen set, production profile, real provider boundary)
@@ -363,7 +365,10 @@ qa_pairs                     14046 rows / 0 unexplained NULL embeddings
 observation_notes            788 rows / 0 NULL
 post-cutoff writes           qa_pairs +2 (0 NULL), explicit_memories +1 (0 NULL)
 embedding_failures           0 rows (no ledger growth)
-gateway/serve                gateway healthy + fence; serve swapped last (self-hosting path)
+gateway/serve                gateway healthy + fence; Desktop serve backend replaced in-app at
+                             09:14:49 (+08) under the same Electron PID — after the install, so the
+                             session path resolves the installed bytes (probe rc=0 on all four live
+                             processes; replacement trigger NOT PROVEN, no stall precursor)
 pre-existing, out of scope   rerank HTTP 400 (siliconflow) first seen 2026-09-23, before this cutover
                              historical tracebacks in gateway.log (2026-08-30) — not this window
 ```

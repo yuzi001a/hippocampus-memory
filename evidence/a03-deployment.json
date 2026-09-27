@@ -689,5 +689,38 @@
     "merge_commit": "83fc337a5ecb592a8be90d99b410404ebacb2f7f",
     "tag": "v0.2.2",
     "entry": "release.yml on tag push → wheels + sdists + formal Release"
+  },
+  "serve_backend": {
+    "old": {
+      "pids": [
+        17280,
+        20244
+      ],
+      "created": "2026-09-26 15:23:44 +08",
+      "note": "pre-install: these held pre-A03 bytecode in memory"
+    },
+    "observed_replacement": {
+      "pids": [
+        7968,
+        9944
+      ],
+      "created": "2026-09-27 09:14:49 +08",
+      "parent": "Hermes.exe PID 20064 (same Electron instance, in-app teardown + boot group)",
+      "desktop_log": "2026-09-27T01:14:47.242Z 'Hermes backend exited (1)' → [boot] Resolving Hermes backend → HERMES_BACKEND_READY port=50392 → 'backend is ready' at 01:14:57.491Z",
+      "trigger": "NOT PROVEN — no event-loop-stall / websocket-disconnect precursor in desktop.log; silent in-app teardown paths exist (model settings, bootstrap reset, profile switch, connection-config apply). The app did not restart (same Electron PID).",
+      "why_no_agent_driver": "the replacement postdates the install (09:14:49 > 08:36), so the backend that hosts the session already resolves the installed bytes; stopping a healthy post-install backend again would be churn, and the skill forbids re-issuing a stop merely to obtain evidence"
+    },
+    "live_resolution_probe": {
+      "serve 7968": {
+        "rc": 0,
+        "v3core": "…/venv/Lib/site-packages/v3core/__init__.py",
+        "prepare_query_embedding_text": true,
+        "call_query_embedding": true,
+        "runtime_integrity": true
+      },
+      "serve 9944": "same as 7968",
+      "gateway 5420 / 17068": "same as 7968"
+    },
+    "verdict": "the interactive path hosts post-install bytes; no further restart performed"
   }
 }
