@@ -184,6 +184,17 @@ def run_mcp(profile: str = "default") -> None:
         sys.exit(1)
 
     logger.info("MCP server 已注册 %d 个工具: %s", len(tool_names), ", ".join(tool_names))
+    # B01: stdio 面与 HTTP 面共用同一 capability 真值（get_bridge_capabilities）
+    try:
+        from .bridge_contract import get_bridge_capabilities
+        _caps = get_bridge_capabilities()
+        logger.info(
+            "bridge handshake: protocol=%s core=%s capabilities=%s",
+            _caps.get("bridge_protocol_version"), _caps.get("core_package_version"),
+            ",".join(sorted((_caps.get("capabilities") or {}).keys())),
+        )
+    except Exception as e:
+        logger.warning("bridge capability 汇报失败: %s", _safe_err(e))
     # 注意: 不要 print 到 stdout — 会污染 JSON-RPC 流 (stdio transport).
     # 启动信息走 logger (stderr).
 

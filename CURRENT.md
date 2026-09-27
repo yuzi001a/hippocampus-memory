@@ -1,6 +1,6 @@
 # Hippocampus — global development baseline (A01)
 
-Status: `A01 = DONE` / `A02 = DOING` (see the A02 section at the end)
+Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2 released) / `B01 = DOING` (see the B01 section at the end)
 
 ## A01 — one integration baseline for all follow-on work
 
@@ -401,3 +401,102 @@ packaged version string  still 4.0.0 (tag convention v0.2.x, matching v0.2 / v0.
 deployment record        evidence/a03-deployment.json
 ```
 
+---
+
+## B01 — minimal host contract for DSH (B02) and pi (B03)
+
+```text
+branch            feature/b01-host-contract (from main bbcc31b)
+baseline          main bbcc31b6e571669dfc1659dc2bcd9a0057aca45c
+scope             G1 durable event identity + idempotent ingest   (correctness)
+                  G2 bridge version / capability handshake
+                  G3 minimal owned-process lifecycle
+                  G4 host/session/project/event identity contract
+NOT in scope      query algorithm / ranking / daily dedupe / adapter / schema / backfill / M01 / CRL
+production        NOT touched (no install, no restart; B02's DSH hookup is the first external canary)
+```
+
+### Corrected G1 fact model
+
+```text
+EVENT_INGEST_CORRECTNESS_DEPENDS_ON_EPHEMERAL_PROCESS_STATE
+```
+
+Read from the code, not assumed:
+
+| layer | mechanism found | truth lives in | defect |
+| --- | --- | --- | --- |
+| source dedupe | `LiveBuffer.enqueue` → disk durable marker + `j/accepted_live_buffer/<sha>.json` tombstone | disk (restart-proof) | hit returns `True`, indistinguishable from a fresh accept |
+| source cursor | `context.synced_message_ids` | **process memory** | empty on a fresh Core → a re-sent snapshot looks new |
+| derived identity | `qa_pairs.source_id UNIQUE` + `ON CONFLICT DO NOTHING` | PG | `source_id` embedded `q_turn = context.turn` — an **in-memory counter that resets to 0** |
+| pairing state | `context.pending_qa` | **process memory** | lost on restart |
+| transport ACK | `/events` always `{"ok": true}`; `sync_turn` returned `None` | — | structurally unable to tell the truth |
+
+Post-restart duplicate chain: fresh Core → cursor empty + turn 0 → re-sent event → tombstone hit
+returns True (no block) → pairing runs again → flush builds a **new** `source_id` → `ON CONFLICT`
+misses → duplicate QA row.
+
+### What changed (no new table: schema NONE)
+
+```text
+new               src/v3core/bridge_contract.py — single source of truth for
+                  normalize_event / event_identity / qa_pairing_decision /
+                  ack_from_receipt / get_bridge_capabilities (protocol b01.1)
+ingest.py         `event_status(session,event,host,item)` → absent|pending|durable; host-scoped
+                  accepted-tombstone path (legacy template byte-identical); host in the job
+                  identity only for non-legacy hosts
+sync_turn         returns a per-event receipt; `duplicate` (pending OR durable) ⇒ SKIP QA
+                  derivation — the actual fix for post-restart duplicates; turn-aware pairing
+                  via qa_pairing_decision (hold instead of guessing); host-scoped in-process
+                  cursor; `_qa_source_id()` single template (host-namespaced for new hosts)
+serve.py          /events: canonical identity + honest ACK (accepted/duplicate/retryable/failed
+                  + event_id/source_id/host); write failure ⇒ 503 + ok=false, never "remembered";
+                  bounded buffer (32 sessions / 500 events / 6h TTL) — no longer a correctness
+                  authority; /health carries the shared handshake keys additively
+serve lifecycle   --port 0 reports the REAL bound port; --ready-json prints one deterministic
+                  ready event; SIGTERM → graceful (stop accepting → core.shutdown())
+mcp_server.py     announces the same capability truth at startup (no second hardcoded copy);
+                  stdio disconnect → core.shutdown() (existing behaviour, now asserted)
+tools/health.py   v3_health carries the same `bridge` block
+```
+
+### Isolated real E2E (`src/v3-core/eval/b01_host_contract_e2e.py` → `evidence/b01-e2e-report.json`)
+
+Disposable `pgvector/pgvector:pg17` container (127.0.0.1:55501), isolated profile,
+observer disabled, real `serve --port 0 --ready-json`, real HTTP.
+
+```text
+ready-json real port       62864 (not 0)
+single event               accepted=true  duplicate=false
+same-process duplicate     accepted=false duplicate=true   identity rows unchanged
+restart duplicate          accepted=false duplicate=true   identity rows + QA rows unchanged
+same ids / other host      accepted=true                   (no collision)
+missing assistant          turn2 recorded incomplete (empty answer), never paired with turn3
+out-of-order assistant     source kept, pairing not guessed
+writer rejection           HTTP 503 + ok=false + status=retryable
+legacy payload (no host)   200 + host=legacy               (old contract intact)
+prefetch                   hit=true (synthesized history retrievable)
+```
+
+### Tests
+
+```text
+B01 targeted        tests/test_b01_event_contract_red.py + ..._behavior.py → 36 passed
+                    (RED first: 21 failed before implementation)
+related suites      alpha_bootstrap / harness_filesystem_isolation / config_pg_password_env → 82 passed
+full suite          see the delivery block below
+NOT re-run          embedding audit / LoCoMo / historical repair / A01 differential
+```
+
+### Findings (pre-existing, NOT fixed here — see docs/B01-FINDINGS.md)
+
+```text
+F1  packaged `hippocampus bootstrap` fails on a BRAND-NEW database:
+    alpha_bootstrap.sql:139 splices observation_embedding_chunks.sql (FK → observation_notes)
+    BEFORE alpha_bootstrap.sql:269 creates observation_notes → UndefinedTable → rollback.
+    The E2E applied the same artifacts in dependency order and recorded the fallback.
+F2  outbox replay is at-least-once: a crash before the PG ack replays the item on the next
+    start and conversation_stream can receive a second row for one identity (no unique key on
+    that table). B01 does not change it; it makes the duplicate *detectable* and keeps the
+    derived layer idempotent (E2E asserts qa_pairs does not grow).
+```

@@ -6,14 +6,25 @@
 from __future__ import annotations
 import json
 import logging
+import os
+import signal
 import sys
+import threading
 import traceback
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
 from . import _safe_err
 
 logger = logging.getLogger("v3core.serve")
+
+# B01 bounded message buffer.  The buffer is a performance/short-term
+# convenience ONLY: durable event identity lives on disk (accepted
+# tombstones), so correctness never depends on restoring this state.
+MAX_BUFFER_SESSIONS = 32
+MAX_BUFFER_EVENTS_PER_SESSION = 500
+BUFFER_IDLE_TTL_S = 6 * 3600
 
 
 # ── 工具 dispatch: v3hermes handle_tool_call 的等价物 ──
@@ -73,6 +84,7 @@ class _Handler(BaseHTTPRequestHandler):
     # 由 build_handler 注入
     core: Any = None
     msg_buffer: dict[str, list[dict]] = {}
+    buffer_last_seen: dict[str, float] = {}
     server_version: str = "v3core-serve/1.0"
 
     # 静音 BaseHTTPServer 默认 access log — 我们有自己的 logger
@@ -126,12 +138,18 @@ class _Handler(BaseHTTPRequestHandler):
             if self.path == "/health" or self.path.startswith("/health?"):
                 pg_ok = _check_pg(self.core)
                 embed_ok = _check_embed(self.core)
-                self._send_json(200, {
+                payload = {
                     "ok": True,
                     "pg": pg_ok,
                     "embed": embed_ok,
                     "core": "initialized" if self.core is not None else "missing",
-                })
+                }
+                try:
+                    from .bridge_contract import get_bridge_capabilities
+                    payload.update(get_bridge_capabilities())
+                except Exception as e:
+                    logger.warning("/health capability 注入失败: %s", _safe_err(e))
+                self._send_json(200, payload)
                 return
             if self.path == "/" or self.path.startswith("/?"):
                 self._send_json(200, {
@@ -171,15 +189,70 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"ok": False, "error": _safe_err(e)})
 
     # ── 各端点实现 ──
+    def _trim_buffer(self) -> None:
+        """Bounded growth: idle TTL + per-session cap + session-count cap.
+
+        Never a correctness authority — evicted events are still durable on
+        disk, so a re-send is detected as a duplicate rather than re-ingested.
+        """
+        now = time.time()
+        buf = self.msg_buffer
+        last = self.buffer_last_seen
+        for sid in [s for s, seen in last.items() if now - seen > BUFFER_IDLE_TTL_S]:
+            buf.pop(sid, None)
+            last.pop(sid, None)
+        for sid, msgs in list(buf.items()):
+            if len(msgs) > MAX_BUFFER_EVENTS_PER_SESSION:
+                buf[sid] = msgs[-MAX_BUFFER_EVENTS_PER_SESSION:]
+        if len(buf) > MAX_BUFFER_SESSIONS:
+            ordered = sorted(last.items(), key=lambda kv: kv[1])
+            for sid, _ in ordered[: len(buf) - MAX_BUFFER_SESSIONS]:
+                buf.pop(sid, None)
+                last.pop(sid, None)
+
+    @staticmethod
+    def _event_status_from_receipt(receipt, event_id: str) -> str:
+        """Per-event status from a sync_turn receipt (legacy cores → accepted)."""
+        if not isinstance(receipt, dict):
+            return "accepted"
+        events = receipt.get("events")
+        if isinstance(events, dict) and event_id in events:
+            value = events[event_id]
+            if isinstance(value, str):
+                # sync_turn 用 rejected 表示"持久化没接受" → ACK 里说 retryable
+                return "retryable" if value == "rejected" else value
+        if receipt.get("ok") is False:
+            return "failed"
+        return "accepted"
+
+    @staticmethod
+    def _source_id_from_receipt(receipt, event_id: str):
+        if not isinstance(receipt, dict):
+            return None
+        source_ids = receipt.get("source_ids")
+        if isinstance(source_ids, dict):
+            value = source_ids.get(event_id)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
     def _handle_events(self, body: dict) -> None:
-        # 必填字段
-        session_id = body.get("session_id")
-        msg_id = body.get("msg_id")
-        if not session_id or not msg_id:
-            self._send_json(400, {"ok": False, "error": "session_id and msg_id are required"})
+        # B01: canonical event identity = (host, session_id, event_id).
+        # ``msg_id`` stays a legacy alias for ``event_id``; ``host`` missing
+        # means the historical namespace, so old clients keep working.
+        from .bridge_contract import ack_from_receipt, normalize_event
+
+        try:
+            event = normalize_event(body)
+        except ValueError as e:
+            self._send_json(400, {"ok": False, "error": _safe_err(e)})
             return
-        content = body.get("content", "")
-        role = body.get("role", "")
+
+        session_id = event["session_id"]
+        msg_id = event["event_id"]
+        host = event["host"]
+        content = event["content"]
+        role = event["role"]
         turn_id = body.get("turn_id", "")
         # PG conversation_stream.turn_id 是 integer — 容错转换, 非数字置 None
         if turn_id not in (None, ""):
@@ -188,8 +261,6 @@ class _Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 turn_id = None
         timestamp = body.get("timestamp")
-        # PG conversation_stream.timestamp 是 timestamptz — 容错转换:
-        # 数字(毫秒 epoch) → ISO 字符串; 其他原样透传
         if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
             try:
                 from datetime import datetime, timezone
@@ -198,35 +269,47 @@ class _Handler(BaseHTTPRequestHandler):
                 timestamp = None
         tool_calls = body.get("tool_calls")
         tool_results = body.get("tool_results")
+
         try:
-            # ── Phase v4 融合: append 到 per-session 全量缓冲 + 调 sync_turn ──
-            # 1) 构造 sync_turn 所需的消息 dict 格式
-            #    (字段名: id / content / role / tool_calls / tool_results / timestamp)
-            #    注意: sync_turn 内部也会调 self.live_buffer.enqueue() 写 conversation_stream
-            #    —— 所以这里不再单独 enqueue, 否则会双写 conversation_stream.
+            # sync_turn 内部负责写 conversation_stream（这里不单独 enqueue，
+            # 否则会双写）。事件身份随 msg 一起带给 kin，供 host 作用域判重。
             msg = {
                 "id": msg_id,
+                "event_id": msg_id,
+                "host": host,
                 "content": content,
                 "role": role,
                 "tool_calls": tool_calls or [],
                 "tool_results": tool_results or [],
             }
+            if turn_id not in (None, ""):
+                msg["turn_id"] = str(turn_id)
             if timestamp is not None:
                 msg["timestamp"] = timestamp
-            # 2) append 到 per-session 全量列表
-            #    缓冲不设上限 — dsh 会话消息量有限 (几十到几百条);
-            #    若未来服务化到多用户场景, 需要加 LRU/TTL 兜底 (避免内存泄漏).
+            for field_name in ("parent_event_id", "project_id", "agent_id", "branch_id"):
+                value = body.get(field_name)
+                if value not in (None, ""):
+                    msg[field_name] = value
+
             buf = self.msg_buffer
             session_msgs = buf.get(session_id)
             if session_msgs is None:
                 session_msgs = []
                 buf[session_id] = session_msgs
             session_msgs.append(msg)
-            # 3) 调 sync_turn — 内部: 增量 QA 配对 (user→assistant) + 内部 enqueue 写 conversation_stream
-            #    sync_turn 用 _synced_counts[session_id] 记录已处理数, 这里每次传全量列表是安全的
-            #    (它内部只处理 messages[prev_count:] 的增量部分).
-            self.core.sync_turn(session_id, session_msgs)
-            self._send_json(200, {"ok": True})
+            self.buffer_last_seen[session_id] = time.time()
+            self._trim_buffer()
+
+            receipt = self.core.sync_turn(session_id, session_msgs, host=host)
+            status = self._event_status_from_receipt(receipt, msg_id)
+            ack = ack_from_receipt({
+                "status": status,
+                "event_id": msg_id,
+                "host": host,
+                "source_id": self._source_id_from_receipt(receipt, msg_id),
+            })
+            # 写失败绝不显示成"已经记住": retryable/failed → 503 + ok=false
+            self._send_json(200 if ack["ok"] else 503, ack)
         except Exception as e:
             logger.warning("events sync_turn 失败 (session=%s msg=%s): %s",
                            str(session_id)[:30], str(msg_id)[:30], _safe_err(e))
@@ -278,11 +361,15 @@ def build_handler(core, msg_buffer=None):
         pass
     BoundHandler.core = core
     BoundHandler.msg_buffer = msg_buffer if msg_buffer is not None else {}
+    # B01: last-seen map is fresh per bound handler; the buffer itself is
+    # injected so callers/tests can observe it.
+    BoundHandler.buffer_last_seen = {}
     return BoundHandler
 
 
 # ── 入口函数 ──
-def serve(host: str = "127.0.0.1", port: int = 39090, profile: str = "default") -> None:
+def serve(host: str = "127.0.0.1", port: int = 39090, profile: str = "default",
+          ready_json: bool = False) -> None:
     """起 HTTP serve 模式 — 阻塞运行直到 KeyboardInterrupt.
 
     host/port 不从环境变量读 (spec 要求只走参数, 不污染全局配置).
@@ -319,14 +406,44 @@ def serve(host: str = "127.0.0.1", port: int = 39090, profile: str = "default") 
             pass
         sys.exit(1)
 
-    logger.info("HTTP 服务已启动: http://%s:%d  (Ctrl+C 退出)", host, port)
-    print(f"v3core-serve listening on http://{host}:{port}", flush=True)
+    # --port 0 时必须回报实际绑定端口，不能打印 0
+    try:
+        bound_port = int(server.server_address[1])
+    except Exception:
+        bound_port = port
+    if ready_json:
+        try:
+            from .bridge_contract import get_bridge_capabilities
+            _handshake = get_bridge_capabilities()
+        except Exception:
+            _handshake = {}
+        print(json.dumps({
+            "event": "ready",
+            "service": "v3core-serve",
+            "host": host,
+            "port": bound_port,
+            "pid": os.getpid(),
+            "profile": profile,
+            "endpoints": ["GET /health", "POST /events", "POST /prefetch", "POST /tool"],
+            **_handshake,
+        }, ensure_ascii=False), flush=True)
+    logger.info("HTTP 服务已启动: http://%s:%d  (Ctrl+C 退出)", host, bound_port)
+    print(f"v3core-serve listening on http://{host}:{bound_port}", flush=True)
     print(f"  GET  /health  → 健康检查", flush=True)
     print(f"  POST /events  → 写消息 + 触发 QA 配对 (sync_turn)", flush=True)
     print(f"  POST /prefetch → 召回上下文块", flush=True)
     print(f"  POST /tool    → 转发到 v3 工具 dispatch", flush=True)
 
-    # 3. 阻塞运行 + 优雅关闭
+    # 3. 阻塞运行 + 优雅关闭 (SIGTERM 也走同一条 graceful 路径:
+    #    停止接受 → core.shutdown() → 退出; owned child 由父进程终止)
+    def _on_sigterm(_signum, _frame):
+        logger.info("收到 SIGTERM, 准备关闭…")
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except Exception as e:
+        logger.warning("SIGTERM handler 注册失败: %s", _safe_err(e))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -3420,30 +3420,87 @@ class V3Core:
         except Exception as e:
             logger.warning("_on_live_flush 整体失败: %s", _safe_err(e)[:100])
 
-    def _enqueue_live_message(self, session_id: str, msg_id: str,
-                              content: str, role: str, turn_id: str,
-                              timestamp=None, tool_calls=None,
-                              tool_results=None):
-        """Accept a live message only when its canonical identity is new."""
+    def _enqueue_live_message_status(self, session_id: str, msg_id: str,
+                                     content: str, role: str, turn_id: str,
+                                     timestamp=None, tool_calls=None,
+                                     tool_results=None, host: str = "",
+                                     item=None) -> str:
+        """Accept a live message and report WHICH state held.
+
+        Returns ``duplicate`` / ``accepted`` / ``rejected``.  ``duplicate``
+        is not an error — the canonical identity is already durable — but
+        the caller MUST NOT re-derive QA for it: that is exactly what
+        produced post-restart duplicate QA rows.
+        """
         live = self.live_buffer
+        probe = getattr(live, "event_status", None)
+        if callable(probe):
+            try:
+                if item is not None:
+                    _state = probe(session_id, msg_id, host=host, item=item)
+                else:
+                    _state = probe(session_id, msg_id, host=host)
+            except Exception:
+                _state = None
+            if _state in ("durable", "pending"):
+                # durable = PG 已 ack；pending = durable outbox 标记已存在但尚未 ack。
+                # 两种情况都表示"这个身份服务端已经收下过"，因此对调用方都是
+                # duplicate，且都绝不能再次派生 QA（重启后重复 QA 的根因）。
+                return "duplicate"
         checker = getattr(live, "has_durable_marker", None)
         if callable(checker):
             try:
-                if checker(session_id, msg_id, content, role, turn_id,
-                           timestamp, tool_calls or [], tool_results or []) is True:
-                    return True
+                _marker = checker(session_id, msg_id, content, role, turn_id,
+                                  timestamp, tool_calls or [], tool_results or [],
+                                  host=host)
+            except TypeError:
+                try:
+                    _marker = checker(session_id, msg_id, content, role, turn_id,
+                                      timestamp, tool_calls or [], tool_results or [])
+                except Exception:
+                    _marker = None
             except Exception:
-                # A failed probe must not silently drop a real delta; enqueue
-                # remains the conservative fallback.
-                pass
-        return live.enqueue(
-            session_id, msg_id, content, role, turn_id,
-            timestamp=timestamp,
-            tool_calls=tool_calls or [],
-            tool_results=tool_results or [],
-        )
+                _marker = None
+            if _marker is True:
+                return "duplicate"
+        try:
+            _ok = live.enqueue(
+                session_id, msg_id, content, role, turn_id,
+                timestamp=timestamp,
+                tool_calls=tool_calls or [],
+                tool_results=tool_results or [],
+                host=host or "",
+            )
+        except TypeError:
+            _ok = live.enqueue(
+                session_id, msg_id, content, role, turn_id,
+                timestamp=timestamp,
+                tool_calls=tool_calls or [],
+                tool_results=tool_results or [],
+            )
+        return "rejected" if _ok is False else "accepted"
 
-    def sync_turn(self, session_id: str, messages: list[dict] | None = None) -> None:
+    def _enqueue_live_message(self, session_id: str, msg_id: str,
+                              content: str, role: str, turn_id: str,
+                              timestamp=None, tool_calls=None,
+                              tool_results=None, host: str = ""):
+        """Accept a live message only when its canonical identity is new.
+
+        Thin backward-compatible wrapper over
+        ``_enqueue_live_message_status`` (True / False as before).
+        """
+        _status = self._enqueue_live_message_status(
+            session_id, msg_id, content, role, turn_id,
+            timestamp=timestamp, tool_calls=tool_calls,
+            tool_results=tool_results, host=host,
+        )
+        return _status != "rejected"
+
+    def sync_turn(self, session_id: str, messages: list[dict] | None = None,
+                   host: str | None = None) -> dict | None:
+        # B01: returns a per-event receipt so the transport layer can ACK
+        # truthfully.  Legacy callers that ignore the return value are
+        # unaffected (previously returned None).
         """每轮 turn 调用 — 入队 live buffer + 就地 QA 配对 + 写 qa_pairs
 
         Phase v4 改造:
@@ -3464,14 +3521,30 @@ class V3Core:
           - role=assistant: 追加到 pending.a
           - tool/function 消息: 不进 pending, 但记到 tool_calls/tool_results (给下个 q 配)
         """
+        from .bridge_contract import LEGACY_HOST as _BC_LEGACY_HOST
+        from .bridge_contract import qa_pairing_decision as _qa_pairing_decision
+
+        _call_host = str(host or "").strip()
+        _receipt: dict = {
+            "ok": True,
+            "host": _call_host or _BC_LEGACY_HOST,
+            "accepted": [],
+            "duplicate": [],
+            "rejected": [],
+            "incomplete": [],
+            "held": [],
+            "events": {},
+            "source_ids": {},
+        }
         if not session_id or not messages:
             if not session_id:
                 logger.warning("sync_turn 收到空 session_id, 跳过")
             if not messages:
                 logger.warning("sync_turn 收到空 messages (session=%s), 跳过", session_id or "?")
-            return
+            return _receipt
         if getattr(self, '_core_fenced', False) or not getattr(self, '_core_accepting', True) or getattr(self, '_core_closed', False):
-            return
+            _receipt["ok"] = False
+            return _receipt
         import hashlib
 
 
@@ -3512,16 +3585,27 @@ class V3Core:
         for msg in messages:
             role = str(msg.get("role", ""))
             key, _reliable = _stable_message_key(msg)
+            # B01 (G4): 进程内 delta 游标必须按 host 作用域，否则同一
+            # native session/event 在不同宿主之间会互判重复。来源/QA
+            # 身份仍用裸 key —— host 由各自的身份空间承载。
+            cursor_key = key
+            _cursor_host = str(msg.get("host") or host or "").strip()
+            if cursor_key and _cursor_host and _cursor_host != _BC_LEGACY_HOST:
+                cursor_key = f"{_cursor_host}|{cursor_key}"
             if not key:
                 # No stable id and no fallback — skip silently to avoid
                 # silent acceptance of unknown deltas (I4).
                 continue
-            if key in prior_seen or key in processed_this_call:
+            if cursor_key in prior_seen or cursor_key in processed_this_call:
                 # Already accepted in a prior sync or earlier in this snapshot — historical replay
                 # within the same session must NOT re-enqueue (I3, I6).
                 # Also record in processed_this_call so a replay of this
                 # exact snapshot in the same call (rare) stays idempotent.
-                processed_this_call.add(key)
+                # B01: 这条事件的身份此前已被接受 → 对调用方就是 duplicate，
+                # 传输层据此说真话（而不是再报一次 accepted）。
+                _receipt["duplicate"].append(key)
+                _receipt["events"][key] = "duplicate"
+                processed_this_call.add(cursor_key)
                 continue
             # NON-LIVE-SYNC-BY-DESIGN: Hermes compression may inject a
             # synthetic user turn tagged ``_todo_snapshot_synthetic=True``
@@ -3530,7 +3614,7 @@ class V3Core:
             # [CONTEXT COMPACTION] prefix branch below.  Acknowledge it
             # as processed so it does not re-enter on every replay.
             if msg.get("_todo_snapshot_synthetic") is True:
-                processed_this_call.add(key)
+                processed_this_call.add(cursor_key)
                 continue
             # 跳过 tool 消息，只写 user/assistant
             if role in ("tool", "tool_call", "tool_result", "function"):
@@ -3545,12 +3629,12 @@ class V3Core:
                 # tool branches are NON-LIVE-SYNC-BY-DESIGN for the live
                 # buffer (tool context only feeds pending); still mark
                 # processed so re-sync is idempotent.
-                processed_this_call.add(key)
+                processed_this_call.add(cursor_key)
                 continue
             content = str(msg.get("content", ""))
             if not content:
                 # empty content — accept as processed (NON-LIVE-SYNC-BY-DESIGN)
-                processed_this_call.add(key)
+                processed_this_call.add(cursor_key)
                 continue
             # v4 fix: 真实注入前缀带前导时间戳+空格 (例如 "Sat 2026-04-11 01:15 GMT+8] [Subagent Context]"),
             # startswith 元组匹配会失败, 改用正则兼容多种前导格式 (ISO 日期 / GMT+8 / 时分秒 / 中文方括号)。
@@ -3572,12 +3656,12 @@ class V3Core:
                 r')'
             )
             if _injection_pattern.match(content):
-                processed_this_call.add(key)
+                processed_this_call.add(cursor_key)
                 continue
             # 兼容: 元组直接前缀也能匹配 (纯前缀无时间戳)
             _injection_prefixes_fallback = ("[IMPORTANT:", "[ASYNC DELEGATION", "[Subagent Context]", "[OUT-OF-BAND", "[CONTEXT COMPACTION")
             if content.startswith(_injection_prefixes_fallback):
-                processed_this_call.add(key)
+                processed_this_call.add(cursor_key)
                 continue
             # Source acceptance is complete for normal user/assistant messages.
             # Do not let provider limits delete raw experience or manufacture
@@ -3585,22 +3669,40 @@ class V3Core:
             # LiveBuffer identity must follow the canonical stable key,
             # not a content-derived surrogate that changes on compression.
             msg_id = key
+            _msg_ts = _parse_msg_timestamp(msg.get("timestamp"))
+            _msg_tools = msg.get("tool_calls") or []
+            _msg_tool_results = msg.get("tool_results") or msg.get("tool_result") or []
+            _msg_host = str(msg.get("host") or _call_host or "").strip()
+            _msg_item = (session_id, msg_id, content, role, session_turn,
+                         _msg_ts, _msg_tools, _msg_tool_results, _msg_host)
 
 
             # ── Phase v4: 就地 QA 配对 ──
             if role == "user":
-                _ok = self._enqueue_live_message(
+                _status = self._enqueue_live_message_status(
                     session_id, msg_id, content, role, session_turn,
-                    timestamp=_parse_msg_timestamp(msg.get("timestamp")),
-                    tool_calls=msg.get("tool_calls") or [],
-                    tool_results=msg.get("tool_results") or msg.get("tool_result") or [],
+                    timestamp=_msg_ts, tool_calls=_msg_tools,
+                    tool_results=_msg_tool_results, host=_msg_host,
+                    item=_msg_item,
                 )
-                if _ok is False:
+                _receipt["events"][msg_id] = _status
+                if _status == "rejected":
                     source_ingest_failed = True
+                    _receipt["ok"] = False
+                    _receipt["rejected"].append(msg_id)
                     # Do not flush or replace pending QA until source ingest accepts.
                     continue
+                if _status == "duplicate":
+                    # 源层已 durable: 不重复派生 QA —— 重启后重复的根治点.
+                    _receipt["duplicate"].append(msg_id)
+                    processed_this_call.add(cursor_key)
+                    continue
+                _receipt["accepted"].append(msg_id)
                 # 新 user 来了 → 上一回合结束, flush pending (若有)
                 if pending is not None and pending.get("q"):
+                    if not pending.get("a"):
+                        # 答案从未到达 → 记 incomplete(允许), 绝不配到别的 turn
+                        _receipt["incomplete"].append(pending.get("q_msg_id") or "")
                     try:
                         # 2026-08-02: 异步化 — 入队后台 worker (embedding 0.5-2s 不阻塞 turn 结束)
                         self._submit_flush(session_id, pending)
@@ -3633,28 +3735,54 @@ class V3Core:
                     "a": "",
                     "q_msg_id": msg_id,
                     "q_turn": session_turn,
+                    "q_event_turn": str(msg.get("turn_id") or ""),
+                    "host": _msg_host,
                     "q_ts": datetime.now(timezone.utc),
                     "tool_calls": [],
                     "tool_results": [],
                 }
+                try:
+                    _receipt["source_ids"][msg_id] = self._qa_source_id(
+                        session_id, session_turn, msg_id, host=_msg_host)
+                except Exception:
+                    pass
                 with self._qa_lock:
                     context.pending_qa = pending
-                processed_this_call.add(key)
+                processed_this_call.add(cursor_key)
                 continue
             elif role == "assistant":
-                _ok = self._enqueue_live_message(
+                _status = self._enqueue_live_message_status(
                     session_id, msg_id, content, role, session_turn,
-                    timestamp=_parse_msg_timestamp(msg.get("timestamp")),
-                    tool_calls=msg.get("tool_calls") or [],
-                    tool_results=msg.get("tool_results") or msg.get("tool_result") or [],
+                    timestamp=_msg_ts, tool_calls=_msg_tools,
+                    tool_results=_msg_tool_results, host=_msg_host,
+                    item=_msg_item,
                 )
-                if _ok is False:
+                _receipt["events"][msg_id] = _status
+                if _status == "rejected":
                     source_ingest_failed = True
+                    _receipt["ok"] = False
+                    _receipt["rejected"].append(msg_id)
                     # Do not mutate pending QA until source ingest accepts.
+                    continue
+                if _status == "duplicate":
+                    _receipt["duplicate"].append(msg_id)
+                    processed_this_call.add(cursor_key)
+                    continue
+                _receipt["accepted"].append(msg_id)
+                _pairing = _qa_pairing_decision(
+                    role="assistant",
+                    event_turn_id=msg.get("turn_id"),
+                    pending_turn_id=(pending or {}).get("q_event_turn") if isinstance(pending, dict) else None,
+                    pending_has_answer=bool((pending or {}).get("a")) if isinstance(pending, dict) else False,
+                )
+                if _pairing == "hold_orphan":
+                    # 乱序/跨 turn: 源层已收下, 但不猜配对 (宁可不派生)
+                    _receipt["held"].append(msg_id)
+                    processed_this_call.add(cursor_key)
                     continue
                 if pending is None:
                     # 没有 pending q → 跳过 (避免孤儿 answer)
-                    processed_this_call.add(key)
+                    processed_this_call.add(cursor_key)
                     continue
                 # 累加 a (可能有多个 assistant 段落, 用换行合并)
                 if pending["a"]:
@@ -3665,21 +3793,28 @@ class V3Core:
                 tc = msg.get("tool_calls") or []
                 if isinstance(tc, list) and tc:
                     pending["tool_calls"].extend(tc)
-                processed_this_call.add(key)
+                processed_this_call.add(cursor_key)
                 continue
             # 写 live_buffer (融合后: LiveBuffer 是唯一消息河写入路径 — conversation_stream)
-            _ok = self._enqueue_live_message(
+            _status = self._enqueue_live_message_status(
                 session_id, msg_id, content, role, session_turn,
-                timestamp=_parse_msg_timestamp(msg.get("timestamp")),
-                tool_calls=msg.get("tool_calls") or [],
-                tool_results=msg.get("tool_results") or msg.get("tool_result") or [],
+                timestamp=_msg_ts, tool_calls=_msg_tools,
+                tool_results=_msg_tool_results, host=_msg_host,
+                item=_msg_item,
             )
-            # truthful bool contract (B): explicit False => NOT accepted, retry
-            # next sync, do NOT mark processed.  None / Mock / legacy => accepted.
-            if _ok is False:
+            _receipt["events"][msg_id] = _status
+            # truthful contract: explicit rejected => NOT accepted, retry
+            # next sync, do NOT mark processed.  duplicate => already durable.
+            if _status == "rejected":
                 source_ingest_failed = True
+                _receipt["ok"] = False
+                _receipt["rejected"].append(msg_id)
                 continue
-            processed_this_call.add(key)
+            if _status == "duplicate":
+                _receipt["duplicate"].append(msg_id)
+            else:
+                _receipt["accepted"].append(msg_id)
+            processed_this_call.add(cursor_key)
         # End-of-snapshot cursor commit (A): ONLY now do we advance the
         # authoritative delta cursor.  Until this point, ``prior_seen``
         # is what the algorithm consults for "already accepted".
@@ -3757,6 +3892,9 @@ class V3Core:
                     maybe_observe(self._config, on_topics_commit=on_topics_commit)
         except Exception:
             pass  # 观察者触发失败不阻塞 sync_turn
+
+        # B01: 逐事件回执 — 传输层据此说真话
+        return _receipt
 
     def _submit_flush(self, session_id: str, pending: dict) -> bool:
         """异步提交 QA flush — durable first, then queue (fence-aware, truthful handoff).
@@ -3868,6 +4006,25 @@ class V3Core:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _qa_source_id(session_id: str, q_turn, q_msg_id: str, host: str = "") -> str:
+        """Durable derived-QA identity.
+
+        Legacy callers (no host) keep the historical template byte-for-byte,
+        so rows already in qa_pairs keep their identity.  An explicit host is
+        namespaced, so identical session/qa ids from two hosts cannot collide.
+        """
+        try:
+            from .bridge_contract import LEGACY_HOST
+        except Exception:  # pragma: no cover
+            LEGACY_HOST = "legacy"
+        host_key = str(host or "").strip()
+        if q_msg_id:
+            if host_key and host_key != LEGACY_HOST:
+                return f"qa_sync/{host_key}/{session_id}/{q_msg_id}"
+            return f"qa_sync/{session_id}/{q_turn}/{q_msg_id[:16]}"
+        return f"qa_sync/{session_id}/{q_turn}"
+
     def _flush_pending_qa(self, session_id: str, pending: dict) -> None:
         """把 pending 的 (q, a) 配对算 embedding + 写 qa_pairs -- fence-aware, durable ack"""
         # fence check before any remote work
@@ -3883,7 +4040,12 @@ class V3Core:
         # open q without answer is also durable but not flushed to PG yet? Spec says open q must be retained as marker.
         # For flush, we allow empty a as valid (existing write contract writes q with empty a)
         # So do not return if a empty; instead insert with a="" (worker will handle)
-        source_id = f"qa_sync/{session_id}/{q_turn}/{q_msg_id[:16]}" if q_msg_id else f"qa_sync/{session_id}/{q_turn}"
+        _pending_host = ""
+        try:
+            _pending_host = str((pending or {}).get("host") or "").strip()
+        except Exception:
+            _pending_host = ""
+        source_id = self._qa_source_id(session_id, q_turn, q_msg_id, host=_pending_host)
 
         parsed_q_ts = _parse_msg_timestamp(pending.get("q_ts"))
         if not isinstance(parsed_q_ts, datetime):

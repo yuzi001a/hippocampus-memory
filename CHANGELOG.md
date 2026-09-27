@@ -7,6 +7,50 @@
 
 ---
 
+## [Unreleased] — B01 minimal host contract (on `main`, no tag yet)
+
+> **Scope:** transport/identity only, for the DSH (B02) and pi (B03) host contract.
+> Not deployed to production; no schema change; no new model calls.
+
+### Fixed
+- **Post-restart duplicate QA (`EVENT_INGEST_CORRECTNESS_DEPENDS_ON_EPHEMERAL_PROCESS_STATE`).**
+  Derived QA identity embedded `q_turn = context.turn`, an in-process counter that resets on a
+  fresh Core, so a re-sent event after a restart produced a second `qa_pairs` row. Event
+  ingestion now reports a per-event status and an already-known identity (durable **or** pending)
+  is a `duplicate` for which QA derivation is skipped.
+- **`/events` could not report a failed write.** The endpoint always answered `{"ok": true}`
+  because `sync_turn` returned `None`. It now answers `accepted` / `duplicate` /
+  `retryable` / `failed` with `event_id`, `host` and (when known) `source_id`; a refused durable
+  write returns HTTP 503 with `ok=false` instead of pretending the event was remembered.
+- **Cross-host identity collision.** Identical native session/event ids coming from two hosts were
+  treated as one identity (in-process cursor and QA identity were host-blind). Identity is now
+  `(host, session_id, event_id)`; legacy callers keep the historical template byte-for-byte.
+- **Turn-blind pairing.** An answer arriving with a turn id that disagrees with the open question
+  used to be appended to it. Pairing now holds instead of guessing (the raw event is still kept).
+
+### Added
+- `v3core.bridge_contract` — single truth for event identity, ingest status semantics, ACK mapping
+  and `get_bridge_capabilities()` (bridge protocol `b01.1`), shared by HTTP `/health`,
+  MCP `v3_health`, the stdio startup handshake and the serve ready event.
+- `v3-core serve --port 0` now reports the **actually bound** port, and `--ready-json` prints one
+  deterministic ready event (host, real port, pid, protocol/core version, capabilities).
+  `SIGTERM` goes through the same graceful path as Ctrl-C (stop accepting → `core.shutdown()`).
+- Event payloads carry optional `host` / `project_id` / `agent_id` / `parent_event_id` /
+  `branch_id` provenance (G4 keeps identity available; X03 semantics are explicitly NOT claimed).
+
+### Changed
+- `msg_buffer` is bounded (32 sessions / 500 events per session / 6h idle TTL) and is documented as
+  a performance optimisation only — durable identity on disk is what makes ingestion correct.
+- `LiveBuffer` gained `event_status()` and a host-scoped accepted-tombstone path; `enqueue`'s
+  existing True/False/None contract is unchanged.
+
+### Known limitations (explicit)
+- The crash window where the source is durable but QA was never derived is skipped rather than
+  guessed (recovery path: the existing mapper backfill).
+- Outbox replay stays at-least-once for `conversation_stream` (see `docs/B01-FINDINGS.md` F2).
+- Packaged `hippocampus bootstrap` fails on a brand-new database (F1, not fixed here).
+- No cross-host concurrent shared memory, permission isolation or conflict resolution — that is X03.
+
 ## [0.2.2] — unified baseline (A01 + A02), production canary closed
 
 > **Scope of this entry:** the unified baseline (`integration/global-baseline-v1`) that
