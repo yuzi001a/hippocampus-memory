@@ -387,12 +387,34 @@ def _apply_pg_password_env(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def resolve_config(profile: str = "default",
+def _ambient_profile() -> str:
+    """The profile this process booted ("" when nothing is booted).
+
+    A bare ``resolve_config()`` must mean "the config this process is running
+    on", not the literal ``default`` profile: core-internal leaves (topic
+    recall, pools, embed helpers) are constructed by the booted core and have no
+    profile argument to pass. Resolving ``default`` there made a non-default
+    core read another profile's database — the B02 canary loaded 349 foreign
+    topics into its recall pool that way.
+    """
+    try:
+        from ._tool_scope import current_booted_profile
+
+        return current_booted_profile()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def resolve_config(profile: str | None = None,
                    *,
                    hermes_home: str = "",
                    return_legacy: bool = False
                    ) -> V3Config | dict[str, Any]:
     """Load config from YAML + env, return typed config.
+
+    ``profile=None`` (the default, i.e. a bare ``resolve_config()``) means the
+    **ambient** profile: whatever core this process booted, falling back to
+    ``default`` when nothing is booted. Pass an explicit name to pin one.
 
     Backward compat:
       - If ``return_legacy=True``, returns raw dict (the old shape) for any
@@ -410,6 +432,8 @@ def resolve_config(profile: str = "default",
 
     Returns ``V3Config`` instance.
     """
+    if profile is None:
+        profile = _ambient_profile() or "default"
     legacy = _load_legacy_dict(profile, hermes_home=hermes_home)
     if return_legacy:
         return legacy
