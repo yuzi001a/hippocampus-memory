@@ -33,7 +33,8 @@
     "src/v3-core/src/v3core/distribution_cli.py": "6f9e5f655c6bc86feafc12ea7f4529ea2aefdcb9be3f9f8c505f99fa025f802a",
     "src/v3-core/tests/test_alpha_bootstrap_contract.py": "b842e76857a4ae2fbe9a37070023c4ad2a6fe8f17569658e69fb2adcb77996e8",
     "src/v3-core/eval/fresh_bootstrap_e2e.py": "1d1c9b689bb2e853a1c44ab323a65f653f9059a9f5d1845cfa46fffa8857e3ce",
-    "src/v3-core/eval/f3_fresh_bootstrap_e2e.py": "b2c346e4c102d1559791805bae281854eb8d76845062342db375900bbb9d2cd2"
+    "src/v3-core/eval/f3_fresh_bootstrap_e2e.py": "b2c346e4c102d1559791805bae281854eb8d76845062342db375900bbb9d2cd2",
+    "src/v3-core/tests/test_distribution_packaging.py": "b39ae7f8f2b1b059c2e0519b89a7a6e08acec3a9448bbd020400692c0ced3812"
   },
   "results": {
     "red": {
@@ -211,5 +212,26 @@
     "adjacent-table audit"
   ],
   "synthetic_data": "single TimeoutError failure-writer fixture, not a provider failure or real media/user fact",
-  "raw_artifacts": "owner-controlled incident archive; private paths/hostname not published"
+  "raw_artifacts": "owner-controlled incident archive; private paths/hostname not published",
+  "ci_follow_up": {
+    "failed_head": "07e0a028299b8e58851988494dd0664fa3dcffac",
+    "product_ci": "SUCCESS on failed_head only",
+    "packaging_smoke": "FAILURE on failed_head; run36936264734",
+    "parent_reproduction": {
+      "failed": 2,
+      "deselected": 13
+    },
+    "cause": "Two existing assertions treated a normal explanatory SQL comment as an unexpanded include marker. Actual markers had been expanded.",
+    "fix": "Reject marker lines, not every mention of the marker name; require raw marker precondition.",
+    "local_packaging": {
+      "passed": 13,
+      "skipped": 2,
+      "skip_reasons": [
+        "current Hermes host absent in source-only venv",
+        "host plugin.yaml absent in source-only venv"
+      ]
+    },
+    "runtime_sql_package_data_diff_since_failed_head": 0,
+    "current_required_ci": "PENDING; old-head SUCCESS is not current-head SUCCESS"
+  }
 }

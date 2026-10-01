@@ -73,6 +73,16 @@ or unrelated bootstrap-table scan was performed.
   blocked oversized inline command. They were not product results. The blocked
   payload was reviewed and run through the tool's documented script recovery.
 
+## CI-only regression follow-up
+
+The first PR head's product-ci passed, but installed-package smoke failed in two
+existing tests: they rejected any occurrence of `ALPHA_BOOTSTRAP_INCLUDE`, including
+a harmless explanatory SQL comment. Parent reproduction: 2 failed / 13 deselected.
+The assertions now reject actual marker lines, with a raw-marker precondition;
+normal comments are allowed. Product/wheel bytes are unchanged. Local packaging
+file: 13 passed, 2 host-plugin skips; those two must execute in repository CI.
+The failed old-head CI is preserved, not counted as current acceptance.
+
 Sanitized evidence: `evidence/f3-fresh-bootstrap/parent-acceptance.json`.
 Raw reports, complete console output and invalid attempts remain in the
 owner-controlled incident archive. No production mutation or restart occurred.
