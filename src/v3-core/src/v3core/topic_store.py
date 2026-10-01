@@ -74,17 +74,68 @@ def _is_undefined_column_error(err: Exception) -> bool:
 # 默认 SQLite 路径 — 2026-08-08: 改走数据目录 (源码树禁止写运行时状态, P0 隔离修复)
 # 旧值: os.path.dirname(os.path.dirname(os.path.dirname(__file__))) / 'v3_topic.db' → 源码树
 # 生产/实验 bind 挂载共享源码树 → 状态文件必须放各自数据目录
+#
+# F2-A2 (2026-10-02): the old pair of lines was
+#
+#     def _default_db_path() -> str:
+#         try:
+#             from .config import _resolve_data_dir
+#             return str(_resolve_data_dir() / "v3_topic.db")
+#         except Exception:
+#             return os.path.join(<source tree>, "v3_topic.db")
+#     DEFAULT_DB = _default_db_path()
+#
+# which is unsafe twice over:
+#   * the bare ``except Exception`` swallowed any failure of the no-arg
+#     resolver and handed back a path INSIDE THE SOURCE TREE — a checkout
+#     shared by production and test binds, so runtime state landed wherever
+#     the fallback pointed;
+#   * ``DEFAULT_DB = _default_db_path()`` froze the mutable data root at
+#     module import. An isolated replay that set V3CORE_CONFIG *after* the
+#     import still got the ambient/profile path, which is how
+#     ``v3_topic.db`` ended up in the production profile.
+#
+# Now: no catch-all, and resolution is deferred to construction time. Failures
+# propagate — in particular the TEST-mode refusal (a SystemExit, see
+# config.TestModeConfigError) must not be turned back into a source-tree path.
 def _default_db_path() -> str:
-    try:
-        from .config import _resolve_data_dir
-        return str(_resolve_data_dir() / "v3_topic.db")
-    except Exception:
-        return os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            "v3_topic.db",
-        )
+    from .config import _resolve_data_dir
+    return str(_resolve_data_dir() / "v3_topic.db")
 
-DEFAULT_DB = _default_db_path()
+
+class _LazyDefaultDB:
+    """Re-resolving stand-in for the historical module-level ``DEFAULT_DB``.
+
+    It stays a module attribute (external code may import the name) and stays
+    string-like (callers pass it straight to ``sqlite3.connect``), but every
+    use re-runs :func:`_default_db_path`, so the value always reflects the
+    config that is valid *now* rather than the one that was valid at import.
+    """
+
+    __slots__ = ()
+
+    def __fspath__(self) -> str:
+        return _default_db_path()
+
+    def __str__(self) -> str:
+        return _default_db_path()
+
+    def __repr__(self) -> str:
+        try:
+            return f"<v3core.topic_store.DEFAULT_DB {self.__fspath__()!r}>"
+        except BaseException as exc:  # SystemExit refusal must stay visible
+            return f"<v3core.topic_store.DEFAULT_DB unresolved: {exc}>"
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, _LazyDefaultDB):
+            return True
+        return str(self) == other
+
+    def __hash__(self) -> int:
+        return hash(_default_db_path())
+
+
+DEFAULT_DB = _LazyDefaultDB()
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS topic_blocks (
@@ -150,13 +201,23 @@ CREATE INDEX IF NOT EXISTS idx_buffer_time ON topic_buffer(timestamp);
 
 
 class TopicStore:
-    def __init__(self, db_path: str = DEFAULT_DB, pg_conn=None, topics_table: str = "topics",
+    def __init__(self, db_path: str | None = None, pg_conn=None, topics_table: str = "topics",
                  *, strict_pg: bool = False):
-        self.db_path = db_path
+        # F2-A2: resolve the default HERE, not at import. An explicit path
+        # always wins; otherwise the no-arg resolver decides against the
+        # config that is valid right now and its refusal (TEST mode) escapes
+        # untouched instead of degrading to a source-tree path.
+        self.db_path = str(db_path) if db_path else _default_db_path()
+        if self.db_path == ":memory:":
+            parent = ""
+        else:
+            parent = os.path.dirname(self.db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self.pg_conn = pg_conn  # psycopg2 connection or None
         self.topics_table = topics_table  # PG 表名 (隔离回放用)
         self.strict_pg = bool(strict_pg)  # 严格 PG 双写事务: PG 失败 → SQLite rollback + 抛
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(self.db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=OFF")
         self._init_schema()

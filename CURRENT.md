@@ -1,6 +1,14 @@
 # Hippocampus — global development baseline (A01)
 
-Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2) / `B01 = DONE` (merged, PR #15) / `FRESH_DB_BOOTSTRAP_HOTFIX = DONE` (v0.2.3) / `B02 = DONE` (DSH SUPPORT LEVEL = TOOL, v0.2.8 — see the sections at the end)
+Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2) / `B01 = DONE` (merged, PR #15) / `FRESH_DB_BOOTSTRAP_HOTFIX = DONE` (v0.2.3) / `B02 = DONE` (DSH SUPPORT LEVEL = TOOL, v0.2.8 — see the sections at the end) / `F2 = ACCEPTANCE HOLD` (canonical source idempotency, uncommitted branch `fix/f2-canonical-source-identity`; production recovery PASS; full dedicated matrix and local closeout gates PASS; repository CI/merge pending)
+
+Overnight mainline (2026-10-02): F2 → F3 → B03. Full mission f2-05 W0–W4 PASS; W4 3/3 cycles; nine mandatory guards PASS; owned residuals and sentinel changes zero. Parent raw JSON readback and 338-file remote hash alignment verified. Local closeout gates passed; repository CI/commit/PR/merge pending. F2 remains HOLD until closeout. Historical failures/recovery retained in the owner-controlled incident archive.
+
+
+
+
+
+
 
 ## A01 — one integration baseline for all follow-on work
 
@@ -614,3 +622,28 @@ and `docs/KNOWN-LIMITATIONS.md` §1.7.
   succeeds in-process and through DSH. Unreproduced through the official client;
   recorded as an open anomaly with evidence paths under
   `workspace/dsh-b02-canary/sp*_child.stderr.txt`.
+
+---
+
+## F2 — canonical source idempotency (ACCEPTANCE HOLD)
+
+The current tracked harness is `src/v3-core/eval/f2_source_idempotency_e2e.py`.
+Latest valid matrix: f2-05, dedicated Windows laptop; W0–W4 PASS, W4 three
+cycles, one canonical source row per identity, no duplicate QA, transport
+converged. All nine required guards PASS; production sentinel changed=0,
+owned residuals=0; provider calls=0 (record-only).
+
+Frozen candidate: 338 files, ZIP SHA256
+`0ea0937c80bdd2e104cc9667d59b0ac72062f6ed40c1cb2a3f26b52566abbe6f`.
+Parent raw readback verified the real W2 torn-marker state and all three W4
+HTTP recovery ACKs. Real-PG focused gate: 242 passed, zero failures/skips. Parent CI-shaped gate:
+428 core passed / 5 intentional real-PG skips (covered on the laptop),
+102 evaluator passed, 12 plugin passed, compileall and diff-check PASS.
+Parent post-exit scan: no residuals, no frozen-byte drift, config absent.
+Repository CI / commit / PR / merge remain pending. No production install,
+restart or destructive test was performed in this development run. Historical
+isolation incidents were preserved and recovered separately; they are not
+rewritten into a claim that the earlier investigation had no production contact.
+
+Details: `docs/F2-SOURCE-IDEMPOTENCY.md`.
+Next after F2 acceptance/merge: F3 fresh bootstrap, then B03 pi adapter.

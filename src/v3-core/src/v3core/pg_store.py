@@ -344,10 +344,28 @@ class PgEmbedStore:
 
           ``timestamp is None`` keeps the legacy INSERT shape (no dedupe
           predicate), preserving the existing batch path.
+
+        F2 canonical source identity (2026-09-28, Candidate A):
+          when ``metadata`` carries a COMPLETE identity tuple
+          (host, session_id, event_id — ``msg_id`` accepted as the
+          event_id alias; empty host normalises to ``'legacy'``), the
+          INSERT takes the atomic path
+            ``INSERT ... ON CONFLICT (host, session_id, event_id)
+               WHERE <partial-index predicate> DO NOTHING RETURNING id``
+          enforced by the partial unique index
+          ``conversation_stream_host_session_event_uniq``.  No
+          SELECT-then-INSERT race: concurrent writers of the same
+          identity collapse to one row.  A conflict (duplicate) is a
+          durable no-op, committed, and reported as ``False``; a fresh
+          insert reports ``True``.  Callers that ignore the return value
+          (e.g. LiveBuffer._flush, which acks on no-exception) are
+          unaffected.  Incomplete identity (missing event_id/session_id)
+          keeps the exact legacy shapes below, so historic callers and
+          NULL-identity rows are untouched.
         """
         with self.lease() as conn:
             if not conn:
-                return
+                return None
             cur = conn.cursor()
             emb_str = None
             if embedding:
@@ -358,6 +376,16 @@ class PgEmbedStore:
             turn_id = metadata.get("turn_id")
             tc_json = json.dumps(metadata.get("tool_calls") or [])
             tr_json = json.dumps(metadata.get("tool_results") or [])
+            # F2 identity normalisation (additive; legacy callers unaffected).
+            _host = str(metadata.get("host") or "").strip() or "legacy"
+            _event = str(metadata.get("event_id") or metadata.get("msg_id") or "").strip()
+            if _host and session_id and _event:
+                _inserted = self._insert_message_with_identity(
+                    cur, session_id, role, content, turn_id,
+                    metadata.get("timestamp"), tc_json, tr_json,
+                    emb_str, _host, _event)
+                conn.commit()
+                return _inserted
             # Normalize all supported input forms before binding to timestamptz.
             ts_value = _normalize_timestamp(metadata.get("timestamp"))
             # 2026-09-07 (D): decide whether timestamp is "real" (not the
@@ -420,6 +448,170 @@ class PgEmbedStore:
                                 %s::jsonb, %s::jsonb)
                     """, (session_id, role, content, turn_id, ts_value, tc_json, tr_json))
             conn.commit()
+
+    _F2_IDENTITY_CONFLICT_PREDICATE = (
+        "host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL"
+    )
+
+    #: Columns only the F2 identity INSERT names. A missing *any other* column
+    #: is a genuine error and must not be mistaken for "pre-F2 schema".
+    _F2_IDENTITY_COLUMNS = ("host", "event_id")
+
+    #: SQLSTATEs that mean "this install has no F2 identity support yet":
+    #:   42703 undefined_column        — host / event_id do not exist
+    #:   42P10 invalid_column_reference — ON CONFLICT has no matching unique
+    #:                                    index (the partial arbiter is absent)
+    _F2_PRESCHEMA_SQLSTATES = frozenset({"42703", "42P10"})
+
+    def _is_f2_preschema_error(self, err: Exception) -> bool:
+        """True only for "no F2 identity columns / no arbiter index" errors.
+
+        The previous predicate was ``"does not exist" in msg and (... or
+        "column" in msg)``, which matched *any* missing column and silently
+        degraded unrelated failures into a legacy insert. The 42P10 case (the
+        arbiter index simply not being created) was not matched at all, so the
+        fallback never ran and the source row was lost with an exception.
+
+        Detection is by SQLSTATE, not by string matching, with a narrow textual
+        fallback for drivers/doubles that carry no SQLSTATE. Neither branch
+        logs the statement or its parameters.
+        """
+        sqlstate = getattr(err, "sqlstate", None) or ""
+        diag = getattr(err, "diag", None)
+        if not sqlstate and diag is not None:
+            sqlstate = getattr(diag, "sqlstate", None) or ""
+        if not sqlstate:
+            pgcode = getattr(type(err), "pgcode", None)
+            sqlstate = pgcode if isinstance(pgcode, str) else ""
+        text = str(err).lower()
+        mentions_index = "conversation_stream_host_session_event_uniq" in text
+        if sqlstate in self._F2_PRESCHEMA_SQLSTATES:
+            if sqlstate == "42P10" or mentions_index:
+                return True
+            # 42703: only the identity columns justify the legacy shape
+            return any(f'"{col}"' in text for col in self._F2_IDENTITY_COLUMNS)
+        # No usable SQLSTATE: accept only an unambiguous, F2-specific message.
+        if "does not exist" in text and mentions_index:
+            return True
+        if "does not exist" in text and "column" in text and any(
+                f'"{col}"' in text for col in self._F2_IDENTITY_COLUMNS):
+            return True
+        return False
+
+    def _insert_message_with_identity(self, cur, session_id: str, role: str,
+                                      content: str, turn_id,
+                                      timestamp, tc_json: str, tr_json: str,
+                                      emb_str: str | None,
+                                      host: str, event_id: str) -> bool:
+        """Atomic insert-if-absent for one canonical (host, session, event).
+
+        Returns True when the row was freshly inserted, False when the
+        identity already existed (duplicate no-op).  Never SELECTs first:
+        the partial unique index arbiter makes concurrent writers collapse
+        to a single row.
+
+        Old-schema tolerance: an install that has not run the F2 upgrade has
+        neither the identity columns nor the partial arbiter index. The
+        identity INSERT then fails and the LEGACY shape is used so the source
+        row is still preserved — but only after ROLLBACK. An error in
+        PostgreSQL aborts the transaction, so running the fallback on the
+        aborted cursor raised 25P02 ("current transaction is aborted") and
+        the source row was lost, i.e. the tolerance defeated its own purpose.
+
+        On the old schema the *idempotency* guarantee is unavailable: there is
+        no arbiter, so a repeated (host, session, event) inserts a second row.
+        The fallback's contract is "do not lose the source", not "be
+        idempotent"; the upgrade restores both. Callers that need the
+        canonical guarantee must require the F2 schema.
+
+        Only :meth:`_is_f2_preschema_error` justifies the fallback; anything
+        else re-raises with the transaction left to the caller's lease.
+        """
+        ts_value = _normalize_timestamp(timestamp)
+        if emb_str:
+            _stmt = """
+                        INSERT INTO conversation_stream
+                            (session_id, role, content, trigger, turn_id, timestamp, source,
+                             embedding, tool_calls, tool_results, host, event_id)
+                        VALUES (%s, %s, %s, 'live_buffer', %s,
+                                COALESCE(%s::timestamptz, NOW()), 'live_buffer',
+                                %s::vector, %s::jsonb, %s::jsonb, %s, %s)
+                        ON CONFLICT (host, session_id, event_id)
+                        WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL
+                        DO NOTHING RETURNING id
+                    """
+            _params = (session_id, role, content, turn_id, ts_value,
+                       emb_str, tc_json, tr_json, host, event_id)
+        else:
+            _stmt = """
+                        INSERT INTO conversation_stream
+                            (session_id, role, content, trigger, turn_id, timestamp, source,
+                             tool_calls, tool_results, host, event_id)
+                        VALUES (%s, %s, %s, 'live_buffer', %s,
+                                COALESCE(%s::timestamptz, NOW()), 'live_buffer',
+                                %s::jsonb, %s::jsonb, %s, %s)
+                        ON CONFLICT (host, session_id, event_id)
+                        WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL
+                        DO NOTHING RETURNING id
+                    """
+            _params = (session_id, role, content, turn_id, ts_value,
+                       tc_json, tr_json, host, event_id)
+        try:
+            cur.execute(_stmt, _params)
+        except Exception as _e:
+            # Old-schema tolerance (mirrors the embed_model fallback style):
+            # an install that has not run the F2 upgrade has no host/event_id
+            # columns or partial index.  Fall back to the legacy shape so the
+            # source row is still preserved; the upgrade restores the full
+            # atomic guarantee.  Anything else re-raises.
+            if not self._is_f2_preschema_error(_e):
+                raise
+            # The failed statement left the transaction aborted — without this
+            # the legacy INSERT below fails with 25P02 and the source row is
+            # lost.  Roll back first, then re-insert.  Only the error is
+            # logged: never the statement and never the bound params (they
+            # carry user content).
+            conn = getattr(cur, "connection", None)
+            if conn is None:
+                raise
+            logger.warning(
+                "insert_message identity fallback (pre-F2 schema): %s "
+                "— source row preserved, canonical idempotency UNAVAILABLE "
+                "until the F2 upgrade is applied",
+                _safe_err(_e)[:160])
+            try:
+                conn.rollback()
+            except Exception as _rb:
+                raise RuntimeError(
+                    "cannot roll back after the pre-F2 identity fallback was "
+                    f"required; the source row was NOT written: {_safe_err(_rb)}"
+                ) from _e
+            if emb_str:
+                cur.execute("""
+                    INSERT INTO conversation_stream
+                        (session_id, role, content, trigger, turn_id, timestamp, source,
+                         embedding, tool_calls, tool_results)
+                    VALUES (%s, %s, %s, 'live_buffer', %s,
+                            COALESCE(%s::timestamptz, NOW()), 'live_buffer',
+                            %s::vector, %s::jsonb, %s::jsonb)
+                """, (session_id, role, content, turn_id, ts_value,
+                      emb_str, tc_json, tr_json))
+            else:
+                cur.execute("""
+                    INSERT INTO conversation_stream
+                        (session_id, role, content, trigger, turn_id, timestamp, source,
+                         tool_calls, tool_results)
+                    VALUES (%s, %s, %s, 'live_buffer', %s,
+                            COALESCE(%s::timestamptz, NOW()), 'live_buffer',
+                            %s::jsonb, %s::jsonb)
+                """, (session_id, role, content, turn_id, ts_value,
+                      tc_json, tr_json))
+            return True
+        try:
+            _row = cur.fetchone()
+        except Exception:
+            _row = None
+        return _row is not None
 
     def _fire_topics_commit(self, on_topics_commit=None) -> None:
         cb = on_topics_commit

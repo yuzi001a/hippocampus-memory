@@ -324,9 +324,23 @@ class LiveBuffer:
             if path.exists():
                 return True
             payload = {"version": 1, "session_id": session_id,
-                       "msg_id": msg_id, "accepted": True}
+                       "msg_id": msg_id, "accepted": True,
+                       # F2: keep the host scope on the tombstone so the
+                       # identity it guards stays readable (existence of the
+                       # file is still the only signal readers rely on).
+                       "host": str(host or "")}
             with self._durability_lock:
-                dirp.mkdir(parents=True, exist_ok=True)
+                # F2-D: mkdir the directory the FILE actually lands in. A real
+                # host resolves to ``accepted_live_buffer/<host>/<ident>.json``,
+                # so ``tmp`` — a sibling of ``path`` — is written inside the host
+                # namespace folder, not inside ``dirp``. Creating only the root
+                # left the namespace missing and ``open(tmp, "w")`` raised
+                # FileNotFoundError, which this method's own ``except`` turned
+                # into a bare False: the accepted tombstone never appeared AND
+                # ``_ack_live_item`` therefore never unlinked the pending marker.
+                # ``parents=True`` still creates ``dirp`` itself, so the
+                # directory fsync below keeps a directory that always exists.
+                path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
                 with open(tmp, "w", encoding="utf-8") as f:
                     f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
@@ -364,7 +378,7 @@ class LiveBuffer:
             except Exception:
                 pass
             item = (session_id, msg_id, content, role, turn_id, timestamp,
-                    tool_calls, tool_results)
+                    tool_calls, tool_results, str(host or ""))
             job_id = self._live_job_id(item)
             with self._pending_jobs_lock:
                 if job_id in self._pending_jobs:
@@ -410,6 +424,11 @@ class LiveBuffer:
                 "job_id": job_id,
                 "session_id": item[0] if len(item)>0 else "",
                 "msg_id": item[1] if len(item)>1 else "",
+                # F2: host is part of the canonical (host, session, event)
+                # identity and must survive a process restart (contract §2).
+                # msg_id is the event_id (legacy alias); both are kept so
+                # the recovery reader rebuilds the full 9-tuple.
+                "host": str(item[8]) if len(item) > 8 and item[8] else "",
                 "content": item[2] if len(item)>2 else "",
                 "role": item[3] if len(item)>3 else "",
                 "turn_id": item[4] if len(item)>4 else "",
@@ -494,7 +513,12 @@ class LiveBuffer:
                             ts = None
                     tc = data.get("tool_calls")
                     tr = data.get("tool_results")
-                    item = (session_id, msg_id, content, role, turn_id, ts, tc, tr)
+                    # F2: restore the host carried in the durable payload so
+                    # the replayed item keeps its canonical identity (the
+                    # 9-tuple slot 8).  Pre-F2 payloads have no host key and
+                    # recover as "" (legacy namespace), as before.
+                    host = str(data.get("host") or "")
+                    item = (session_id, msg_id, content, role, turn_id, ts, tc, tr, host)
                     # 2026-09-07 (C): register the recovered job into the
                     # in-process pending set so the same LiveBuffer
                     # instance does not double-enqueue it.  The durable
@@ -859,6 +883,14 @@ class LiveBuffer:
                 metadata["tool_calls"] = tool_calls
             if tool_results:
                 metadata["tool_results"] = tool_results
+            # F2: carry the canonical (host, session, event) identity to the
+            # source row so the PG partial unique index can enforce
+            # insert-if-absent atomically (msg_id is the event_id).
+            _flush_host = str(item[8]).strip() if len(item) > 8 and item[8] else ""
+            if _flush_host:
+                metadata["host"] = _flush_host
+            if msg_id:
+                metadata["event_id"] = msg_id
             # check fence before PG lease
             if getattr(self, '_fenced', False) or getattr(self, '_closed', False):
                 break

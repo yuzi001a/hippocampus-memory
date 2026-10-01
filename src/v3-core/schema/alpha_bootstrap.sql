@@ -169,6 +169,19 @@ CREATE INDEX IF NOT EXISTS conversation_stream_embedding_ivfflat
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
+-- F2 canonical source identity (additive only, 2026-09-28):
+-- nullable host/event_id plus a partial unique index over complete
+-- identity tuples. Historic rows (NULL) are untouched and unconstrained;
+-- no backfill, no rewrite. Fresh bootstrap and the v0.2 upgrade path
+-- carry the same DDL so both install shapes converge.
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS host TEXT;
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS event_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS conversation_stream_host_session_event_uniq
+    ON public.conversation_stream (host, session_id, event_id)
+    WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL;
+
 -- -----------------------------------------------------------------------------
 -- topics — observer topic card (replaces the archived v3_cards). Evidence:
 -- pg_store.insert_card INSERT (topic_id, title, summary, body, keywords,
