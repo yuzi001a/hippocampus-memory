@@ -14,6 +14,7 @@ import os
 import logging
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,266 @@ __all__ = [
     "validate_config",
     "from_legacy_dict",
     "_resolve_data_dir",
+    "TEST_MODE_ENV_VAR",
+    "TestModeConfigError",
+    "TEST_MODE_WORKER_EXIT_CODE",
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# F2-A1/A2 — explicit TEST mode (opt-in, fail-closed)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Why this exists. The isolated replay harness passed a test DSN and expected
+# an isolated data root, but every resolver still had its production
+# fallbacks live:
+#
+#   * ``_find_config()`` fell through to ``~/.v3-core/profiles/<p>/config.yaml``
+#     and then the global ``~/.v3-core/config.yaml`` when ``V3CORE_CONFIG``
+#     pointed at a file that no longer existed;
+#   * ``_find_env()`` scanned ``~/.v3-core/.env`` and ``~/.hermes/.env``, so a
+#     test process silently imported production PG/API secrets;
+#   * ``_resolve_data_dir()`` with no argument returned
+#     ``~/.v3-core/profiles/default`` — so ``topic_store`` wrote
+#     ``v3_topic.db`` into the production profile.
+#
+# Setting ``V3CORE_TEST_MODE=1`` narrows ALL of that to exactly one source: the
+# explicit, existing, readable YAML named by ``V3CORE_CONFIG``. Anything
+# missing or invalid is a refusal, not a fallback.
+#
+# Contract:
+#   1. opt-in only — with the flag unset, every historical behaviour is intact;
+#   2. re-validated on EVERY call, never cached, so a config that was fine and
+#      is then deleted still refuses (this is T1's actual sequence);
+#   3. the refusal is a ``SystemExit`` subclass and deliberately NOT an
+#      ``Exception``: ``serve()`` (:func:`v3core.serve.serve`) wraps core
+#      construction in ``except Exception`` + ``sys.exit(1)``, and so do the
+#      CLI and E1 paths. An Exception subclass would be swallowed there and the
+#      process would keep going on the production profile — the exact defect
+#      this flag exists to close;
+#   4. validation happens before any production directory is read or created;
+#   5. off the main thread, ``SystemExit`` alone is NOT enough: ``threading``
+#      only unwinds the thread that raised, so a writer / HTTP worker that
+#      loses its config would die silently while ``serve()`` kept its socket
+#      open and a half-configured process kept running. A TEST-mode refusal
+#      created off the main thread therefore terminates the whole isolated
+#      process with :data:`TEST_MODE_WORKER_EXIT_CODE` instead of returning an
+#      exception. Scoped to TEST mode by construction: every ``_refuse`` call
+#      site sits inside a ``_test_mode_requested()`` branch, and production mode
+#      never reaches this function at all.
+TEST_MODE_ENV_VAR = "V3CORE_TEST_MODE"
+
+#: Leading text of every refusal. Tests and the harness match on it.
+TEST_MODE_REFUSAL_PREFIX = "V3CORE_TEST_MODE fail-closed"
+
+#: Exit code used when a TEST-mode refusal is created off the main thread.
+#: EX_SOFTWARE. Deliberately distinct from the F2 harness verdict codes
+#: (0 accepted / 1 rejected / 2 no-evidence / 3 partial) and from the child
+#: startup-refusal code 97, so a harness reading a child's rc tells "this
+#: isolated process was torn down by a mid-run config loss" apart from both
+#: "the child refused to boot" and "the run was rejected".
+TEST_MODE_WORKER_EXIT_CODE = 70
+
+#: Exit code used when a TEST-mode refusal is created off the main thread.
+#: EX_SOFTWARE. Deliberately distinct from the F2 harness verdict codes
+#: (0 accepted / 1 rejected / 2 no-evidence / 3 partial) and from the child
+#: startup-refusal code 97, so a harness reading a child's rc tells "this
+#: isolated process was torn down by a mid-run config loss" apart from both
+#: "the child refused to boot" and "the run was rejected".
+TEST_MODE_WORKER_EXIT_CODE = 70
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "no", "off", ""})
+
+
+class TestModeConfigError(SystemExit):
+    """Fail-closed refusal raised by every TEST-mode resolver.
+
+    Subclasses ``SystemExit`` and NOT ``Exception`` on purpose: see the module
+    comment. ``reason`` carries the same text as the exit message, so a caller
+    that catches ``BaseException`` can report it without re-parsing.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _sanitize_refusal_detail(detail: str, limit: int = 300) -> str:
+    """One-line, length-bounded form of a refusal detail, for the critical log.
+
+    Refusal details embed filesystem paths and parser text. The critical line
+    is the last thing a torn-down worker leaves behind, so it is collapsed to a
+    single line and truncated. No secret reaches it: the refusals built here
+    quote paths and exception strings only, never config values.
+    """
+    flat = " ".join(str(detail).split())
+    if len(flat) > limit:
+        flat = flat[:limit] + "…"
+    return flat
+
+
+def _terminate_test_process_off_thread(reason: str) -> None:
+    """Announce an off-main-thread TEST refusal, then kill the whole process.
+
+    ``os._exit`` skips atexit hooks and interpreter shutdown, so the critical
+    line is emitted to the logger and to stderr and flushed first — otherwise
+    the evidence of the refusal would die with the process.
+    """
+    message = (
+        f"{TEST_MODE_REFUSAL_PREFIX}: off-main-thread TEST refusal in thread "
+        f"{threading.current_thread().name!r} — the isolated process is no longer "
+        f"configured and is being terminated with code "
+        f"{TEST_MODE_WORKER_EXIT_CODE} (refusing to keep serving). {reason}"
+    )
+    try:
+        logger = logging.getLogger("v3core.config")
+        logger.critical(message)
+        for handler in (*logger.handlers, *logging.getLogger().handlers):
+            try:
+                handler.flush()
+            except Exception:  # noqa: BLE001 — a broken handler must not block
+                pass
+    except Exception:  # noqa: BLE001 — logging must never block the teardown
+        pass
+    try:
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001
+        pass
+    os._exit(TEST_MODE_WORKER_EXIT_CODE)
+
+
+def _refuse(detail: str) -> "TestModeConfigError":
+    """Build (do not raise) a refusal so callers can attach their own context.
+
+    TEST mode only — every caller sits inside a ``_test_mode_requested()``
+    branch, so production never constructs a refusal and never reaches the
+    process-exit path below.
+
+    On the main thread this returns the exception unchanged, so the existing
+    startup refusal (CLI / ``serve()`` / harness provenance collection, all of
+    which report the message) behaves exactly as before. Off the main thread a
+    returned exception is not a refusal at all: ``threading`` unwinds only the
+    raising thread, so a writer or HTTP worker would vanish silently while
+    ``serve()`` kept its socket open. There the whole isolated process is torn
+    down instead, which is the only outcome that satisfies T1's HARD FAIL for
+    a mid-run config loss.
+    """
+    reason = f"{TEST_MODE_REFUSAL_PREFIX}: {detail}"
+    if threading.current_thread() is not threading.main_thread():
+        _terminate_test_process_off_thread(_sanitize_refusal_detail(reason))
+    return TestModeConfigError(reason)
+
+
+def _test_mode_requested() -> bool:
+    """True only for an explicit, recognised opt-in value.
+
+    An unrecognised value (e.g. ``V3CORE_TEST_MODE=maybe``) is treated as NOT
+    requested rather than guessing — production keeps its normal behaviour and
+    a typo can never be mistaken for a test.
+    """
+    raw = (os.environ.get(TEST_MODE_ENV_VAR) or "").strip().lower()
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSY:
+        return False
+    logger = logging.getLogger("v3core.config")
+    logger.warning(
+        "%s=%r is not a recognised value (%s / %s) — treating TEST mode as OFF",
+        TEST_MODE_ENV_VAR, raw, sorted(_TRUTHY), sorted(_FALSY))
+    return False
+
+
+def _test_config_path() -> Path:
+    """The one and only config path in TEST mode — validated, not resolved.
+
+    Existence, file-ness and readability are checked on every call. Returning a
+    cached path after it was deleted is precisely the T1 bug, so there is no
+    memoisation anywhere on this route.
+    """
+    raw = (os.environ.get("V3CORE_CONFIG") or "").strip()
+    if not raw:
+        raise _refuse(
+            "V3CORE_CONFIG is not set. TEST mode requires an explicit config; "
+            "there is no default-profile fallback. Unset V3CORE_TEST_MODE to "
+            "run in production mode."
+        )
+    path = Path(raw)
+    if not path.exists():
+        raise _refuse(
+            f"explicit V3CORE_CONFIG does not exist: {path}. "
+            f"Refusing to fall back to any ambient or default config."
+        )
+    if not path.is_file():
+        raise _refuse(f"explicit V3CORE_CONFIG is not a readable file: {path}")
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError as exc:
+        raise _refuse(
+            f"explicit V3CORE_CONFIG is not readable: {path} ({exc.strerror or exc})"
+        ) from None
+    return path
+
+
+def _read_config_mapping(path: Path) -> dict:
+    """Parse a config file into a mapping, refusing on anything else."""
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - PyYAML is a hard dependency
+        raise _refuse(f"PyYAML unavailable, cannot validate {path}: {exc}") from None
+    try:
+        # utf-8-sig: Windows editors write a BOM, which would otherwise make
+        # the first key parse as '\\ufeffbasePath'.
+        with open(path, encoding="utf-8-sig") as handle:
+            doc = yaml.safe_load(handle)
+    except OSError as exc:
+        raise _refuse(
+            f"explicit V3CORE_CONFIG could not be read: {path} "
+            f"({exc.strerror or exc})"
+        ) from None
+    except yaml.YAMLError as exc:
+        raise _refuse(f"explicit V3CORE_CONFIG is not valid YAML: {path} ({exc})") from None
+    if doc is None:
+        raise _refuse(f"explicit V3CORE_CONFIG is empty: {path}")
+    if not isinstance(doc, dict):
+        raise _refuse(
+            f"explicit V3CORE_CONFIG must be a YAML mapping, got "
+            f"{type(doc).__name__}: {path}"
+        )
+    return doc
+
+
+def _test_base_path(path: Path) -> Path:
+    """The validated ``basePath`` of the explicit TEST-mode config."""
+    doc = _read_config_mapping(path)
+    raw = doc.get("basePath") or doc.get("base_path") or ""
+    if not isinstance(raw, str) or not raw.strip():
+        raise _refuse(
+            f"explicit V3CORE_CONFIG declares no usable basePath: {path}. "
+            f"TEST mode has no default data root."
+        )
+    return Path(_normalize_base_path(raw.strip()))
+
+
+def _validated_test_root() -> Path:
+    """Validate the explicit TEST-mode config and return its data root.
+
+    This is the single entry point every TEST-mode resolver calls. It reads
+    nothing outside the explicit config, creates nothing, and refuses rather
+    than degrading to any ambient value.
+    """
+    return _test_base_path(_test_config_path())
+
+
+def _config_base_path(config) -> str | None:
+    """``basePath`` / ``base_path`` of a V3Config | dict | None."""
+    if config is None:
+        return None
+    if isinstance(config, dict):
+        return config.get("basePath", "") or config.get("base_path", "") or None
+    return getattr(config, "base_path", "") or None
 
 
 def _resolve_data_dir(config=None) -> Path:
@@ -35,20 +295,31 @@ def _resolve_data_dir(config=None) -> Path:
     Accepts V3Config / dict / None. 与 handbook._resolve_handbook_dir 同一模式.
 
     B02: 当调用方没传 config 时，取本次工具调用绑定的 booted profile
-    (tools._scope)；未绑定（CLI/后台管线）时保持历史 default 语义。
+    (tools._scope)；未绑定（CLI/后台管线）时保持历史 default 语义.
+
+    F2-A2: under ``V3CORE_TEST_MODE`` this is fail-closed. The root always
+    comes from the validated explicit config, a config object that disagrees
+    with it is refused, and there is no default-profile fallback at all — the
+    production fallback below is unreachable while the flag is on.
     """
+    if _test_mode_requested():
+        root = _validated_test_root()
+        supplied = _config_base_path(config)
+        if supplied:
+            if Path(_normalize_base_path(str(supplied).strip())) != root:
+                raise _refuse(
+                    f"supplied config points at {supplied} but the explicit "
+                    f"V3CORE_CONFIG declares {root}. A caller-supplied config "
+                    f"may not re-route the isolated data root."
+                )
+        return root
     if config is None:
         try:
             from ._tool_scope import current_scope
             config = current_scope()
         except Exception:
             config = None
-    base_path = None
-    if config is not None:
-        if isinstance(config, dict):
-            base_path = config.get("basePath", "") or config.get("base_path", "") or None
-        else:
-            base_path = getattr(config, "base_path", "") or None
+    base_path = _config_base_path(config)
     if base_path:
         return Path(base_path)
     return Path.home() / ".v3-core" / "profiles" / "default"
@@ -187,7 +458,15 @@ def _find_config(profile: str = "default", hermes_home: str = "") -> Path | None
     在 MCP 子进程里解析不到: 工具面照常列出 13 个工具, 第一次调用才失败 (静默半安装)。
     把 HERMES_HOME 作为环境默认后, 进程内所有 resolver 只有一份 effective config 真值。
     老路径仍优先, 既有安装零变化。
+
+    F2-A1: under ``V3CORE_TEST_MODE`` the candidate list collapses to the one
+    explicit ``V3CORE_CONFIG`` file, re-validated on every call (so a deleted
+    config refuses instead of falling through to the home profile) and
+    independent of ``profile`` / ``HERMES_HOME``. A test that lost its config
+    must not silently boot on production.
     """
+    if _test_mode_requested():
+        return _test_config_path()
     if not hermes_home:
         hermes_home = os.environ.get("HERMES_HOME", "") or ""
     candidates = [
@@ -218,12 +497,27 @@ def _find_env() -> Path | None:
     3. ~/.v3-core/.env (当前主机)
     4. ~/.hermes/.env (hermes 共享)
     5. WSL: /mnt/c/Users/<user>/.v3-core/.env
+
+    F2-A1: under ``V3CORE_TEST_MODE`` candidates 2-5 are removed, not merely
+    deprioritised. ``_load_legacy_dict`` ``setdefault``s every key it finds
+    into ``os.environ``, so a single ambient hit imports production
+    ``V3CORE_PG_PASSWORD`` / provider keys into the test process — the test
+    would then talk to production with a production credential it never
+    declared. An explicit ``V3CORE_DOTENV`` is the only admitted source, and
+    it must exist (a dangling value is a refusal, not a silent "no dotenv").
     """
     explicit = os.environ.get("V3CORE_DOTENV", "")
     if explicit:
         p = Path(explicit)
         if p.exists():
             return p
+        if _test_mode_requested():
+            raise _refuse(
+                f"explicit V3CORE_DOTENV does not exist: {p}. "
+                f"TEST mode will not fall back to an ambient .env file."
+            )
+    if _test_mode_requested():
+        return None
     v3home = os.environ.get("V3CORE_HOME", "")
     if v3home:
         p = Path(v3home) / ".env"
@@ -291,7 +585,14 @@ def _load_legacy_dict(profile: str = "default", hermes_home: str = "") -> dict[s
 
     hermes_home 契约: 老路径存在时继续用老路径 (本机生产零变化), 只有全新安装
     (老路径不存在) 时才用 hermes_home/.v3-core/profiles/<profile>/. 透传给 _find_config.
+
+    F2-A1: under ``V3CORE_TEST_MODE`` an unparseable explicit config is a
+    refusal rather than the ``logger.warning`` + defaults path — silently
+    continuing here is what let a test boot with an empty ``basePath`` and
+    then fall through to the production data root.
     """
+    if _test_mode_requested():
+        _validated_test_root()  # refuse before touching anything else
     cfg = _deep_copy_dict(_LEGACY_DEFAULT_CONFIG)
 
     env_path = _find_env()
@@ -316,19 +617,26 @@ def _load_legacy_dict(profile: str = "default", hermes_home: str = "") -> dict[s
             for k, v in _load_env_file(_profile_env_path).items():
                 os.environ.setdefault(k, v)
     if config_path:
-        try:
-            import yaml
-            # 2026-08-26 P0 编码契约: config.yaml 必须用 utf-8-sig 读 —
-            # Windows 记事本保存后带 BOM, 裸 utf-8 会让 yaml 首键变成 '\ufeffbasePath'
-            # 直接解析错位 (用户用记事本改一次配置就炸)。无 BOM 时 sig 模式完全透明。
-            with open(config_path, encoding="utf-8-sig") as f:
-                yaml_cfg = yaml.safe_load(f)
-            if yaml_cfg:
-                _deep_merge(cfg, yaml_cfg)
-        except ImportError:
-            pass
-        except Exception as e:
-            logger.warning("config.yaml 解析失败: %s", e)
+        if _test_mode_requested():
+            # Already refused-validated by _validated_test_root() above; the
+            # re-parse covers a config that changed under us, which is still
+            # a refusal rather than a defaults fallback.
+            _deep_merge(cfg, _read_config_mapping(Path(config_path)))
+        else:
+            try:
+                import yaml
+                # 2026-08-26 P0 编码契约: config.yaml 必须用 utf-8-sig 读 —
+                # Windows 记事本保存后带 BOM, 裸 utf-8 会让 yaml 首键变成
+                # '\ufeffbasePath' 直接解析错位 (用户用记事本改一次配置就炸)。
+                # 无 BOM 时 sig 模式完全透明。
+                with open(config_path, encoding="utf-8-sig") as f:
+                    yaml_cfg = yaml.safe_load(f)
+                if yaml_cfg:
+                    _deep_merge(cfg, yaml_cfg)
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning("config.yaml 解析失败: %s", e)
 
     cfg = _apply_pg_password_env(cfg)
     cfg = _resolve_env(cfg)

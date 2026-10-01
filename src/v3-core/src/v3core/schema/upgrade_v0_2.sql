@@ -118,6 +118,18 @@ ALTER TABLE public.observation_notes
 ALTER TABLE public.yin_paragraphs
     ADD COLUMN IF NOT EXISTS embed_model TEXT NOT NULL DEFAULT '';
 
+-- F2 canonical source identity (additive only, 2026-09-28): same DDL as
+-- alpha_bootstrap.sql so existing installs converge with fresh bootstrap.
+-- Nullable columns + partial unique index over complete identity tuples;
+-- historic NULL rows are untouched and unconstrained; no backfill, no rewrite.
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS host TEXT;
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS event_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS conversation_stream_host_session_event_uniq
+    ON public.conversation_stream (host, session_id, event_id)
+    WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL;
+
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
 
 COMMIT;

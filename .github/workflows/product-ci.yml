@@ -182,11 +182,47 @@ jobs:
       #     per-category sorting, verdict classification, JSON
       #     round-trip, CLI exit codes.
       #
+      #   test_f2_source_idempotency.py
+      #     F2 canonical source idempotency — additive identity columns +
+      #     the partial unique index in BOTH schema copies, host identity
+      #     in the durable pending/recovery payload, atomic ON CONFLICT
+      #     insert vs. the untouched legacy shape, and the closed
+      #     F2_PG_DSN safety gate. The real-PostgreSQL cases
+      #     (test_f2_realpg_*) are opt-in and SKIP here — they are
+      #     counted separately and run only against a disposable loopback
+      #     F2 database on the dedicated Windows test laptop.
+      #
+      #   test_f2_test_mode_isolation.py
+      #     F2-A1/A2 fail-closed TEST mode — V3CORE_TEST_MODE plus an
+      #     explicit readable V3CORE_CONFIG is the only source; a missing
+      #     config, an unreadable one, a missing basePath and an ambient
+      #     .env are refusals, not fallbacks. The refusal is a SystemExit
+      #     on purpose, because serve() wraps core construction in
+      #     `except Exception`. Also the topic_store data-dir routing
+      #     (v3_topic.db in the isolated root, never import-time bound to
+      #     the ambient profile) and the machine-gate constants.
+      #
+      #   test_f2_harness_contract.py
+      #     F2-C/D harness contract — the guards and cleanup logic of the
+      #     tracked eval/f2_source_idempotency_e2e.py: machine gate
+      #     (DESKTOP-EQP3OBU only, DESKTOP-MU2RQIU refused), data-root /
+      #     config isolation, credential-free generated config, the PG
+      #     allowlist, (pid, creation, cmdline) process identity, owned
+      #     child cleanup + leftover abort, production-sentinel diff, the
+      #     W0-before_commit / W3-after_commit barrier classification,
+      #     child self-report agreement, the provider-marker scan, and
+      #     the fault-injecting loopback proxies. No PG, no provider, no
+      #     secrets. Windows-only cases (the live process inventory) skip
+      #     on this runner by design.
+      #
       # What is intentionally NOT here:
       #   * the distribution-packaging smoke (lives in
       #     distribution-packaging-smoke.yml — the PACKAGING CI)
       #   * anything that requires a live PG or provider key
       #   * any Lane B setup that would open a real psycopg2.connect
+      #   * the F2 W0-W4 destructive E2E itself. That is a separate,
+      #     opt-in run (F2_PG_DSN + a disposable PG + the dedicated
+      #     Windows test laptop) and is deliberately NOT part of this gate.
       - name: focused-tests-v3-core
         working-directory: src/v3-core
         env:
@@ -204,6 +240,15 @@ jobs:
           V3CORE_PG_DB: ""
           V3CORE_PG_USER: ""
           V3_LLM_PROVIDER: ""
+          # F2 fail-closed TEST mode must stay OFF in the gate: the
+          # contract tests switch it on themselves, with their own temp
+          # config. Inheriting it here would make every other test in this
+          # step resolve an unset V3CORE_CONFIG and refuse to boot.
+          V3CORE_TEST_MODE: ""
+          V3CORE_CONFIG: ""
+          # The F2 real-PostgreSQL cases are opt-in and must SKIP here.
+          # Empty by construction, so no real PG is ever opened.
+          F2_PG_DSN: ""
         run: |
           set -euo pipefail
           PYTHONPATH=src \
@@ -215,7 +260,10 @@ jobs:
               tests/test_config_pg_password_env.py \
               tests/test_topic_radar.py \
               tests/test_e1_topic_radar_contract.py \
-              tests/test_production_upgrade_contract.py
+              tests/test_production_upgrade_contract.py \
+              tests/test_f2_source_idempotency.py \
+              tests/test_f2_test_mode_isolation.py \
+              tests/test_f2_harness_contract.py
 
       - name: focused-tests-g5b-evaluator
         working-directory: src/v3-core
