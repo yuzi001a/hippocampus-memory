@@ -1,8 +1,8 @@
 # Hippocampus — global development baseline (A01)
 
-Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2) / `B01 = DONE` (merged, PR #15) / `FRESH_DB_BOOTSTRAP_HOTFIX = DONE` (v0.2.3) / `B02 = DONE` (DSH SUPPORT LEVEL = TOOL, v0.2.8 — see the sections at the end) / `F2 = ACCEPTANCE HOLD` (canonical source idempotency, uncommitted branch `fix/f2-canonical-source-identity`; production recovery PASS; full dedicated matrix and local closeout gates PASS; repository CI/merge pending)
+Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2) / `B01 = DONE` (merged, PR #15) / `FRESH_DB_BOOTSTRAP_HOTFIX = DONE` (v0.2.3) / `B02 = DONE` (DSH SUPPORT LEVEL = TOOL, v0.2.8 — see the sections at the end) / `F2 = DONE` (PR #25 merged at `3f6adc6c2e77be983bb7ccfd1851d26ff23bf475`; dedicated matrix, local closeout and repository CI PASS) / `F3 = LOCAL_ACCEPTANCE_PASS_CI_PENDING` (fresh installed-wheel bootstrap, doctor and failure-writer readback PASS; no production deployment) / `B03 = PENDING`
 
-Overnight mainline (2026-10-02): F2 → F3 → B03. Full mission f2-05 W0–W4 PASS; W4 3/3 cycles; nine mandatory guards PASS; owned residuals and sentinel changes zero. Parent raw JSON readback and 338-file remote hash alignment verified. Local closeout gates passed; repository CI/commit/PR/merge pending. F2 remains HOLD until closeout. Historical failures/recovery retained in the owner-controlled incident archive.
+Overnight mainline (2026-10-02): F2 DONE. W0–W4 PASS (W4 3/3 cycles); nine guards PASS; zero residuals/sentinel changes; parent readback/hash alignment verified. Local gates and both repository CI checks PASS on fd1da2a; PR #25 merged and remote main read back. F3 local acceptance now passes on fix/f3-fresh-bootstrap-embedding-failures: independent installed-wheel fresh RED/GREEN, double-bootstrap idempotency, required-table doctor check and actual failure-writer row readback. Required repository CI/PR/merge are pending at this capture. See docs/F3-FRESH-BOOTSTRAP.md and evidence/f3-fresh-bootstrap/parent-acceptance.json. F2 runtime remains frozen; no adjacent-table audit or production deployment. B03 remains pending. Historical failures/recovery retained in the owner-controlled incident archive.
 
 
 
@@ -625,7 +625,7 @@ and `docs/KNOWN-LIMITATIONS.md` §1.7.
 
 ---
 
-## F2 — canonical source idempotency (ACCEPTANCE HOLD)
+## F2 — canonical source idempotency (DONE — PR #25)
 
 The current tracked harness is `src/v3-core/eval/f2_source_idempotency_e2e.py`.
 Latest valid matrix: f2-05, dedicated Windows laptop; W0–W4 PASS, W4 three
@@ -640,10 +640,10 @@ HTTP recovery ACKs. Real-PG focused gate: 242 passed, zero failures/skips. Paren
 428 core passed / 5 intentional real-PG skips (covered on the laptop),
 102 evaluator passed, 12 plugin passed, compileall and diff-check PASS.
 Parent post-exit scan: no residuals, no frozen-byte drift, config absent.
-Repository CI / commit / PR / merge remain pending. No production install,
+Both required repository checks PASS on fd1da2a0032b93fd7a69ac6cf4395eb1a9c59feb. PR #25 MERGED as 3f6adc6c2e77be983bb7ccfd1851d26ff23bf475; remote main ancestry/readback verified. No production install,
 restart or destructive test was performed in this development run. Historical
 isolation incidents were preserved and recovered separately; they are not
 rewritten into a claim that the earlier investigation had no production contact.
 
 Details: `docs/F2-SOURCE-IDEMPOTENCY.md`.
-Next after F2 acceptance/merge: F3 fresh bootstrap, then B03 pi adapter.
+Current: F3 fresh bootstrap IN_PROGRESS (deleg_6218fac0); then B03 pi adapter. F2 source/runtime remains frozen.

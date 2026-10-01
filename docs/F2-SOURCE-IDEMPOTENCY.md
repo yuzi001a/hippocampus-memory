@@ -1,8 +1,9 @@
 # F2 — canonical source idempotency
 
-Status: **ACCEPTANCE HOLD — closeout test gates in progress**. The complete
-mission matrix f2-05 passed on the dedicated Windows test laptop. This is
-isolated runtime evidence, not a production deployment or a completed merge.
+Status: **DONE — PR #25 merged**. The complete mission matrix f2-05 passed
+on the dedicated Windows test laptop. This is isolated runtime evidence,
+not a production deployment. Required repository CI passed on the same head;
+merge/readback is verified below.
 Branch: `fix/f2-canonical-source-identity`; base:
 `f11a03dc4d0a486905db70bfec2deb4143df37f3`.
 
@@ -86,8 +87,11 @@ restart production.
 - Compile/static checks and `git diff --check`: PASS.
 - Parent post-exit check: owned residuals=0, remote frozen hash drift=0, config absent.
 - Sanitized receipt: `evidence/f2-source-idempotency/f2-05-parent-acceptance.json`.
-- Repository CI, commit/PR/merge: pending.
+- Repository `product-ci` and `distribution-packaging-smoke`: **PASS**, head
+  `fd1da2a0032b93fd7a69ac6cf4395eb1a9c59feb`.
+- [PR #25](https://github.com/yuzi001a/hippocampus-memory/pull/25): **MERGED**,
+  commit `3f6adc6c2e77be983bb7ccfd1851d26ff23bf475`; remote main ancestry/readback verified.
 
-F2 is not DONE until these required gates are satisfied. Do not infer a
+F2 is frozen; F3 and B03 are separate work. Do not infer a
 production canary, a full historical replay, or a whole-repository audit from
 this evidence; those are explicitly outside the current mission.

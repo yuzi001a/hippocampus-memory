@@ -1,0 +1,215 @@
+{
+  "status": "LOCAL_ACCEPTANCE_PASS_CI_PENDING",
+  "base_head": "3f6adc6c2e77be983bb7ccfd1851d26ff23bf475",
+  "branch": "fix/f3-fresh-bootstrap-embedding-failures",
+  "scope": "one missing embedding_failures table; real dedicated-laptop installed-wheel bootstrap",
+  "production_mutation": "NONE (this task; no production deployment/restart)",
+  "tests": {
+    "core": {
+      "passed": 430,
+      "skipped": 5,
+      "scope": "10 affected core files; PG DSN unset; F2 historical dedicated test coverage not newly rerun"
+    },
+    "evaluator_passed": 102,
+    "plugin_passed": 12,
+    "final_F3_regressions": {
+      "passed": 2,
+      "deselected": 55
+    },
+    "full_repository_suite": "NOT_RUN"
+  },
+  "f2": {
+    "protected_paths_compared": 10,
+    "runtime_or_upgrade_diff": [],
+    "identity_schema_diff": 0,
+    "W_matrix": "NOT_RERUN; accepted F2 evidence inherited"
+  },
+  "probe_sha256": "b2c346e4c102d1559791805bae281854eb8d76845062342db375900bbb9d2cd2",
+  "source_files_sha256": {
+    "src/v3-core/schema/alpha_bootstrap.sql": "b41fdd8ccc66dac0bd562cbe4cbeb81a052be78abd515c728c1be8161de6866d",
+    "src/v3-core/src/v3core/schema/alpha_bootstrap.sql": "b41fdd8ccc66dac0bd562cbe4cbeb81a052be78abd515c728c1be8161de6866d",
+    "src/v3-core/src/v3core/schema/embedding_failures.sql": "1e6aaa8800f8b13b1c976f669ffcd091f46f413258a3e71f36a9ef1ccff20a75",
+    "src/v3-core/pyproject.toml": "21a6504a9ee771266e53ba27442f1f37598136927002174f1d7f74f2426e862b",
+    "src/v3-core/src/v3core/distribution_cli.py": "6f9e5f655c6bc86feafc12ea7f4529ea2aefdcb9be3f9f8c505f99fa025f802a",
+    "src/v3-core/tests/test_alpha_bootstrap_contract.py": "b842e76857a4ae2fbe9a37070023c4ad2a6fe8f17569658e69fb2adcb77996e8",
+    "src/v3-core/eval/fresh_bootstrap_e2e.py": "1d1c9b689bb2e853a1c44ab323a65f653f9059a9f5d1845cfa46fffa8857e3ce",
+    "src/v3-core/eval/f3_fresh_bootstrap_e2e.py": "b2c346e4c102d1559791805bae281854eb8d76845062342db375900bbb9d2cd2"
+  },
+  "results": {
+    "red": {
+      "verdict": "PASS",
+      "actual": "red",
+      "driver_exit": 0,
+      "fresh_database": true,
+      "before": {
+        "indexes": [],
+        "table_exists": false
+      },
+      "after": {
+        "indexes": [],
+        "table_exists": false
+      },
+      "after_second": {
+        "indexes": [],
+        "table_exists": false
+      },
+      "bootstrap_1": {
+        "returncode": 0,
+        "applied": true,
+        "upgrade_applied": true,
+        "target_matches_guarded": true,
+        "include_expanded": true
+      },
+      "bootstrap_2": {
+        "returncode": 0,
+        "applied": true,
+        "upgrade_applied": true,
+        "target_matches_guarded": true,
+        "include_expanded": true
+      },
+      "doctor": {
+        "errors": [],
+        "rc_acceptable": true,
+        "required_tables": {
+          "conversation_stream": true,
+          "explicit_memories": true,
+          "observation_notes": true,
+          "qa_pairs": true,
+          "topic_entries": true,
+          "topics": true,
+          "yin_paragraphs": true
+        },
+        "required_tables_embedding_failures": null,
+        "returncode": 1,
+        "status": "warn",
+        "warnings": [
+          "v3hermes plugin.yaml not packaged — engine install verified but the Hermes host adapter is missing",
+          "hermes_agent.memory_providers / deep_memory_v3 entry point is not declared by any installed distribution",
+          "config: config file not found"
+        ]
+      },
+      "writer": null,
+      "package_members_compared_eol_normalized": 127,
+      "wheel_sha256": "f440f171e71305d115cfc14c8e6dc6293d8c8828a9591e27146bf5329974cdc2",
+      "raw_report_sha256": "a309edbf129363dbf10fa4895f4cd31d76c65843abf611cfcb7160cf12c43356",
+      "installed_import_inside_env": true,
+      "isolated_home": true,
+      "user_site_enabled": false,
+      "pythonpath_empty": true,
+      "packaged_ledger_present": false,
+      "packaged_equals_root": false
+    },
+    "green": {
+      "verdict": "PASS",
+      "actual": "green",
+      "driver_exit": 0,
+      "fresh_database": true,
+      "before": {
+        "indexes": [],
+        "table_exists": false
+      },
+      "after": {
+        "indexes": [
+          "embedding_failures_class_idx",
+          "embedding_failures_entity_phase_key",
+          "embedding_failures_pkey",
+          "embedding_failures_unresolved_idx"
+        ],
+        "table_exists": true
+      },
+      "after_second": {
+        "indexes": [
+          "embedding_failures_class_idx",
+          "embedding_failures_entity_phase_key",
+          "embedding_failures_pkey",
+          "embedding_failures_unresolved_idx"
+        ],
+        "table_exists": true
+      },
+      "bootstrap_1": {
+        "returncode": 0,
+        "applied": true,
+        "upgrade_applied": true,
+        "target_matches_guarded": true,
+        "include_expanded": true
+      },
+      "bootstrap_2": {
+        "returncode": 0,
+        "applied": true,
+        "upgrade_applied": true,
+        "target_matches_guarded": true,
+        "include_expanded": true
+      },
+      "doctor": {
+        "errors": [],
+        "rc_acceptable": true,
+        "required_tables": {
+          "conversation_stream": true,
+          "embedding_failures": true,
+          "explicit_memories": true,
+          "observation_notes": true,
+          "qa_pairs": true,
+          "topic_entries": true,
+          "topics": true,
+          "yin_paragraphs": true
+        },
+        "required_tables_embedding_failures": true,
+        "returncode": 1,
+        "status": "warn",
+        "warnings": [
+          "v3hermes plugin.yaml not packaged — engine install verified but the Hermes host adapter is missing",
+          "hermes_agent.memory_providers / deep_memory_v3 entry point is not declared by any installed distribution",
+          "config: config file not found"
+        ]
+      },
+      "writer": {
+        "attempts_measured": 0,
+        "provider_calls": "none (synthetic TimeoutError; no network path)",
+        "row": [
+          "qa_pairs",
+          "f3probe-1",
+          "f3_probe",
+          "EMBEDDING_TIMEOUT",
+          true,
+          0
+        ],
+        "row_fields": {
+          "attempts": 0,
+          "entity_id": "f3probe-1",
+          "entity_table": "qa_pairs",
+          "error_class": "EMBEDDING_TIMEOUT",
+          "phase": "f3_probe",
+          "retryable": true
+        },
+        "row_found": true,
+        "status": "RAN",
+        "writer_returned": true
+      },
+      "package_members_compared_eol_normalized": 128,
+      "wheel_sha256": "1c84f6706932c73db4785dd76f5480270f9c7bfe1ec0f14f114c5012fadc3b1b",
+      "raw_report_sha256": "dbe6d5ad90da28ba1d193b64bfbd82c76cfff5d3f4c80ff70552f689da2d1474",
+      "installed_import_inside_env": true,
+      "isolated_home": true,
+      "user_site_enabled": false,
+      "pythonpath_empty": true,
+      "packaged_ledger_present": true,
+      "packaged_equals_root": true
+    }
+  },
+  "invalid_or_excluded": [
+    "original child empty RED database and unapproved red2 naming deviation",
+    "pre-hard-gate probe evidence not credited as current driver acceptance",
+    "parent first RED report existed but console projection failed GBK; excluded as completed driver gate",
+    "duplicate local broad gate stopped; partial output excluded",
+    "command quoting/hash-input mistakes and oversized-inline-command refusal were setup failures, not product failures"
+  ],
+  "not_done": [
+    "required repository CI/PR/merge at capture",
+    "B03",
+    "production deployment",
+    "F2 W matrix rerun",
+    "adjacent-table audit"
+  ],
+  "synthetic_data": "single TimeoutError failure-writer fixture, not a provider failure or real media/user fact",
+  "raw_artifacts": "owner-controlled incident archive; private paths/hostname not published"
+}
