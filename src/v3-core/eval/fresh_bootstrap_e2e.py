@@ -51,11 +51,16 @@ BOOTSTRAP_TRUTH_TABLES = [
     "observation_notes",
     "observation_embedding_chunks",
     "yin_paragraphs",
+    "embedding_failures",
     "schema_versions",
 ]
-# Present as a packaged artifact but applied by NO install path — recorded
-# honestly, not silently fixed here (see docs/B01-FINDINGS.md F3).
-UNREACHABLE_ARTIFACT_TABLES = ["embedding_failures"]
+# F3 (2026-10-02): embedding_failures was recorded here as "present as a
+# packaged artifact but applied by NO install path". That classification was
+# the defect itself — the ledger DDL shipped only at the repo schema root, so
+# no fresh install ever created the table. It is now packaged and spliced by
+# alpha_bootstrap.sql, so it belongs to the bootstrap truth set above.
+# Nothing is left on the unreachable list.
+UNREACHABLE_ARTIFACT_TABLES: list[str] = []
 
 FK_EXPECTATIONS = {
     "observation_embedding_chunks": ("observation_id", "observation_notes"),

@@ -242,7 +242,7 @@ def test_bootstrap_accepts_explicit_target_without_network(monkeypatch):
     assert payload["result"]["applied"] is True
     assert connection.committed is True
     alpha_payload = cursor.statements[0]
-    assert "ALPHA_BOOTSTRAP_INCLUDE" not in alpha_payload
+    assert not re.search(r"(?m)^--\s*>>>?\s*ALPHA_BOOTSTRAP_INCLUDE:", alpha_payload)
     assert "explicit_memories" in alpha_payload
     # the fresh install must also reach the current schema level
     assert len(cursor.statements) == 2, (
@@ -275,8 +275,9 @@ def test_alpha_bootstrap_expands_packaged_include_marker():
     from v3core.distribution_cli import _expand_alpha_include, _package_sql
 
     alpha = _package_sql("alpha_bootstrap.sql")
+    assert re.search(r"(?m)^--\s*>>>?\s*ALPHA_BOOTSTRAP_INCLUDE:", alpha)
     combined = _expand_alpha_include(alpha)
-    assert "ALPHA_BOOTSTRAP_INCLUDE" not in combined
+    assert not re.search(r"(?m)^--\s*>>>?\s*ALPHA_BOOTSTRAP_INCLUDE:", combined)
     assert "CREATE TABLE" in combined
     assert "explicit_memories" in combined.lower()
 

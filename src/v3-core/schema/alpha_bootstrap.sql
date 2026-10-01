@@ -338,6 +338,20 @@ CREATE INDEX IF NOT EXISTS yin_paragraphs_embedding_ivfflat
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
+-- -----------------------------------------------------------------------------
+-- embedding_failures — durable accounting for embedding failures.
+--
+-- Body is NOT inlined: schema/embedding_failures.sql is the canonical artifact
+-- and is spliced here through the same ALPHA_BOOTSTRAP_INCLUDE mechanism as
+-- explicit_memories / the derived sidecars, so the repo root DDL stays
+-- single-sourced and the packaged copy ships inside the installed wheel.
+--
+-- Placed last: the ledger has no foreign keys and nothing references it, so
+-- appending it keeps every pre-existing table's relative order (and the F2
+-- DDL) byte-for-byte where it was.
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/embedding_failures.sql <<<
+
 COMMIT;
 
 -- =============================================================================

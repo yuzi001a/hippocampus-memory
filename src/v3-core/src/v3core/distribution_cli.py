@@ -322,6 +322,7 @@ def _doctor(args: argparse.Namespace) -> int:
     # cannot repair an existing install. Report every one of them.
     sql_check: dict[str, Any] = {}
     for name in ("alpha_bootstrap.sql", "explicit_memories.sql",
+                 "embedding_failures.sql",
                  "qa_embedding_chunks.sql", "observation_embedding_chunks.sql",
                  "upgrade_v0_2.sql"):
         try:
@@ -603,7 +604,8 @@ def _doctor_probe_database(explicit_dsn: str | None) -> dict[str, Any]:
                 info["pgvector"] = {"installed": False, "error": _safe_repr(e)}
             for table in ("explicit_memories", "qa_pairs", "topics",
                           "topic_entries", "observation_notes",
-                          "conversation_stream", "yin_paragraphs"):
+                          "conversation_stream", "yin_paragraphs",
+                          "embedding_failures"):
                 try:
                     cur.execute(
                         "SELECT 1 FROM information_schema.tables "

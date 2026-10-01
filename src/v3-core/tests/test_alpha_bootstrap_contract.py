@@ -26,6 +26,7 @@ hard-blocks it). They never load production DSN values, never touch
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -63,6 +64,8 @@ def _find_repo_root(start: Path) -> Path:
 REPO_ROOT = _find_repo_root(Path(__file__))
 ALPHA_SQL = REPO_ROOT / "src" / "v3-core" / "schema" / "alpha_bootstrap.sql"
 EXPLICIT_SQL = REPO_ROOT / "src" / "v3-core" / "schema" / "explicit_memories.sql"
+# F3: canonical durable embedding-failure ledger DDL (repo schema root).
+ROOT_LEDGER = REPO_ROOT / "src" / "v3-core" / "schema" / "embedding_failures.sql"
 BOOTSTRAP_PY = REPO_ROOT / "src" / "v3-core" / "scripts" / "bootstrap_alpha_db.py"
 BACKUP_PY = REPO_ROOT / "src" / "v3-core" / "scripts" / "backup_alpha.py"
 
@@ -140,6 +143,101 @@ def backup_mod(scripts_on_path):
 class TestAlphaBootstrapSQL:
     def test_file_exists(self):
         assert ALPHA_SQL.is_file(), f"missing {ALPHA_SQL}"
+
+    # -- F3: the embedding_failures ledger must ship and be spliced ---------
+
+    def test_embedding_failures_ledger_shipped_and_included(self, bootstrap_mod):
+        """F3 regression: the ledger DDL is a packaged resource spliced into
+        the alpha bootstrap through the canonical include marker.
+
+        Before F3 the canonical root DDL existed only at the repo schema root,
+        so a fresh installed-wheel bootstrap never created
+        public.embedding_failures: every install silently lacked the table.
+        """
+        root_ledger = (REPO_ROOT / "src" / "v3-core" / "schema"
+                       / "embedding_failures.sql")
+        packaged = (REPO_ROOT / "src" / "v3-core" / "src" / "v3core" / "schema"
+                    / "embedding_failures.sql")
+        assert root_ledger.is_file(), f"missing canonical {root_ledger}"
+        assert packaged.is_file(), (
+            f"embedding_failures.sql 未打进 v3core 包: {packaged}"
+        )
+        assert packaged.read_bytes() == root_ledger.read_bytes(), (
+            "packaged embedding_failures.sql 与 canonical root DDL 必须逐字节一致"
+        )
+
+        # package-data must actually ship it (a file on disk in a source tree
+        # proves nothing about an installed wheel).
+        pyproject = (REPO_ROOT / "src" / "v3-core" / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
+        assert "schema/embedding_failures.sql" in pyproject, (
+            "pyproject package-data 未包含 schema/embedding_failures.sql"
+        )
+
+        # Both alpha copies must carry the marker, and the marker must be the
+        # only splice point for this artifact.
+        for alpha in (ALPHA_SQL,
+                      REPO_ROOT / "src" / "v3-core" / "src" / "v3core"
+                      / "schema" / "alpha_bootstrap.sql"):
+            text = alpha.read_text(encoding="utf-8")
+            markers = re.findall(
+                r"--\s*>>>?\s*ALPHA_BOOTSTRAP_INCLUDE:\s*(\S+)\s*<<<", text
+            )
+            assert markers.count("schema/embedding_failures.sql") == 1, (
+                f"{alpha} 必须恰好有一个 embedding_failures.sql include marker, "
+                f"实际 markers={markers}"
+            )
+
+        # And the real expansion must actually splice the table in.
+        combined, includes = bootstrap_mod.load_alpha_ddl(REPO_ROOT)
+        assert any(p.endswith("embedding_failures.sql") for p in includes), (
+            f"load_alpha_ddl 未解析出 embedding_failures.sql: {includes}"
+        )
+        assert "CREATE TABLE IF NOT EXISTS public.embedding_failures" in combined
+        for idx in ("embedding_failures_entity_phase_key",
+                    "embedding_failures_unresolved_idx",
+                    "embedding_failures_class_idx"):
+            assert idx in combined, f"缺少 embedding_failures 索引 {idx}"
+
+    def test_doctor_reports_embedding_failures_as_required(self):
+        """F3 regression: the installed doctor's packaged-SQL tuple and its
+        live required-table probe must both know the ledger.
+
+        A doctor that omits it reports a healthy fresh install that is in fact
+        missing the table.
+        """
+        import importlib.util
+
+        cli_path = (REPO_ROOT / "src" / "v3-core" / "src" / "v3core"
+                    / "distribution_cli.py")
+        spec = importlib.util.spec_from_file_location(
+            "_f3_dist_cli", cli_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        body = cli_path.read_text(encoding="utf-8")
+        doctor_start = body.index('for name in ("alpha_bootstrap.sql"')
+        doctor_end = body.index("# 3. Packaged v3hermes plugin.yaml", doctor_start)
+        doctor_section = body[doctor_start:doctor_end]
+        assert "embedding_failures.sql" in doctor_section, (
+            "doctor 的 packaged SQL 检查未包含 embedding_failures.sql"
+        )
+        # The live required-table probe is a separate loop further down the file;
+        # anchor on it directly instead of assuming it shares the doctor block.
+        req_start = body.index('for table in ("explicit_memories"')
+        req_end = body.index('information_schema.tables', req_start)
+        assert '"embedding_failures"' in body[req_start:req_end], (
+            "doctor 的 live required_tables 未包含 embedding_failures"
+        )
+        # Sanity: the helper really resolves the artifact from the package and
+        # its decoded text is the canonical DDL. Compare decoded text (the
+        # loader reads with read_text + newline translation), not raw bytes.
+        assert module._package_sql("embedding_failures.sql") == ROOT_LEDGER.read_text(
+            encoding="utf-8"
+        )
+        assert module._package_sql_sha256("embedding_failures.sql") == hashlib.sha256(
+            ROOT_LEDGER.read_text(encoding="utf-8").encode("utf-8")
+        ).hexdigest()
 
     def test_explicit_memories_artifact_exists(self):
         assert EXPLICIT_SQL.is_file(), f"missing {EXPLICIT_SQL}"
@@ -450,8 +548,11 @@ class TestBootstrapScript:
         assert "explicit_memories" in ddl
         assert "BEGIN INCLUDED schema/explicit_memories.sql" in ddl
         assert "END INCLUDED schema/explicit_memories.sql" in ddl
-        assert len(includes) == 3
+        # F3 added a fourth spliced artifact (the embedding_failures ledger);
+        # the explicit_memories / qa_embedding_chunks ordering still holds.
+        assert len(includes) == 4
         assert any(p.endswith("observation_embedding_chunks.sql") for p in includes)
+        assert any(p.endswith("embedding_failures.sql") for p in includes)
         assert includes[0].endswith("explicit_memories.sql")
         assert includes[1].endswith("qa_embedding_chunks.sql")
 
