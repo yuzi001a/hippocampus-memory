@@ -251,15 +251,16 @@ Limitations of the current evidence:
   fail-closed branch still fails the run: missing row, wrong session, wrong fixture text, foreign
   host, event id outside the recordable set, and a canonical id that embeds no identity triple.
   The earlier failing run and its evidence are retained, not overwritten.
-- **Real model-backed A→B remains AUTH BLOCKED.** No model credentials are configured on the
-  dedicated machine. This is a **BLOCKED gate**, not a skipped convenience: no external or model
-  call was made, no assistant answer was fabricated, no mock model was called real, and no
-  production credential was reused to unblock it.
-- **Not published.** `0.1.0` exists only in this repo. There is no npm release.
-- **B03 is not DONE.** Package implementation, a real-host load check and a passing real
-  disposable-PG run (including exact-source resolution) now exist. The model-backed A→B story
-  remains a **named, blocked gate**, and the hidden-message inspection surface remains unverified.
-  No PR or merge is claimed.
+- **Real model-backed A→B is an optional release smoke, and it has not been executed.** No model
+  credentials are configured on the dedicated machine. No external or model call was made, no
+  assistant answer was fabricated, no mock model was called real, and no production credential was
+  reused to force it. Code acceptance does not depend on this smoke, and the package is not held
+  back by it.
+- **B03 is DONE — merged.** The package, the acceptance helpers and the docs are on `main`
+  (PR #27). The hidden-message inspection surface (P10) is still unverified, and that is what keeps
+  the 60–90 s demo a script rather than a recording.
+- **Not published.** `0.1.0` exists in this repository only. There is no npm release; the only
+  installation path verified so far is a local tarball.
 
 ## Capability matrix
 
@@ -267,13 +268,13 @@ What is actually verified today, and what is not:
 
 | Capability | State | How it was checked |
 | --- | --- | --- |
-| Mapping, exclusion, native ids, drain ordering, ack/dedupe, retry-after-failure, recall latch, budget refusal, fail-open | **PASS** — 34/34 | `npm test` (`node --test`, 34 tests, 0 fail, 0 skip), twice against the uncommitted package working-tree snapshot (not in HEAD) |
+| Mapping, exclusion, native ids, drain ordering, ack/dedupe, retry-after-failure, recall latch, budget refusal, fail-open | **PASS** — 34/34 | `npm test` (`node --test`, 34 tests, 0 fail, 0 skip), twice, on the package working tree that is now committed as `375cd7a` (`main` contains it) |
 | Owned/external lifecycle, bounded readiness, owned-child-only release | **PASS** | unit-covered with a fake child process in the same suite |
 | Reproducible build | **PASS** | `npm run build` twice; `dist/*.js` SHA-256 identical across runs and byte-identical to `src/*.js` |
 | `dist/` is importable as the real entry | **PASS** | `import('./dist/index.js')` yields `default` (factory) plus 8 named exports |
 | Adapter → unchanged bridge → **disposable PostgreSQL** | **PASS** | fresh-root run on disposable DB `b03pi_20261002_d`: DB/bootstrap/PG healthy, bridge `b01.1`, owned bridge released, four expected native event ids persisted, fixture recalled, latch behaviour observed, and the source read traced to its own row. The earlier `b03pi_20261002_c` run (same path, failing at source trace) is retained as the pre-fix baseline |
 | Fresh `pi install` of the local package; pi actually loading `dist/index.js` | **PASS (load/status only)** | real pi 0.99.2 / Node 24.21.0 on `DESKTOP-EQP3OBU`: `pi install .\package --local --approve` from an extracted tarball, then a real Pi RPC process loaded it — `get_commands` listed `hippocampus`, `/hippocampus status` success/handled, exit 0. No model-backed conversation, no P10 inspection surface |
-| Real model-backed pi A→B story | **AUTH BLOCKED** | no model credentials on the dedicated machine; no external/model call was made and no credential was reused to force it |
+| Real model-backed pi A→B story | **OPTIONAL RELEASE SMOKE — not executed** | no model credentials on the dedicated machine; no external/model call was made and no credential was reused to force it. Not a merge gate |
 | Recalled-reference → exact source resolution | **PASS** | the isolated run traced the exact emitted id `qa_1`; `/tool v3_get` with target `message` returned `success: true` with that row's own text, and the independent PG trace resolved the reference to the `qa_pairs` row whose canonical `source_id` embeds `(host=pi, session_id=b03-session-a, event_id=b03A-0001)` — **not** substituted. The minimal read-path fix lives in `src/v3-core/src/v3core/pg_store.py`; the injected block text and every identifier are unchanged |
 
 The test suite is unit-only. Every HTTP call and child process in it is an in-process fixture.

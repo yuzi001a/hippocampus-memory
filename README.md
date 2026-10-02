@@ -114,7 +114,7 @@ The following rows summarize current evidence from a fresh disposable Windows 10
 |---|---|---|---|
 | Hermes Agent (`v3-hermes-plugin`) | provider | registered memory provider; 13 tools + prefetch/sync_turn hooks | plugin-mediated E2E still `UNKNOWN / NOT TESTED` (see the table above) |
 | DeepSeek Harness (DSH) via its official MCP client | **TOOL** | explicit tool calls only — **no** automatic recording, **no** automatic recall injection (that is B04) | verified on the public `v0.2.8` asset: 13 tools discovered, durable store with a 1024-d vector, reworded question recalled the record (`cosine 0.5324`), full source read, surviving a full host restart — [`docs/B02-DSH-TOOL-SUPPORT.md`](docs/B02-DSH-TOOL-SUPPORT.md) |
-| pi (`packages/pi-adapter`, `@hippocampus-memory/pi`) | **AUTO — declared target; host load + isolated run verified, model-backed session NOT YET DEMONSTRATED** | automatic recording of persisted user/assistant text + one additive recall injection per user input, over the unchanged B01 bridge (`b01.1`); text-only, fail-open, never replaces host context | hook/wire contract read from installed pi **0.99.2** SDK sources, **not** from a running host — [`docs/B03-PI-ADAPTER-DESIGN.md`](docs/B03-PI-ADAPTER-DESIGN.md). Package suite and reproducible build pass locally; a real pi 0.99.2 / Node 24.21.0 host on the dedicated laptop installed the local tarball and loaded it (`get_commands` listed `hippocampus`, `/hippocampus status` exit 0), and two isolated runs drove adapter → bridge → disposable PostgreSQL through persistence, recall, the per-turn latch and exact-source resolution — the second passes every check, the first failed the source trace and is kept as the pre-fix baseline ([`packages/pi-adapter/README.md`](packages/pi-adapter/README.md)). The **model-backed A→B story has NOT run** — pi authentication is not configured on the dedicated laptop, so that gate stays **AUTH BLOCKED**. Recording-ready scenario: [`packages/pi-adapter/demo/60-90s-demo.md`](packages/pi-adapter/demo/60-90s-demo.md) (`SCRIPT READY / NOT YET EXECUTED`) |
+| pi (`packages/pi-adapter`, `@hippocampus-memory/pi`) | **AUTO — supported (B03 DONE)** | automatic recording of persisted user/assistant text + one additive recall injection per user input, over the unchanged B01 bridge (`b01.1`); text-only, fail-open, never replaces host context | hook/wire contract read from installed pi **0.99.2** SDK sources, **not** from a running host — [`docs/B03-PI-ADAPTER-DESIGN.md`](docs/B03-PI-ADAPTER-DESIGN.md). Package suite and reproducible build pass; a real pi 0.99.2 / Node 24.21.0 host installed the local tarball and loaded it (`get_commands` listed `hippocampus`, `/hippocampus status` exit 0); isolated runs drove adapter → bridge → disposable PostgreSQL through persistence, recall, the per-turn latch and exact-source resolution (`qa_<id>` → `qa_pairs` → native source) — the second passing every host check, the first kept as the pre-fix baseline ([`packages/pi-adapter/README.md`](packages/pi-adapter/README.md)). Real model-driven A→B is an **optional release smoke, not executed** — the test laptop has no model credential configured. Recording-ready scenario: [`packages/pi-adapter/demo/60-90s-demo.md`](packages/pi-adapter/demo/60-90s-demo.md) (`SCRIPT READY / NOT YET EXECUTED`) |
 
 ## Why this is not just a vector database
 
@@ -185,6 +185,32 @@ hippocampus bootstrap --target "postgres://postgres@127.0.0.1:${pgPort}/v3embedd
 >
 > **The legacy `src/v3-core/scripts/bootstrap_alpha_db.py` remains source-tree / development-only.** Use `hippocampus bootstrap` for the packaged distribution path.
 
+### pi adapter (optional host)
+
+The Pi adapter is a separate npm package in this repo; it is **AUTO**-level (records persisted
+user/assistant text and injects one additive recall block per user turn) and it is **fail-open** —
+if the bridge or the config is unavailable, pi keeps working and the adapter reports why.
+
+```powershell
+# 1. build the package (writes dist/, which the manifest points pi at)
+npm --prefix .\packages\pi-adapter run build
+npm --prefix .\packages\pi-adapter test          # 34 tests, no network, no services
+
+# 2. pack it and install the extracted package directory (the verified sequence)
+npm --prefix .\packages\pi-adapter pack --pack-destination .\dist
+tar -xzf .\dist\hippocampus-memory-pi-0.1.0.tgz
+pi install .\package --local --approve
+
+# 3. verify the host actually loaded it — inside pi:
+#    /hippocampus status      -> handled, exit 0
+```
+
+Adapter config is read from `HIPPOCAMPUS_PI_CONFIG`, else `<cwd>/.pi/hippocampus.json`
+(`<cwd>` becomes `project_id`). It has **no credential field by design**. Details, the config
+schema, the failure states and the exact limitations are in
+[`packages/pi-adapter/README.md`](packages/pi-adapter/README.md); the design and the wire contract
+are in [`docs/B03-PI-ADAPTER-DESIGN.md`](docs/B03-PI-ADAPTER-DESIGN.md).
+
 ## External services
 
 Hippocampus can run its durable local pipeline on PostgreSQL/pgvector. Optional provider-backed paths are configured by the user:
@@ -214,6 +240,20 @@ Hippocampus does not pretend these questions are solved. The point is to make th
 - **Bug reports and feature requests:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
 - **Security-sensitive reports:** do not post secrets, credentials, DSNs, or private data in a public issue; see [`SECURITY.md`](SECURITY.md)
 
+## Tested versions
+
+What the current evidence was actually produced with — not a support matrix, and not a blanket
+compatibility claim:
+
+| Component | Tested | Where |
+|---|---|---|
+| Python | 3.11 (`product-ci (py3.11)`) and 3.12 (local test runs) | both wheels are `py3-none-any` |
+| PostgreSQL + pgvector | PG 17 with pgvector (disposable `pgvector/pgvector:pg17`); PG 17.10 / pgvector 0.8.7 on the acceptance laptop | disposable databases only — production is never the test target |
+| Windows | Windows 10 22H2 (build 19045) | non-Windows is **untested** |
+| Hermes Agent | upstream [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent), installed separately | plugin-mediated E2E is still `UNKNOWN / NOT TESTED` |
+| DeepSeek Harness (DSH) | the public `v0.2.8` asset, via its official MCP client | TOOL level — see [`docs/B02-DSH-TOOL-SUPPORT.md`](docs/B02-DSH-TOOL-SUPPORT.md) |
+| pi | `0.99.2` on Node `24.21.0` (acceptance laptop) and Node `22.22.3` (build/dev) | AUTO level; the model-driven A→B smoke has **not** been run |
+
 ## Documentation map
 
 | Doc | Purpose |
@@ -231,6 +271,10 @@ Hippocampus does not pretend these questions are solved. The point is to make th
 | [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md) | Alpha publication gates and remaining limitations. |
 | [`src/v3-core/README.md`](src/v3-core/README.md) | `v3-core` package README. |
 | [`src/v3-hermes-plugin/README.md`](src/v3-hermes-plugin/README.md) | Hermes adapter README. |
+| [`docs/B02-DSH-TOOL-SUPPORT.md`](docs/B02-DSH-TOOL-SUPPORT.md) | DSH tool-level support: tested versions, exact MCP command, limitations. |
+| [`docs/B03-PI-ADAPTER-DESIGN.md`](docs/B03-PI-ADAPTER-DESIGN.md) | Pi adapter design and the b01.1 wire contract it uses. |
+| [`packages/pi-adapter/README.md`](packages/pi-adapter/README.md) | Pi adapter: install, config, failure states, capability matrix, limitations. |
+| [`packages/pi-adapter/demo/60-90s-demo.md`](packages/pi-adapter/demo/60-90s-demo.md) | The 60–90 s recording script (`SCRIPT READY / NOT YET EXECUTED`). |
 
 ## What this README deliberately does not claim
 
@@ -238,6 +282,7 @@ Hippocampus does not pretend these questions are solved. The point is to make th
 - It does not upgrade capabilities marked **UNKNOWN / NOT TESTED** into supported features.
 - It does not claim that the full `pytest tests/` suite is green on this exact HEAD. The release evidence uses a focused acceptance scope documented in [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md).
 - It does not claim that long-term memory proves or creates machine consciousness.
+- It does not claim the pi adapter is model-verified: the model-driven A→B smoke has not been run, the hidden `display:false` inspection surface (P10) is unverified, `0.1.0` is not published to npm, and non-Windows hosts are untested. The adapter's own limitations list is in [`packages/pi-adapter/README.md`](packages/pi-adapter/README.md).
 
 ## License
 
