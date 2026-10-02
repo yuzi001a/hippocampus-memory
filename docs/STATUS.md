@@ -17,7 +17,7 @@ The project has completed its first major host-adapter phase:
 - automatic memory for DeepSeek Harness (DSH);
 - source-trace closure for recalled QA references.
 
-The next development focus is the memory product itself: inspection, management, correction, changed facts and temporal reasoning.
+The immediate development focus is **one-click import of existing history** so a new user does not have to start memory from zero. After that, the main line returns to memory inspection, correction, changed facts and temporal reasoning.
 
 ## Supported host surface
 
@@ -104,7 +104,9 @@ See [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for the longer engineering inve
 
 The host-adapter milestone is complete enough to stop making integrations the default priority.
 
-Next product work focuses on:
+The current milestone is **one-click history import**: automatically discover supported local agent history, preview it safely, import idempotently, and make imported history usable by recall without asking users to understand database internals.
+
+After that, product work focuses on:
 
 - **memory inspection** — users should be able to see what the system believes it remembers;
 - **memory correction** — a later correction should not leave an obsolete fact silently dominant;
@@ -112,7 +114,7 @@ Next product work focuses on:
 - **management UX** — make memory status, provenance and updates understandable without reading database rows;
 - **real usage feedback** — let product use decide which deeper recall/reasoning work matters next.
 
-This corresponds to the current M01/M02 direction in the internal development plan.
+The one-click import milestone is intentionally placed before M01/M02 because continuity for existing users is a product prerequisite, not a later convenience.
 
 ## Research signal
 
