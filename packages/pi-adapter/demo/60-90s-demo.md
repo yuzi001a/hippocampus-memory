@@ -10,8 +10,8 @@
 > PostgreSQL path all the way through event persistence, recall, the once-per-turn latch and the
 > exact-source trace (the second run passes; the first failed at source trace and is retained as the
 > pre-fix baseline — see P10). Those runs are still **not** a substitute for this demo. The
-> model-backed A→B story this script describes is still a **BLOCKED gate** (no model credentials on
-> the dedicated machine). Every observation point below is what a future filmed run must *check*,
+> model-backed A→B story this script describes is an **optional release smoke that has not been run**
+> (no model credentials on the dedicated machine). Every observation point below is what a future filmed run must *check*,
 > not something that was checked.
 
 The purpose of this run is not "it looks nice on camera". It is the one thing a unit test and a
@@ -283,8 +283,9 @@ Two honest alternatives, in this order:
    second run (DB `b03pi_20261002_d`, fresh root) passes every host check and resolves `qa_1` to its
    own row. Both records are kept. Even so it is explicitly *not* a real pi A→B run: a passing result
    there does not close the gate this demo closes.
-2. **Wait for deliberate pi authentication** on the dedicated machine. Until then this gate stays
-   **AUTH BLOCKED**, and that is a correct state, not a failure to hide. (Loading the package is
+2. **Wait for deliberate pi authentication** on the dedicated machine. Until then the model step
+   cannot run and the smoke record stays *not executed*, which is a correct state, not a failure to
+   hide. (Loading the package is
    not the blocker — a real pi host has done that. Answering a question is.)
 
 Never fabricate an assistant response, never call a mock model real, never paste a production
