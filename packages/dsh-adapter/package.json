@@ -1,0 +1,31 @@
+{
+  "name": "@hippocampus-memory/dsh",
+  "version": "0.1.0",
+  "description": "Hippocampus memory thin client for DSH (deepseek-harness): captures committed session messages to the v3core B01 bridge and injects one additive recalled-memory message per user turn through the agent/pre-step waterfall.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./mapping": "./src/mapping.js",
+    "./recall": "./src/recall.js",
+    "./config": "./src/config.js",
+    "./bridge": "./src/bridge.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "hippocampus",
+    "memory"
+  ],
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\""
+  }
+}

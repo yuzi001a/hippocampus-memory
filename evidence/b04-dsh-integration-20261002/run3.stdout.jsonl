@@ -1,0 +1,7 @@
+{"type":"session","sessionId":"session-b5877edf-cf2e-4c80-a444-2f84a21615cd","cwd":"C:\\hp-testbed\\b04-integration-20261002\\runs\\b04-integration-run-1\\project"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"text","text":"acknowledged b04-isolated-marker-7f3a"}
+{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":3,"outputTokens":1,"totalTokens":4}}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"completed"}}
+{"type":"final","text":"acknowledged b04-isolated-marker-7f3a"}

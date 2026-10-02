@@ -2,7 +2,7 @@
 
 Status: `A01 = DONE` / `A02 = DONE` / `A03 = DONE` (v0.2.2) / `B01 = DONE` (merged, PR #15) / `FRESH_DB_BOOTSTRAP_HOTFIX = DONE` (v0.2.3) / `B02 = DONE` (DSH SUPPORT LEVEL = TOOL, v0.2.8 — see the sections at the end) / `F2 = DONE` (PR #25 merged at `3f6adc6c2e77be983bb7ccfd1851d26ff23bf475`; dedicated matrix, local closeout and repository CI PASS) / `F3 = DONE` (PR #26 merged at `9d8101a4f48e0f2969ee216a11b8458b7ecb1f94`; dedicated installed-wheel RED/GREEN and exact-head repository CI PASS; no production deployment) / `B03 = DONE` (PR #27 merged at `f10847f401c4349bf717120ea90135bbab96904c`; both required exact-head repository CI checks PASS; isolated source-trace fix verified before/after against a real disposable PostgreSQL; `MODEL A→B = OPTIONAL RELEASE SMOKE`, not executed — Y400 has no model credential configured)
 
-Status list: `A01 DONE` / `A02 DONE` / `A03 DONE` / `B01 DONE` / `B02 DONE` / `F2 DONE` / `F3 DONE` / `B03 DONE`. NEXT: G01 closeout → B04.
+Status list: `A01 DONE` / `A02 DONE` / `A03 DONE` / `B01 DONE` / `B02 DONE` / `F2 DONE` / `F3 DONE` / `B03 DONE` / `B04 DONE` (see the B04 section at the end). NEXT: G01 closeout.
 
 Overnight mainline (2026-10-02): F2 DONE. W0–W4 PASS (W4 3/3 cycles); nine guards PASS; zero residuals/sentinel changes; parent readback/hash alignment verified. Local gates and both repository CI checks PASS on fd1da2a; PR #25 merged and remote main read back. F3 DONE: independent installed-wheel fresh RED/GREEN, double-bootstrap idempotency, table/index/doctor and actual failure-writer row readback verified. PR #26 final head ee7954bcc7f6be95e43a94ebf1b1599d8825ab1a passed both required repository CI checks; installed-package tests 15/15 with zero skips and static doctor rc0. Initial packaging failure was reproduced (two overbroad comment-token assertions), minimally corrected without runtime/SQL changes, and retained. Normal merge 9d8101a4f48e0f2969ee216a11b8458b7ecb1f94 and remote main were read back. See docs/F3-FRESH-BOOTSTRAP.md and evidence/f3-fresh-bootstrap/parent-acceptance.json for local evidence scope. F2/F3 runtime frozen; no adjacent-table audit or production deployment. B03 installed-pi API discovery is complete (pi 0.99.2); parent verified actual SDK hooks, native identity timing and existing b01.1 flat HTTP wire fields after the reconnaissance child timed out without an artifact. Locked design: docs/B03-PI-ADAPTER-DESIGN.md. Bounded package implementation and separate acceptance helpers are in progress on feat/b03-pi-auto-memory-adapter. Real model-backed A→B gate is pending deliberate pi authentication on the dedicated laptop (default auth file empty; no API-key environment names at discovery); no production credential reuse and no fake model substitute. Recalled-reference source resolution was a real, reproduced defect and is now fixed and verified: the first isolated run (disposable DB `b03pi_20261002_c`) failed the source trace on the exact emitted id `qa_1` because the v3-core read path resolved only `conversation_stream` ids and never the `qa_<qa_pairs.id>` / `topic_<topic_id>` references the recall engine itself prints; the minimal read-path fix in `src/v3-core/src/v3core/pg_store.py` (plus a `qa_pairs` trace namespace in the acceptance helper, fail-closed) makes the second fresh-root run on disposable DB `b03pi_20261002_d` PASS with every host check green, tracing `qa_1` to its own row without substituting any identifier. B03 is DONE: PR #27 merged at `f10847f401c4349bf717120ea90135bbab96904c` (normal merge; exact head `46e36d1de9f34b89fbd86732e599f72609913225`), with `product-ci (py3.11)` and the Windows distribution-packaging smoke both SUCCESS on that head; remote main was read back and independently confirmed to contain the B03 commits. Real model-driven A→B was **not** executed — Y400's pi auth store is empty and no provider key is present in its environment — so it is recorded as `MODEL A→B = OPTIONAL RELEASE SMOKE`, not a merge gate. Historical failures/recovery retained in the owner-controlled incident archive.
 
@@ -649,3 +649,41 @@ rewritten into a claim that the earlier investigation had no production contact.
 
 Details: `docs/F2-SOURCE-IDEMPOTENCY.md`.
 Current: F3 DONE (PR #26 merged at 9d8101a4f48e0f2969ee216a11b8458b7ecb1f94 after exact-head CI PASS); B03 pi API discovery IN_PROGRESS on feat/b03-pi-auto-memory-adapter. F2/F3 source/runtime remains frozen.
+
+---
+
+## B04 — DSH automatic memory adapter (DONE)
+
+```text
+branch            feat/b04-dsh-auto-memory-adapter (from origin/main 8c576b39023efe09ee3312b75b76f4efb2b96eb7)
+baseline upstream @deepseek-ai/dsh@0.2.0-rc.2, SHA 639ed015397290b3745d163aafe02ffee4aa3f84
+package           packages/dsh-adapter/ — zero npm dependencies, Node built-ins only, no build step
+design            docs/B04-DSH-ADAPTER-DESIGN.md
+integration       18/18 checks PASS, 0 failures — evidence/b04-dsh-integration-20261002/
+production        NOT touched (no install, no restart, no schema mutation, no data write)
+```
+
+Locked from the upstream sources, not from the previously installed host (the local install is
+`0.1.0-rc.6`; the contract is read from `0.2.0-rc.2`): `agent/pre-step` is an awaitable waterfall
+whose `payload.messages` are the messages claimed by the current step, and whose returned messages
+enter the *same* model request (`packages/core/agent-loop/src/agent.ts:267-282`, `419-425`; contract
+test `packages/core/agent-loop/tests/interception.spec.ts:196-221`). The injected message is a
+producer-owned `kind: 'hippocampus'` + `form: 'recall'` user message — `kind: 'plugin'` is the older
+v3 form and is already migrated by `session-format-v3-to-v4`. Capture listens on `session/event`,
+records only durable `user/message` (with `source.kind === 'user'`) and `assistant/message`, and keeps
+native identity (`event_id` = the DSH `MessageId`).
+
+Self-recapture exclusion is structural, not heuristic: the injected message is itself persisted as a
+`user/message`, so the listener skips any event whose `source.kind === 'hippocampus'`. Verified in the
+run: the injected text appears 0 times among ingested sources, before and after a session reload.
+
+The isolated integration run composed a real DSH CLI + this adapter + a real B01 bridge + a
+disposable PostgreSQL, with the model endpoint replaced by a local credential-free stub and
+embeddings disabled (keyword-only). It proves: the profile really mounts the row (`--dump-config`),
+one recalled block reached the model request of the same turn (411 chars carrying the seeded fact),
+the durable user/assistant messages were captured with native event ids, the injected message was not
+recaptured, reloading the session produced no duplicate source, and a fresh turn completed with the
+bridge process killed and nothing injected (fail-open). **Not covered, and not claimed:** a live model
+provider, a live embedding endpoint, and every failure class except bridge-down (unit-covered).
+
+Local unit layer: `cd packages/dsh-adapter && node --test "tests/*.test.mjs"` → 39 tests pass.
