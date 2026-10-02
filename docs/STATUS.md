@@ -1,6 +1,6 @@
 # Current status
 
-_Last updated: 2026-10-02_
+_Last updated: 2026-10-03_
 
 This page is the maintained public snapshot of what Hippocampus currently supports. It intentionally separates **current product capability** from older milestone/evidence documents retained in the repository.
 
@@ -15,16 +15,17 @@ The project has completed its first major host-adapter phase:
 - source-level idempotency;
 - automatic memory for pi;
 - automatic memory for DeepSeek Harness (DSH);
-- source-trace closure for recalled QA references.
+- source-trace closure for recalled QA references;
+- one-click import of existing history (Hermes / DSH / pi / memory-md).
 
-The immediate development focus is **one-click import of existing history** so a new user does not have to start memory from zero. After that, the main line returns to memory inspection, correction, changed facts and temporal reasoning.
+The one-click history import milestone has landed — see [`docs/IMPORT.md`](IMPORT.md) and `evidence/i01-history-import-20261003/` (isolated integration, 42/42 checks PASS). The main line now returns to memory inspection, correction, changed facts and temporal reasoning.
 
 ## Supported host surface
 
 | Host | Support | Tested version / evidence | Notes |
 | --- | --- | --- | --- |
 | DeepSeek Harness (DSH) | **AUTO** | `@deepseek-ai/dsh@0.2.0-rc.2`, upstream `639ed015397290b3745d163aafe02ffee4aa3f84`; 39 adapter unit tests plus real-host isolated integration with **18/18 checks PASS** | Automatic user/assistant capture, current-turn recall through `agent/pre-step`, once-per-turn latch, self-recapture exclusion, fail-open. |
-| pi | **AUTO** | pi `0.99.2`, Node `24.21.0`; real host load + isolated PostgreSQL ingest/recall/source-trace PASS | Automatic persisted-message capture and one additive recall per user input. |
+| pi | **AUTO** | pi `0.99.2` (adapter), `1.0.0` (session format, import); Node `24.21.0`; real host load + isolated PostgreSQL ingest/recall/source-trace PASS | Automatic persisted-message capture and one additive recall per user input; historical sessions importable — see [`docs/IMPORT.md`](IMPORT.md). |
 | Hermes Agent | Provider / tools | Existing `v3-hermes-plugin` contract and 13-tool public surface | Existing integration; its public evidence boundary is older and narrower than the current DSH/pi automatic-memory acceptance. |
 
 ### DSH
@@ -96,6 +97,7 @@ The repository contains additional observer/topic/yin/E1/journal and research pa
 - Minimum compatible DSH version is not claimed; the current tested target is `0.2.0-rc.2`.
 - The pi package is still a local package workflow rather than a broad registry-distribution promise.
 - Not every internal memory derivation path has the same acceptance depth as source ingest and host adapters.
+- The history-import acceptance run used synthetic Hermes content (on the real schema) plus real DSH/pi session files; a full real-history import on an end-user machine has not been executed yet.
 - Multi-host portability beyond the current adapters remains a later expansion area.
 
 See [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for the longer engineering inventory.
@@ -104,9 +106,9 @@ See [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for the longer engineering inve
 
 The host-adapter milestone is complete enough to stop making integrations the default priority.
 
-The current milestone is **one-click history import**: automatically discover supported local agent history, preview it safely, import idempotently, and make imported history usable by recall without asking users to understand database internals.
+**One-click history import has landed**: `hippocampus import auto` automatically discovers supported local agent history, previews it safely (`--dry-run`), imports it idempotently, and makes imported history usable by recall — see [`docs/IMPORT.md`](IMPORT.md) and `evidence/i01-history-import-20261003/`.
 
-After that, product work focuses on:
+The next product work focuses on:
 
 - **memory inspection** — users should be able to see what the system believes it remembers;
 - **memory correction** — a later correction should not leave an obsolete fact silently dominant;
@@ -114,7 +116,7 @@ After that, product work focuses on:
 - **management UX** — make memory status, provenance and updates understandable without reading database rows;
 - **real usage feedback** — let product use decide which deeper recall/reasoning work matters next.
 
-The one-click import milestone is intentionally placed before M01/M02 because continuity for existing users is a product prerequisite, not a later convenience.
+The one-click import milestone was intentionally placed before M01/M02 because continuity for existing users is a product prerequisite, not a later convenience.
 
 ## Research signal
 

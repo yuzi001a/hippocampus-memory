@@ -402,10 +402,10 @@ Remove-Item -Recurse -Force .\.venv
 - It does **not** auto-apply the `public.explicit_memories` DDL. Run
   `hippocampus bootstrap` explicitly (step 8). The
   `v3core.active_memory_store` writer does not apply DDL.
-- It does **not** import historical data, replay old conversation
-  streams, or run any of the legacy migration scripts that exist
-  elsewhere in the repo history. Those are out of scope for the
-  supported surface.
+- It does **not** import historical data automatically. Bringing your
+  existing Hermes / DSH / pi history into memory is a separate, explicit
+  command — see [`docs/IMPORT.md`](IMPORT.md). The install itself never
+  touches pre-existing data.
 - It does **not** rotate, invalidate, or check any production
   credentials. See [`docs/PRIVACY-DATA-FLOW.md`](PRIVACY-DATA-FLOW.md)
   for what to do if you find historical credentials in the repo.
@@ -414,6 +414,9 @@ Remove-Item -Recurse -Force .\.venv
 
 ## 14. Next steps
 
+- [`docs/IMPORT.md`](IMPORT.md) — bring your existing Hermes / DSH / pi
+  history into memory with one command (`hippocampus import auto`,
+  dry-run first if you like).
 - [`docs/CONFIGURATION.md`](CONFIGURATION.md) — every config key, every
   env var, default behavior when a provider is unconfigured.
 - [`docs/BACKUP-RESTORE.md`](BACKUP-RESTORE.md) — the
