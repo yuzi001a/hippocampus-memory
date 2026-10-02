@@ -36,7 +36,7 @@
     },
     "run1_session_id": {
       "ok": true,
-      "observed": "session_id=session-c59e6750-f896-4e94-aab3-18a922caaeb4"
+      "observed": "session_id=session-9a48a9ec-0280-468e-b249-dd405f68ad93"
     },
     "capture_user_and_assistant": {
       "ok": true,
@@ -44,7 +44,7 @@
     },
     "capture_used_native_event_id": {
       "ok": true,
-      "observed": "native event ids=['a20d2a08-052e-42b5-98e1-a48e8686f675', '3cfcdf16-77a2-4664-ba33-626731ee767c']"
+      "observed": "native event ids=['6cb74b85-d2c2-4839-9fa2-a5f49069a22a', '8850af44-a25a-4e42-b4e9-b7c15adedb7d']"
     },
     "injected_memory_not_recaptured": {
       "ok": true,
@@ -68,7 +68,7 @@
     },
     "memory_in_same_request": {
       "ok": true,
-      "observed": "2 of 10 model requests carried a memory block"
+      "observed": "2 of 5 model requests carried a memory block"
     },
     "memory_carries_seeded_fact": {
       "ok": true,
@@ -111,7 +111,7 @@
     "password_redacted_by_cli": true
   },
   "bridge": {
-    "port": 65269,
+    "port": 57181,
     "health": {
       "ok": true,
       "pg": true,
@@ -119,7 +119,7 @@
     }
   },
   "stub": {
-    "port": 65274,
+    "port": 57186,
     "record": "C:\\hp-testbed\\b04-integration-20261002\\runs\\b04-integration-run-1\\runs\\stub-requests.jsonl",
     "credential_free": true
   },
@@ -169,7 +169,7 @@
     "stdout_chars": 587,
     "stderr_tail": ""
   },
-  "session_id": "session-c59e6750-f896-4e94-aab3-18a922caaeb4",
+  "session_id": "session-9a48a9ec-0280-468e-b249-dd405f68ad93",
   "capture": {
     "rows": 2,
     "roles": [
@@ -177,8 +177,8 @@
       "user"
     ],
     "event_ids": [
-      "a20d2a08-052e-42b5-98e1-a48e8686f675",
-      "3cfcdf16-77a2-4664-ba33-626731ee767c"
+      "6cb74b85-d2c2-4839-9fa2-a5f49069a22a",
+      "8850af44-a25a-4e42-b4e9-b7c15adedb7d"
     ],
     "hosts": [
       "dsh"
@@ -202,7 +202,7 @@
   "fail_open": {
     "rc": 0,
     "bridge_stopped": true,
-    "requests_after_stop": 4,
+    "requests_after_stop": 2,
     "memory_blocks_after_stop": 0,
     "stderr_tail": ""
   },
@@ -211,7 +211,7 @@
     "stub_stopped": true
   },
   "model_request": {
-    "requests": 10,
+    "requests": 5,
     "requests_with_memory": 2,
     "matched_has_marker": true,
     "matched_chars": [

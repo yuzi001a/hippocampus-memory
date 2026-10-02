@@ -1,53 +1,53 @@
-2026-10-02 22:07:45,228 v3core.serve INFO: v3core.serve 启动: host=127.0.0.1 port=65269 profile=default
-2026-10-02 22:07:45,337 v3core.scheduler INFO: E1Scheduler 启动 (period=86400s)
-2026-10-02 22:07:45,337 v3core INFO: E1 内部调度器已启动 (base=C:\hp-testbed\b04-integration-20261002\runs\b04-integration-run-1\data)
-2026-10-02 22:07:45,337 v3core INFO: V3Core 初始化 (profile=default)
-2026-10-02 22:07:45,369 v3core.serve INFO: HTTP 服务已启动: http://127.0.0.1:65269  (Ctrl+C 退出)
-v3core-serve listening on http://127.0.0.1:65269
+2026-10-02 22:19:14,641 v3core.serve INFO: v3core.serve 启动: host=127.0.0.1 port=57181 profile=default
+2026-10-02 22:19:14,766 v3core.scheduler INFO: E1Scheduler 启动 (period=86400s)
+2026-10-02 22:19:14,766 v3core INFO: E1 内部调度器已启动 (base=C:\hp-testbed\b04-integration-20261002\runs\b04-integration-run-1\data)
+2026-10-02 22:19:14,766 v3core INFO: V3Core 初始化 (profile=default)
+2026-10-02 22:19:14,782 v3core.serve INFO: HTTP 服务已启动: http://127.0.0.1:57181  (Ctrl+C 退出)
+v3core-serve listening on http://127.0.0.1:57181
   GET  /health  → 健康检查
   POST /events  → 写消息 + 触发 QA 配对 (sync_turn)
   POST /prefetch → 召回上下文块
   POST /tool    → 转发到 v3 工具 dispatch
-2026-10-02 22:07:45,650 v3core.daemon INFO: singleton lock acquired: name=e1_singleton owner=DESKTOP-EQP3OBU:2424
-2026-10-02 22:07:45,665 v3core.scheduler INFO: E1Scheduler: e1 完成 — E1 已禁用 (config.yaml e1.enabled=false)
-2026-10-02 22:07:45,837 v3core.serve INFO: 127.0.0.1 - "GET /health HTTP/1.1" 200 -
-2026-10-02 22:07:46,603 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/b04-seed-session/b04-seed-1 class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
-2026-10-02 22:07:46,634 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
-2026-10-02 22:07:46,728 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
-2026-10-02 22:07:46,806 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
-2026-10-02 22:07:47,087 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
-2026-10-02 22:07:47,478 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/b04-seed-session/b04-seed-2 class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
-2026-10-02 22:07:47,494 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/b04-seed-session/b04-seed-3 class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
-2026-10-02 22:07:47,806 v3core.ingest INFO: LiveBuffer flush: 写入 2 条消息到 pg
-2026-10-02 22:07:47,915 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
+2026-10-02 22:19:15,063 v3core.daemon INFO: singleton lock acquired: name=e1_singleton owner=DESKTOP-EQP3OBU:8296
+2026-10-02 22:19:15,079 v3core.scheduler INFO: E1Scheduler: e1 完成 — E1 已禁用 (config.yaml e1.enabled=false)
+2026-10-02 22:19:15,220 v3core.serve INFO: 127.0.0.1 - "GET /health HTTP/1.1" 200 -
+2026-10-02 22:19:16,063 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/b04-seed-session/b04-seed-1 class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
+2026-10-02 22:19:16,094 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
+2026-10-02 22:19:16,219 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
+2026-10-02 22:19:16,266 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
+2026-10-02 22:19:16,548 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
+2026-10-02 22:19:16,876 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/b04-seed-session/b04-seed-2 class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
+2026-10-02 22:19:16,876 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/b04-seed-session/b04-seed-3 class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
+2026-10-02 22:19:17,188 v3core.ingest INFO: LiveBuffer flush: 写入 2 条消息到 pg
+2026-10-02 22:19:17,376 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
 Building prefix dict from the default dictionary ...
-2026-10-02 22:07:48,165 jieba DEBUG: Building prefix dict from the default dictionary ...
+2026-10-02 22:19:17,579 jieba DEBUG: Building prefix dict from the default dictionary ...
 Loading model from cache C:\Users\happy\AppData\Local\Temp\jieba.cache
-2026-10-02 22:07:48,165 jieba DEBUG: Loading model from cache C:\Users\happy\AppData\Local\Temp\jieba.cache
-Loading model cost 2.172 seconds.
-2026-10-02 22:07:50,337 jieba DEBUG: Loading model cost 2.172 seconds.
+2026-10-02 22:19:17,594 jieba DEBUG: Loading model from cache C:\Users\happy\AppData\Local\Temp\jieba.cache
+Loading model cost 2.266 seconds.
+2026-10-02 22:19:19,844 jieba DEBUG: Loading model cost 2.266 seconds.
 Prefix dict has been built successfully.
-2026-10-02 22:07:50,337 jieba DEBUG: Prefix dict has been built successfully.
-2026-10-02 22:07:50,837 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
-2026-10-02 22:07:51,290 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
-2026-10-02 22:07:51,322 v3core.serve INFO: 127.0.0.1 - "POST /prefetch HTTP/1.1" 200 -
-2026-10-02 22:08:07,805 v3core.serve INFO: 127.0.0.1 - "GET /health HTTP/1.1" 200 -
-2026-10-02 22:08:08,212 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
-2026-10-02 22:08:08,649 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
-2026-10-02 22:08:08,665 v3core.serve INFO: 127.0.0.1 - "POST /prefetch HTTP/1.1" 200 -
-2026-10-02 22:08:08,868 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/session-c59e6750-f896-4e94-aab3-18a922caaeb4/a20d2a08-052e-42b5-98e1-a48e8686f675 class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
-2026-10-02 22:08:08,915 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
-2026-10-02 22:08:08,993 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
-2026-10-02 22:08:09,165 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/session-c59e6750-f896-4e94-aab3-18a922caaeb4/3cfcdf16-77a2-4664-ba33-626731ee767c class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
-2026-10-02 22:08:09,212 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
-2026-10-02 22:08:09,274 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
-2026-10-02 22:08:18,477 v3core.serve INFO: 127.0.0.1 - "GET /health HTTP/1.1" 200 -
-2026-10-02 22:08:18,914 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
-2026-10-02 22:08:19,367 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
-2026-10-02 22:08:19,367 v3core.serve INFO: 127.0.0.1 - "POST /prefetch HTTP/1.1" 200 -
-2026-10-02 22:08:19,602 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/session-c59e6750-f896-4e94-aab3-18a922caaeb4/a7ba4a40-0883-4c0b-b832-1c701407299a class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
-2026-10-02 22:08:19,711 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
-2026-10-02 22:08:19,727 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
-2026-10-02 22:08:20,055 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/session-c59e6750-f896-4e94-aab3-18a922caaeb4/c1dac927-bc3d-4771-a961-8f4de4c6d91a class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
-2026-10-02 22:08:20,086 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
-2026-10-02 22:08:20,133 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
+2026-10-02 22:19:19,844 jieba DEBUG: Prefix dict has been built successfully.
+2026-10-02 22:19:20,235 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
+2026-10-02 22:19:20,704 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
+2026-10-02 22:19:20,719 v3core.serve INFO: 127.0.0.1 - "POST /prefetch HTTP/1.1" 200 -
+2026-10-02 22:19:37,125 v3core.serve INFO: 127.0.0.1 - "GET /health HTTP/1.1" 200 -
+2026-10-02 22:19:37,562 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
+2026-10-02 22:19:38,000 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
+2026-10-02 22:19:38,016 v3core.serve INFO: 127.0.0.1 - "POST /prefetch HTTP/1.1" 200 -
+2026-10-02 22:19:38,234 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/session-9a48a9ec-0280-468e-b249-dd405f68ad93/6cb74b85-d2c2-4839-9fa2-a5f49069a22a class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
+2026-10-02 22:19:38,281 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
+2026-10-02 22:19:38,344 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
+2026-10-02 22:19:38,531 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/session-9a48a9ec-0280-468e-b249-dd405f68ad93/8850af44-a25a-4e42-b4e9-b7c15adedb7d class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
+2026-10-02 22:19:38,578 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
+2026-10-02 22:19:38,656 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
+2026-10-02 22:19:48,093 v3core.serve INFO: 127.0.0.1 - "GET /health HTTP/1.1" 200 -
+2026-10-02 22:19:48,515 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
+2026-10-02 22:19:48,843 v3core.topic_recall WARNING: topic_recall: no data source (PG failed, SQLite not found)
+2026-10-02 22:19:48,843 v3core.serve INFO: 127.0.0.1 - "POST /prefetch HTTP/1.1" 200 -
+2026-10-02 22:19:49,031 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/session-9a48a9ec-0280-468e-b249-dd405f68ad93/87ff216a-6486-491b-baf5-530f88faef90 class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
+2026-10-02 22:19:49,125 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
+2026-10-02 22:19:49,156 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
+2026-10-02 22:19:49,296 v3core.ingest WARNING: LiveBuffer embedding degraded: source_id=live/session-9a48a9ec-0280-468e-b249-dd405f68ad93/22bfdc0c-89a6-4f04-9975-15bdabef61fe class=NO_INPUT retryable=False attempts=0 policy=stream_primary marker_recorded=False — 源记录保留, embedding 待修复
+2026-10-02 22:19:49,343 v3core.serve INFO: 127.0.0.1 - "POST /events HTTP/1.1" 200 -
+2026-10-02 22:19:49,421 v3core.ingest INFO: LiveBuffer flush: 写入 1 条消息到 pg
