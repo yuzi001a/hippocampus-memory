@@ -2,339 +2,224 @@
 
 > **Give an agent a past.**
 
-**Hippocampus v0.1-alpha** · 技术预览版（Technical Preview）/ 公开 Alpha
+Hippocampus（海马）是一个面向 AI Agent 的开源、local-first 长期记忆运行时。它保存可追溯的对话来源，在后续会话中自动召回相关过去，并尽量让“这段记忆到底来自哪里”始终可查。
 
-Hippocampus（海马）是一个面向 AI Agent 的开源、local-first 长期记忆运行时。它负责可靠保存对话来源和显式记忆，并在后续会话中检索与当前问题相关的内容。
+**当前状态：**公开 Alpha，持续开发中。当前 `main` 已包含 **DeepSeek Harness（DSH）** 和 **pi** 的自动记忆适配。
 
-这个项目最初并不是从“做一个更好的向量数据库”开始的，而是从一个很朴素的问题开始：一个 Agent 可以和你一起工作很久，理解一个项目、形成共同背景，甚至逐渐表现出某种稳定的人格；但新的 Session 开始以后，大量连续性又会消失。最开始，我只是想让 Agent 记住过去。后来随着对大模型的理解不断变化，这个问题逐渐变成了另一个问题：**如果生成即是存在，那么过去怎样参与下一次生成？**
+[English](README.md) · [安装](docs/INSTALL.zh-CN.md) · [文档导航](docs/README.md) · [当前状态](docs/STATUS.md) · [为什么做 Hippocampus](docs/WHY_HIPPOCAMPUS.md)
 
-这也是 Hippocampus 今天仍然在研究的事情。完整的项目思想演变见 [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md)。
+---
 
-Hippocampus 是 V3 memory runtime 的公开产品名。仓库中的 Python 包、CLI、配置键和工具名仍使用现有的 `v3-core`、`v3-hermes-plugin`、`v3-core info` 等名称；本版本不因品牌展示而重命名这些内部接口。
+## 为什么做这个项目
 
-[English](README.md) | 简体中文
+最开始的问题很简单：一个 Agent 可以和你一起工作很久，逐渐理解项目背景、习惯和上下文；但一旦进入新 Session，很多连续性又会消失。
 
-> **版本定位：** v0.1-alpha 是技术预览版，不是稳定生产版本。本文把“已经在公开 Alpha 验收中验证过的路径”和“代码中存在、但仍处于实验或未完成验收的路径”分开写。
+后来真正困难的问题变成了：
 
-### 快速入口
+> **遗忘很麻烦，但记错可能更糟。**
 
-- **想知道为什么做这个项目：** [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md)
-- **正在比较不同 Agent Memory 方案：** [`docs/COMPARISON.zh-CN.md`](docs/COMPARISON.zh-CN.md)
-- **愿意拿真实项目跑 3～7 天：** [`docs/ALPHA-TESTING.zh-CN.md`](docs/ALPHA-TESTING.zh-CN.md) + [Public Alpha Issue #1](https://github.com/yuzi001a/hippocampus-memory/issues/1)
-- **只想确认当前到底支持什么：** [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
+所以长期记忆不能只是“把聊天历史存起来”，也不能只是“做一个向量数据库”。它还需要处理来源、重复写入、纠错、更新、重建，以及“系统后来形成的判断”和“当时真正发生的事情”之间的区别。
 
-## 这是什么
+Hippocampus 一直坚持一个原则：
 
-Hippocampus 把聊天式 Agent 的对话来源和显式记忆保存到可恢复的持久化存储中，再按查询寻找相关内容。当前公开版本由两个包组成：
+> **过去应该保存，但过去的解释必须允许改变。**
 
-| 包 | 作用 |
-|---|---|
-| `v3-core` | 核心记忆引擎，负责 PostgreSQL/pgvector 存储、对话来源写入、显式记忆读写、关键词召回，以及可选的向量召回和 rerank。 |
-| `v3-hermes-plugin` | Hermes Agent 的适配器，把核心引擎接入 Hermes host，并注册公开工具面。当前公开 Alpha 的适配器契约包含 13 个工具。 |
+更完整的项目思路见 [WHY_HIPPOCAMPUS.md](docs/WHY_HIPPOCAMPUS.md)。
 
-核心能力位于 `v3-core`；Hermes 是当前公开 Alpha 提供的一种宿主集成，不意味着 Hippocampus 永远只支持 Hermes，也不意味着所有宿主集成已经完成。
+---
 
-## 为什么记忆不只是“把历史存下来”
+## 现在已经能做什么
 
-最开始做这个项目时，我以为长期记忆主要是存储和检索问题：把历史留下来，用关键词或向量搜索，在需要时找回来。
+### 在真实 Agent 宿主中自动记忆
 
-真实使用很快暴露了更麻烦的问题。记忆一旦重新进入上下文，就会参与下一次生成。错误的记忆、已经过时的判断、重复总结出来的“事实”，都可能让一个 Agent 比没有记忆时表现得更差。长期记忆因此不只是一个存储系统，它还必须面对来源、更新、淘汰、重建和召回时机这些问题。
+| 宿主 | 当前支持 | 已验证范围 |
+| --- | --- | --- |
+| **DeepSeek Harness（DSH）** | **AUTO** — 自动记录用户/助手消息 + 当前轮自动召回 | 已按 `@deepseek-ai/dsh@0.2.0-rc.2` 当前上游契约开发并验证。真实 DSH + B01 bridge + 一次性 PostgreSQL 集成：**18/18 checks PASS**。 |
+| **pi** | **AUTO** — 自动记录持久化消息 + 每次用户输入至多一次自动召回 | 已在 pi **0.99.2** / Node **24.21.0** 上验证真实加载、隔离 PostgreSQL 写入、召回、每轮 latch 和 source trace。 |
+| **Hermes Agent** | Provider / 工具集成 | 已有 `v3-hermes-plugin` 适配器和公开工具面；验收边界与当前 DSH/pi 自动适配不同，详见插件 README。 |
 
-这也是 Hippocampus 当前设计里一个很重要的区分：原始经历和后来对经历形成的理解不是同一层东西。`conversation_stream` 等来源数据应该尽可能忠实地保存真正发生过的事情，而 Topic、Observer、Embedding、E1 等派生结构可以随着模型和算法变化被重新生成、修正甚至推翻。
+对应文档：
 
-换句话说：**过去应该保存，但过去的解释必须允许改变。**
+- [DSH adapter](packages/dsh-adapter/README.md)
+- [pi adapter](packages/pi-adapter/README.md)
+- [Hermes plugin](src/v3-hermes-plugin/README.md)
 
-## “生成即是存在”
+### 核心能力
 
-Hippocampus 背后还有一个比存储更长期的问题。
+当前 core 已具备支撑这些宿主适配的关键能力：
 
-早期我曾经试图通过 Soul / System Prompt 定义一个 Agent 的人格：它是谁、怎样表达、我们是什么关系。后来在长期使用不同 LLM 的过程中，我逐渐形成了一个新的理解：**生成即是存在。**
+- 对话来源持久化；
+- canonical 事件身份和重放幂等；
+- PostgreSQL + pgvector 存储；
+- 关键词召回和可选向量召回；
+- 显式记忆存储；
+- 召回引用反查原始来源；
+- fresh bootstrap、备份与恢复；
+- 宿主侧 fail-open：记忆挂了，Agent 本身仍应继续工作；
+- provider 本地配置、按需启用。
 
-这一刻的 Agent 并不只存在于某一份 Soul、某一个 LLM 或某一个记忆数据库中。模型、System Prompt、长期记忆、共同历史、当前上下文、工具结果和此刻的输入一起参与生成，形成这一刻具体的“它”。实际更换不同 LLM 时，能力和气质会明显变化，但只要相当一部分共同历史和生成条件仍然保留，又往往能观察到某种连续性。
+仓库中还存在 Observer、Topic、Yin/E1、Journal 等派生记忆路径，但并不是每一条内部能力都属于当前对外支持面。当前边界见 [STATUS.md](docs/STATUS.md)。
 
-因此，Hippocampus 并不把记忆理解成给一个始终存在的 Agent 接上一块硬盘。它更关心的是：已经结束的过去，怎样继续影响下一次生成。
+---
 
-这不是对机器意识的声明。Hippocampus 不声称长期记忆能够创造或证明意识。它只是把“连续性”中的一部分问题变成可以真正实现、运行和验证的工程问题。
+## 架构怎么理解
 
-## 当前已经验证的能力
-
-下面的结果来自 v0.1-alpha 的公开、隔离验收路径。它们证明了对应路径在新环境中的行为，不等于对所有生产环境、所有 provider 或长时间运行情况作出保证。
-
-- 全新环境安装与 `pip` 安装检查；
-- 显式数据库 bootstrap；
-- 对话来源持久化写入（`conversation_stream`）；
-- canonical（权威）显式记忆写入与搜索；
-- 关键词召回；
-- 新进程启动后的数据恢复；
-- PostgreSQL `pg_dump` / `pg_restore` 恢复；
-- 恢复后的继续写入和召回；
-- Hermes adapter contract 与公开工具面检查，当前公开工具面为 13 个工具。
-
-代码和配置支持配置外部 embedding / rerank provider，用于 provider-backed vector recall 和重排序。但本次 v0.1-alpha 的 frozen public acceptance profile 没有注入外部 provider credential，因此公开发行验收没有执行 provider-backed vector/rerank E2E。不要把这部分写成“本版本已经完整验证向量检索和 rerank”。
-
-逐项状态、证据边界和未测试项目见 [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md)。
-
-## 仍处于实验阶段的能力
-
-以下能力不属于本版本的稳定承诺，使用时应按实验功能看待：
-
-- Observer/E1 自动记忆闭环；
-- Recall Engine V2；
-- 多 Agent / 多 writer 运行方式；
-- 历史 active-memory 迁移；
-- 更广泛的 provider 集成；
-- 更完善的配置体验；
-- 依赖真实 Hermes host、外部 LLM 和 embedding provider 的更完整端到端组合。
-
-当前 Alpha 明确不支持把历史 SQLite mirror 或旧版主动记忆自动迁移到新的 canonical 存储。更多限制见 [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md)。
-
-## 它为什么不只是一个向量数据库
-
-向量检索只是可选的一条召回路径。Hippocampus 还关心：
-
-- 原始对话来源能否可靠保存；
-- 显式记忆是否有一个 canonical（权威）的持久化位置；
-- 没有 embedding provider 时，关键词路径是否仍能工作；
-- 配置了 provider 后，是否可以使用向量召回和可选 rerank；
-- Agent 或进程重启后，数据能否继续读取；
-- PostgreSQL 能否 dump、restore，并在恢复后继续写入和召回；
-- embedding、索引和摘要等派生状态损坏或过期时，是否有机会从来源重新构建。
-
-这也是 Hippocampus 的基本判断：能重建的派生状态不应成为唯一真相。
-
-## 核心设计原则
-
-### 原始数据是资产，派生状态应当可以重建
-
-原始对话来源和显式记忆是需要认真保护的持久化数据。关键词索引、embedding、排序结果和自动摘要属于派生状态，应尽可能能够重新生成，不能反过来替代原始来源。
-
-### 显式记忆有单独的权威存储
-
-当前支持的显式记忆写入路径以 PostgreSQL 中的 `public.explicit_memories` 为 canonical 存储。写入成功和后续的 embedding、摘要等派生工作分开处理，派生步骤失败不应悄悄变成“核心记忆没有保存”的假象。
-
-### 未配置的 provider 默认不接收数据
-
-embedding、LLM 和 rerank 都由用户在本地配置。没有配置 provider 时，系统不会把数据发送给该 provider；配置了 endpoint 后，发送范围取决于用户自己的配置，使用前应核对 endpoint 和数据流。
-
-### Alpha 只声明有证据的范围
-
-本文和公开文档不会把“代码里存在”直接写成“已经稳定可用”。标为 `UNKNOWN`、`NOT TESTED` 或 `EXPERIMENTAL` 的路径，不应当被当作本版本的生产保证。
-
-## Quick Start
-
-当前公开 Alpha 的推荐试用环境是 Windows + 全新 Python `venv` + 本仓库构建的不可编辑 wheel 包 + disposable PostgreSQL/pgvector + 单独安装的 Hermes Agent host。下面的命令与 [`docs/INSTALL.md`](docs/INSTALL.md)（[中文](docs/INSTALL.zh-CN.md)）保持完全一致的安装契约，没有另造一套 Hippocampus CLI 或简化掉数据库 bootstrap。中文和英文 README 描述的步骤数和手动步骤完全一致。
-
-> **Hermes 是单独的前置条件，不是这里的 host 包依赖。** Sprint 使用的是上游 [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent) 通过 `uv sync` 安装；本公开仓库不声明 Hermes wheel/sdist 存在。请先按官方文档安装 Hermes，再把 `v3-hermes-plugin` 的构建产物装到**同一个** Hermes host 环境中。
-
-### 0. 前置：先安装 Hermes Agent host（独立仓库）
-
-按官方文档安装并验证：
-
-- 上游仓库：<https://github.com/NousResearch/hermes-agent>
-- 官方安装与配置文档：<https://github.com/NousResearch/hermes-agent>（README + `website/docs/`）
-- 本仓库不打包 Hermes wheel，请不要把 Hermes 当成可从这里 `pip install` 的依赖。
-
-### 1. 构建不可编辑的 wheel + sdist 产物
-
-```powershell
-uv build --wheel --sdist --out-dir .\dist\v3-core .\src\v3-core
-uv build --wheel --sdist --out-dir .\dist\v3-hermes-plugin .\src\v3-hermes-plugin
+```text
+Agent 宿主 / Session
+DSH · pi · Hermes · ...
+        │
+        ▼
+薄宿主适配器
+capture · recall · fail-open
+        │
+        ▼
+B01 bridge contract
+        │
+        ▼
+v3-core
+ingest · recall · provenance
+        │
+        ├── 原始来源：conversation / explicit memory
+        └── 派生记忆：embeddings / topics / notes
+        │
+        ▼
+PostgreSQL / pgvector
 ```
 
-构建完成后会得到两个 wheel：`v3_core-4.0.0-py3-none-any.whl` 和 `v3_hermes_plugin-4.0.0-py3-none-any.whl`（同时还会产出对应 sdist）。中文和英文 README 都使用完全相同的文件名。
+这里最重要的区别是：
 
-### 2. 全新 venv（不要复用旧的）
+- **来源数据要尽量长期保存。** 对话原文、显式记忆是“发生过什么”的依据。
+- **派生理解可以重建。** Embedding、Topic、摘要和高层记忆可以随着算法变化重新生成。
+- **召回结果要能追溯。** 记忆不应该只给你一段看起来很像真的文本，而应该能继续找到它背后的来源。
 
-```powershell
-uv venv --python 3.11 .venv
-.\.venv\Scripts\Activate.ps1
+---
+
+## 快速开始
+
+Hippocampus 目前仍是 Alpha，因此暂时不把安装压缩成一个“万能一键命令”。
+
+建议顺序：
+
+1. 按 [INSTALL.zh-CN.md](docs/INSTALL.zh-CN.md) 安装和 bootstrap core；
+2. 按 [CONFIGURATION.md](docs/CONFIGURATION.md) 配置存储和 provider；
+3. 选择 Agent 宿主：
+   - [DeepSeek Harness](packages/dsh-adapter/README.md)
+   - [pi](packages/pi-adapter/README.md)
+   - [Hermes Agent](src/v3-hermes-plugin/README.md)
+4. 先检查 backend/adapter 状态，再用于重要工作；
+5. 使用前阅读 [KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md)。
+
+升级与恢复：
+
+- [备份与恢复](docs/BACKUP-RESTORE.md)
+- [升级说明](docs/UPGRADE.md)
+
+---
+
+## “自动记忆”是什么意思
+
+对目前的 DSH 和 pi 适配器，目标体验是：
+
+```text
+Session A
+  你正常讨论一个项目决定、事实或上下文。
+  Hippocampus 自动记录宿主真实持久化消息。
+
+新 Session
+  你自然地问起之前的事情。
+  Adapter 自动触发 recall。
+  相关记忆被加入当前请求。
+  召回引用仍可继续追到来源。
 ```
 
-### 3. 安装实际构建出的 wheel（非 editable、非源码树）
+正常路径不要求用户手动调用 `remember` 或 `search`。
 
-```powershell
-uv pip install .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
-uv pip install .\dist\v3-hermes-plugin\v3_hermes_plugin-4.0.0-py3-none-any.whl
-uv pip check   # 与 pip 兼容；检查两个 wheel 之间依赖一致性
-```
+Adapter 保持尽量薄：宿主生命周期逻辑留在 adapter，记忆身份、持久化和召回规则留在 core。
 
-不要把"从 `src/v3-core/` 目录直接 `pip install`"作为公开发布的安装路径。`src/v3-core/scripts/bootstrap_alpha_db.py` 仍保留为 source-tree / development-only 脚本，仅供源码调试使用。
+---
 
-### 4. 启动 disposable pgvector（非生产端口）
+## 可靠性原则
 
-不要把试用环境指向生产 PostgreSQL。选择一个本地、非生产端口（端口 `5433` 会被 `hippocampus bootstrap` 无条件拒绝）；下面的 `55432` 只是 disposable 环境示例端口。
+- **Source first。** 不能为了 embedding/index 限制而截断或替换权威原始来源。
+- **Durability before derivation。** 原文写成功和 embedding/摘要成功是两件事。
+- **Canonical identity。** host/session/event identity 是重试和重放的幂等边界。
+- **Host fail-open。** Hippocampus 出问题时，宿主 Agent 仍应继续工作。
+- **Isolation fail-closed。** 测试/恢复环境配置丢失时不能悄悄落回生产路径。
+- **Evidence before claims。** “代码里有”不等于“已经支持”。
 
-```powershell
-$pgPort = 55432
-$pgPassword = "<local-only-password>"   # ← replace, never reuse a real one
+工程细节集中在 [docs/reliability](docs/reliability/) 和 [文档导航](docs/README.md) 的开发档案区。
 
-docker run --name v3-pgvector-alpha --rm -d `
-  -e POSTGRES_PASSWORD=$pgPassword `
-  -e POSTGRES_DB=v3embeddings_alpha `
-  -p "${pgPort}:5432" `
-  pgvector/pgvector:pg17
-```
+---
 
-可以按安装文档的命令确认容器已启动并安装了 `vector` 扩展：
+## 评测
 
-```powershell
-docker exec v3-pgvector-alpha psql -U postgres -d v3embeddings_alpha `
-  -c "CREATE EXTENSION IF NOT EXISTS vector; SELECT extversion FROM pg_extension WHERE extname='vector';"
-```
+Hippocampus 做过 LoCoMo 长期记忆基准测试，但这里只把它当作研究信号，不把 benchmark 分数等同于真实使用质量。
 
-### 5. 设置凭据（doctor / bootstrap / 写入前）
+历史评测：
 
-```powershell
-$env:V3CORE_PG_PASSWORD = $pgPassword
-$env:PGPASSWORD        = $pgPassword
-```
+- Hippocampus：**1077.5 / 1540 = 69.97%**
+- 无长期记忆基线：**6.85%**
+- Gold context 参考：**75.84%**
 
-`V3CORE_PG_PASSWORD` 是 `v3-core` 与 `v3-hermes-plugin` 双方都要求的凭据；`PGPASSWORD` 由 `psycopg2` 与 `bootstrap` 子命令识别。密码通过环境变量传递，不要放在命令行参数中。
+完整协议和限制见 [locomo-recall-v2.md](docs/evaluation/locomo-recall-v2.md)。
 
-### 6. 只读安装体检
-
-```powershell
-hippocampus doctor --static
-```
-
-预期：stdout 输出一段 JSON，`status` 为 `ok`，`checks.packaged_sql` 列出 `alpha_bootstrap.sql` 与 `explicit_memories.sql`（带 sha256）。`--static` 跳过配置解析，可在打包/CI 环境安全运行。
-
-### 7. 显式执行数据库 bootstrap
-
-```powershell
-hippocampus bootstrap --target "postgres://postgres@127.0.0.1:${pgPort}/v3embeddings_alpha"
-```
-
-端口 `5433` 与本机 `v3embeddings` 数据库会被该命令**无条件拒绝**，没有绕过开关；这是和 legacy `bootstrap_alpha_db.py` 共享的拒绝策略。生产边界 DSN（如 `postgres://postgres@127.0.0.1:5433/v3embeddings`）**永远不可能**通过 `hippocampus bootstrap` 执行。
-
-> **数据库 bootstrap 是显式步骤，不是自动首次运行步骤。** `v3core.active_memory_store` 不会自动应用 schema。请先对 disposable PostgreSQL 执行 `hippocampus bootstrap --target ...`，再开始任何写入或召回。
-
-### 清理 disposable 环境
-
-完成试用后，可以按需要删除 disposable 容器和虚拟环境：
-
-```powershell
-docker rm -f v3-pgvector-alpha
-deactivate
-Remove-Item -Recurse -Force .\.venv
-```
-
-## Hermes 集成
-
-当前 Public Alpha 包含 Hermes adapter。核心记忆能力位于 `v3-core`，适配器位于 `v3-hermes-plugin`；要测试 plugin-mediated hook contract，需要一个正常运行的 Hermes Agent host。
-
-**Hermes 是单独的前置仓库，不是这里的 host 包依赖。** Sprint 使用的是上游 [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent) 通过 `uv sync` 安装到当前 Hermes host 环境；本公开仓库不打包 Hermes wheel/sdist。安装路径与文档以 Hermes 上游仓库为准：<https://github.com/NousResearch/hermes-agent>。
-
-把构建出的 `v3-hermes-plugin` wheel 装到**同一个** Hermes host 环境中（见 Quick Start 第 3 步）。然后在 Hermes 的 `config.yaml` 中选择公开的 provider 名称：
-
-```yaml
-memory:
-  provider: deep_memory_v3
-```
-
-该 provider 名称来自 `v3-hermes-plugin` 的入口点声明：
-
-```toml
-[project.entry-points."hermes_agent.memory_providers"]
-deep_memory_v3 = "v3hermes:register"
-```
-
-入口点名 `deep_memory_v3` 与 `plugin.yaml` 中的 `name: deep_memory_v3` 严格一致，Hermes 据此把 `memory.provider` 解析到 `v3hermes:register`。`v3-core` 依赖范围固定为 `>=4.0.0,<5.0.0`。
-
-Hermes 的 profile / 路径配置支持 `HERMES_HOME` 与 Hermes 自带的 profile 机制；本仓库**不提供**生产 profile，请使用 Hermes 上游默认 profile 或你自己的 profile。启动 Hermes 前确保 `V3CORE_PG_PASSWORD` 已经在该环境中设置（`v3-hermes-plugin/plugin.yaml` 中 `requires_env` 已声明）。然后使用刚才创建的环境启动 Hermes。没有 Hermes host 时，仍可以直接使用 `v3-core` 和其 Python API，但不能把核心包直连测试等同于完整的 Hermes plugin contract 验收。
-
-更详细的安装步骤和约束见 [`docs/INSTALL.md`](docs/INSTALL.md)（[中文](docs/INSTALL.zh-CN.md)）。
-
-## 外部模型与 provider 配置
-
-Hippocampus 可以在本地 PostgreSQL/pgvector 上运行持久化写入、读取、关键词召回和 soft archive。以下 provider 都是可选配置，端点和模型由使用者提供：
-
-| Provider | 用途 | 未配置时 |
-|---|---|---|
-| Embedding | 为文本生成向量，支持 active-memory 的向量召回和部分派生流程。 | 核心写入和关键词路径仍可用；向量路径跳过。 |
-| LLM | Observer、E1、会话摘要和 topic-card 等自动形成流程。 | 写入仍可落库；对应自动生成流程跳过。 |
-| Rerank | 对召回候选重新排序。 | 不执行 rerank，使用已有召回顺序。 |
-
-支持 OpenAI-compatible 的接口格式，但“支持配置”不等于本次发行已经对每一种 provider 做过端到端验收。特别是本版本的 frozen public acceptance profile 没有注入外部 provider credential，因此 provider-backed vector/rerank E2E 不在本次发行验收范围内。
-
-数据流和隐私边界见 [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md)。配置 provider 之前，请先确认 endpoint、模型和发送的数据范围。
-
-## 数据、备份与恢复
-
-Hippocampus 的数据边界可以这样理解：
-
-- `conversation_stream` 等原始对话来源是需要保留的来源数据；
-- `public.explicit_memories` 是显式记忆的 canonical（权威）存储；
-- embedding、索引、自动摘要和排序结果是派生状态，应该可以从来源重新构建；
-- PostgreSQL 是当前 Alpha 运行时的中心持久化组件，备份应围绕实际 PostgreSQL 数据库进行；
-- 恢复成功不能只看命令退出码，还应检查表和数据，并确认恢复后可以继续写入与召回。
-
-具体的 `pg_dump` / `pg_restore` 操作见 [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md)。
+---
 
 ## 当前限制
 
-请把下面这些限制当作 v0.1-alpha 的一部分，而不是安装后再猜：
+这是公开 Alpha，而不是稳定生产版。目前尤其要注意：
 
-- v0.1-alpha 是 Technical Preview，不是稳定生产版本；
-- 当前运行时以 PostgreSQL / pgvector 为中心；
-- 配置体验仍偏开发者，profile 和环境变量需要手动准备；
-- 自动记忆形成仍处于实验阶段，不能假设普通对话都会自动成为可靠记忆；
-- 多 Agent / 多 writer 还未成熟；
-- 历史 active-memory 迁移不属于当前公开 Alpha 支持面；
-- provider-backed vector/rerank 的公开发行验收未使用外部 credential，因此相关 E2E 证据不属于本次 release acceptance；
-- Alpha 期间 API、工具面和 internal naming 可能继续演进；
-- 长时间 soak、所有 provider 组合以及完整生产部署，不是本版本的默认保证。
+- 暂不声称 production-ready；
+- 当前第一方真实宿主验收仍明显偏 Windows；
+- pi 的真实模型 A→B 仍属于可选 smoke，专用测试机上没有配置模型凭据，因此没有执行；
+- DSH 的宿主/bridge/召回链路已经真实跑通，但模型端使用本地无凭据 stub 做结构验证；
+- 当前宿主适配以文本记忆为主；
+- 下一阶段重点已经从“再接更多宿主”转向“记忆管理、纠错、时间变化和用户可控性”；
+- 包发布与版本兼容承诺仍比源码能力更窄。
 
-逐项限制和未测试路径见 [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md) 与 [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md)。
+维护中的最新状态见 [STATUS.md](docs/STATUS.md)。旧的 Public Alpha 验收文件会保留作为工程历史，但不再作为当前产品首页。
 
-## FAQ / 排障入口
+---
 
-### 为什么第一次写入时报表不存在？
+## 文档导航
 
-数据库 bootstrap 是显式步骤，不是自动首次运行步骤。确认你已经对 disposable PostgreSQL 执行了 `hippocampus bootstrap --target ...`，并且连接参数与容器一致。详见 [`docs/INSTALL.md`](docs/INSTALL.md) 第 7 节。
+建议从 [docs/README.md](docs/README.md) 开始。
 
-### 为什么没有向量召回或自动摘要？
+| 需求 | 文档 |
+| --- | --- |
+| 安装 | [INSTALL.zh-CN.md](docs/INSTALL.zh-CN.md) |
+| 配置 | [CONFIGURATION.md](docs/CONFIGURATION.md) |
+| 当前支持 / 测试版本 | [STATUS.md](docs/STATUS.md) |
+| 为什么做这个项目 | [WHY_HIPPOCAMPUS.md](docs/WHY_HIPPOCAMPUS.md) |
+| 架构 | [ARCHITECTURE-OVERVIEW.md](docs/ARCHITECTURE-OVERVIEW.md) |
+| 隐私与数据流 | [PRIVACY-DATA-FLOW.md](docs/PRIVACY-DATA-FLOW.md) |
+| 与其他方案比较 | [COMPARISON.zh-CN.md](docs/COMPARISON.zh-CN.md) |
+| 已知限制 | [KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) |
+| 备份恢复 | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) |
+| 升级 | [UPGRADE.md](docs/UPGRADE.md) |
 
-先检查对应 provider 是否在 `config.yaml` 中配置。未配置 embedding 时走不了向量 lane；未配置 LLM 时 Observer/E1、摘要和 topic-card 等自动形成路径会跳过，但持久化写入和关键词路径不应因此被静默丢弃。
+---
 
-### 为什么 `~` 写在 `basePath` 里不生效？
+## 接下来做什么
 
-Windows 下公开 Alpha 要求 `basePath` 使用绝对路径，不能依赖引擎展开 `~`。请按 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) 的规则填写。
+DSH 和 pi 的自动记忆适配阶段已经完成。接下来主线回到“记忆产品本身”：
 
-### `v3-core info` 是不是完整健康检查？
+- 让用户更容易查看和管理已经形成的记忆；
+- 把“纠正旧事实”“后来发生变化”做成一等能力；
+- 强化时间关系：过去正确的事实，不等于今天仍正确；
+- 在派生理解不断变化时继续保留来源和可追溯性；
+- 再根据真实使用情况扩展新的 Agent 宿主。
 
-不是。它只输出最小状态摘要。provider health 是独立路径，不能用某一行固定输出推断所有 provider 都已经可用。
+当前维护中的方向见 [STATUS.md](docs/STATUS.md)。
 
-### 发现了 bug，应该在哪里反馈？
+---
 
-一般问题和功能建议请使用 [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)。记忆质量相关问题建议使用仓库里的 **Alpha memory feedback** 模板。不要在公开 issue 中粘贴 credential、DSN、私有数据或完整配置；安全问题先阅读 [`SECURITY.md`](SECURITY.md)。
+## 贡献
 
-## Documentation map
+欢迎 Issue 和 Pull Request。修改存储、source identity、召回或宿主契约前，请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-详细的架构、安装、恢复和安全文档目前以英文为主。中文 README 只提供核心入口，不复制整套 `docs/`，以免 Alpha 阶段形成两套长期维护的完整文档。
-
-| 文档 | 用途 |
-|---|---|
-| [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md) | 项目的思想演变：从“让她记住我”、Soul，到“生成即是存在”、记忆治理和连续性问题。 |
-| [`docs/COMPARISON.zh-CN.md`](docs/COMPARISON.zh-CN.md) | 中文方案对比：Hermes 内置记忆、历史搜索、Mem0、Hindsight 与 Hippocampus 分别适合什么。 |
-| [`docs/ALPHA-TESTING.zh-CN.md`](docs/ALPHA-TESTING.zh-CN.md) | 中文 Public Alpha 实测指南：如何跑 3～7 天真实项目并提交有价值的失败案例。 |
-| [`docs/INSTALL.md`](docs/INSTALL.md) | Windows artifact build/install、disposable pgvector、Hermes host 和 bootstrap。 |
-| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | `config.yaml`、环境变量、provider 默认行为和 fail-closed 规则。 |
-| [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | PostgreSQL dump / restore 以及恢复后检查。 |
-| [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md) | 哪些数据保存在本地，哪些数据会发给已配置的 provider。 |
-| [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md) | 当前 Alpha 的逐项支持面、证据和 `UNKNOWN / NOT TESTED` 边界。 |
-| [`docs/ARCHITECTURE-OVERVIEW.md`](docs/ARCHITECTURE-OVERVIEW.md) | 模块地图、写入/读取边界和 canonical active-memory 位置。 |
-| [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) | 未完成、延期和本版本明确不关闭的问题。 |
-| [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md) | Alpha 发布门槛及后续限制。 |
-| [`src/v3-core/README.md`](src/v3-core/README.md) | `v3-core` 包说明。 |
-| [`src/v3-hermes-plugin/README.md`](src/v3-hermes-plugin/README.md) | Hermes adapter 包说明。 |
-
-## 反馈
-
-- Public Alpha 实测：[`docs/ALPHA-TESTING.zh-CN.md`](docs/ALPHA-TESTING.zh-CN.md) + [Issue #1](https://github.com/yuzi001a/hippocampus-memory/issues/1)
-- Bug 和功能建议：[GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
-- 安全问题：先阅读 [`SECURITY.md`](SECURITY.md)，不要公开提交 credential、DSN 或私有数据
+安全问题请按 [SECURITY.md](SECURITY.md) 说明提交。
 
 ## License
 
-两个包都使用 `AGPL-3.0-or-later`，具体许可证文件见 [`src/v3-core/LICENSE`](src/v3-core/LICENSE) 和 [`src/v3-hermes-plugin/LICENSE`](src/v3-hermes-plugin/LICENSE)。本仓库不会因为增加中文 README 而改变任一包的许可证。
+MIT — 见 [LICENSE](LICENSE)。
