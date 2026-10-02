@@ -1,0 +1,32 @@
+{
+  "name": "@hippocampus-memory/pi",
+  "version": "0.1.0",
+  "description": "Hippocampus memory thin client for pi: drains persisted session entries to the v3core B01 bridge and injects recalled memory as a custom context message.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "pi-package",
+    "hippocampus",
+    "memory"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test \"tests/*.test.mjs\""
+  }
+}

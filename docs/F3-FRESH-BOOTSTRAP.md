@@ -1,6 +1,13 @@
 # F3 — fresh bootstrap creates the embedding-failure ledger
 
-Status at capture: **LOCAL ACCEPTANCE PASS; repository CI and merge pending**.
+Status: **DONE — PR #26 merged** at
+`9d8101a4f48e0f2969ee216a11b8458b7ecb1f94`.
+Final review head: `ee7954bcc7f6be95e43a94ebf1b1599d8825ab1a`; product-ci and
+Windows distribution-packaging smoke both SUCCESS on that exact head. Installed
+packaging tests: **15 passed, zero skipped**; static doctor rc0. Remote main and
+merge ancestry independently read back. No production deployment.
+
+The local evidence below was captured before CI; its pending labels are historical.
 Base: `3f6adc6c2e77be983bb7ccfd1851d26ff23bf475` (accepted F2 merge).
 Branch: `fix/f3-fresh-bootstrap-embedding-failures`.
 This is isolated installed-wheel evidence, not a production deployment.
