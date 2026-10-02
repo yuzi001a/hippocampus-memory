@@ -64,23 +64,31 @@ class DshSessionImporter(Importer):
         if not root.is_dir():
             return []
 
-        found: list[Path] = []
-        # Real layout: <root>/--<cwd>--/<session-dir>/session.vN.jsonl.zstd
-        # Tolerated:   <root>/<session-dir>/session.vN.jsonl.zstd
-        #              <root>/session.vN.jsonl.zstd (flat / custom dir)
+        # Real layout:  <root>/sessions/--<cwd>--/<session-dir>/session.vN.jsonl.zstd
+        # (DSH_HOME points at the home directory; the session store lives in
+        # its `sessions/` child.) Tolerated: <root>/--<cwd>--/<dir>/… (root
+        # already points at the sessions dir), <root>/<dir>/…, <root>/… flat.
+        bases: list[Path] = []
+        sessions_dir = root / "sessions"
+        if sessions_dir.is_dir():
+            bases.append(sessions_dir)
+        bases.append(root)
+
         patterns = (
             "--*--/*/session.v*.jsonl.zst*",
             "*/session.v*.jsonl.zst*",
             "session.v*.jsonl.zst*",
         )
+        found: list[Path] = []
         seen: set[Path] = set()
-        for pat in patterns:
-            for p in sorted(root.glob(pat)):
-                if p in seen or not p.is_file():
-                    continue
-                if self._looks_like_session(p):
-                    seen.add(p)
-                    found.append(p)
+        for base in bases:
+            for pat in patterns:
+                for p in sorted(base.glob(pat)):
+                    if p in seen or not p.is_file():
+                        continue
+                    if self._looks_like_session(p):
+                        seen.add(p)
+                        found.append(p)
         return found
 
     @staticmethod

@@ -19,11 +19,11 @@ import pytest
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "i01" / "dsh"
 S1 = FIX / (
-    "--C--hp-testbed-b04-integration-20261002-runs-b04-integration-run-1-project--"
+    "sessions/--C--hp-testbed-b04-integration-20261002-runs-b04-integration-run-1-project--"
     "/session-60c82e3f-84fe-4f53-94c3-72779343a9a0/session.v4.jsonl.zstd"
 )
 S2 = FIX / (
-    "--C--hp-testbed-b04-integration-20261002-runs-b04-integration-run-1-project--"
+    "sessions/--C--hp-testbed-b04-integration-20261002-runs-b04-integration-run-1-project--"
     "/session-9a48a9ec-0280-468e-b249-dd405f68ad93/session.v4.jsonl.zstd"
 )
 
@@ -77,9 +77,18 @@ def test_assistant_native_id_and_interrupted_field():
         assert "acknowledged b04-isolated-marker-7f3a" in a.text
 
 
-def test_discover_finds_nested_layout():
+def test_discover_finds_real_layout():
+    """Real layout: <root>/sessions/--cwd--/<dir>/session.v4.jsonl.zstd."""
     imp = _importer()
     found = imp.discover(FIX)
+    assert len(found) == 2
+    assert all(p.name == "session.v4.jsonl.zstd" for p in found)
+
+
+def test_discover_accepts_sessions_dir_directly():
+    """Tolerated: root may point straight at the `sessions/` directory."""
+    imp = _importer()
+    found = imp.discover(FIX / "sessions")
     assert len(found) == 2
     assert all(p.name == "session.v4.jsonl.zstd" for p in found)
 
