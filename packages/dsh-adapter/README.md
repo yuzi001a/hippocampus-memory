@@ -174,18 +174,32 @@ blocks are dropped — never converted into invented prose. An empty result is n
 
 Run against a real DSH CLI (2026-10-02): DSH `0.2.0-rc.2` (upstream `639ed015397290b3745d163aafe02ffee4aa3f84`)
 + this adapter + a real B01 bridge + a disposable PostgreSQL, with the model endpoint replaced by a
-local credential-free stub and embeddings disabled (keyword-only recall). **16/16 checks PASS, 0
+local credential-free stub and embeddings disabled (keyword-only recall). **18/18 checks PASS, 0
 failures**: the composed profile tree really mounts the row, one recalled block reached the model
 request of the same turn (411 chars, carrying the seeded fact), the durable user and assistant
 messages were captured with their native DSH event ids, our own injected message was not recaptured,
-and reloading the session added no duplicate source. Evidence: `evidence/b04-dsh-integration-20261002/`;
+reloading the session added no duplicate source, and — with the bridge process killed mid-run — a
+fresh turn still completed with no memory injected (fail-open). Evidence: `evidence/b04-dsh-integration-20261002/`;
 harness notes: `eval/README.md`.
+
+## Tested versions
+
+| DSH version | Status |
+| --- | --- |
+| `@deepseek-ai/dsh@0.2.0-rc.2` (upstream `639ed015397290b3745d163aafe02ffee4aa3f84`) | **tested** — 39 unit tests + the isolated integration run above (2026-10-02) |
+
+Minimum known compatible version: **not claimed.** The host contract is read from `0.2.0-rc.2`;
+earlier generations (including the `0.1.0-rc.*` line) have not been exercised and are not asserted to
+work. If an older host turns out to need only a field-name/event-shape shim, that shim is welcome;
+anything needing a second lifecycle or heavy version branching is out of scope for v1.
 
 ## Limits (honest list)
 
 - The integration above is an isolated harness, not a production deployment: the model endpoint was
   a stub (no model credential exists on that machine) and embeddings were disabled. A run against a
   live model provider and a live embedding endpoint has **not** been performed.
+- Of the failure classes, only **bridge-down** is integration-covered; protocol mismatch, an oversized
+  block and invalid config are unit-covered (`tests/plugin.test.mjs`).
 - The bridge must answer `bridge_protocol_version: "b01.1"`; anything else is treated as
   unavailable by design.
 - Non-text content is dropped, not summarised.

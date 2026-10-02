@@ -659,7 +659,7 @@ branch            feat/b04-dsh-auto-memory-adapter (from origin/main 8c576b39023
 baseline upstream @deepseek-ai/dsh@0.2.0-rc.2, SHA 639ed015397290b3745d163aafe02ffee4aa3f84
 package           packages/dsh-adapter/ — zero npm dependencies, Node built-ins only, no build step
 design            docs/B04-DSH-ADAPTER-DESIGN.md
-integration       16/16 checks PASS, 0 failures — evidence/b04-dsh-integration-20261002/
+integration       18/18 checks PASS, 0 failures — evidence/b04-dsh-integration-20261002/
 production        NOT touched (no install, no restart, no schema mutation, no data write)
 ```
 
@@ -682,7 +682,8 @@ disposable PostgreSQL, with the model endpoint replaced by a local credential-fr
 embeddings disabled (keyword-only). It proves: the profile really mounts the row (`--dump-config`),
 one recalled block reached the model request of the same turn (411 chars carrying the seeded fact),
 the durable user/assistant messages were captured with native event ids, the injected message was not
-recaptured, and reloading the session produced no duplicate source. **Not covered, and not claimed:**
-a live model provider, a live embedding endpoint, and the failure-injection cases (unit-covered).
+recaptured, reloading the session produced no duplicate source, and a fresh turn completed with the
+bridge process killed and nothing injected (fail-open). **Not covered, and not claimed:** a live model
+provider, a live embedding endpoint, and every failure class except bridge-down (unit-covered).
 
 Local unit layer: `cd packages/dsh-adapter && node --test "tests/*.test.mjs"` → 39 tests pass.

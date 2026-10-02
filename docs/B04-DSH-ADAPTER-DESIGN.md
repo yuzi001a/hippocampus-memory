@@ -173,5 +173,7 @@ Two instrument details that cost a cycle each and are worth remembering:
   Setting `model` while leaving `endpoint` empty declares "embed configured but incomplete", which
   is fail-closed (every `sync_turn` 500s). Keyword-only means both empty.
 
-Result: `evidence/b04-dsh-integration-20261002/` — 16/16 checks PASS, 0 failures, with the model
-endpoint stubbed and embeddings disabled (labelled as such in every artifact).
+Result: `evidence/b04-dsh-integration-20261002/` — 18/18 checks PASS, 0 failures, with the model
+endpoint stubbed and embeddings disabled (labelled as such in every artifact). The run ends with a
+real fail-open injection: the bridge process is killed and a fresh DSH turn must still complete with
+no memory injected.

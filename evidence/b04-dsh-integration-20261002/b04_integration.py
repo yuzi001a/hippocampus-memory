@@ -468,6 +468,34 @@ def main() -> int:
     check("reload_no_duplicate_source", duplicated == 0,
           f"rows {before}->{len(rows_after)}, duplicate (role,event_id) rows={duplicated}")
 
+    # G. backend fail-open: with the bridge stopped, DSH must still finish a turn
+    #    and no memory block may reach the model.
+    record_lines_before_stop = (len(record.read_text(encoding="utf-8", errors="replace").splitlines())
+                                if record.is_file() else 0)
+    bridge.terminate()
+    try:
+        bridge.wait(timeout=15)
+    except Exception:  # noqa: BLE001 - force it, the assertion is about DSH, not the bridge
+        bridge.kill()
+    code3, stdout3, stderr3 = run_dsh("run3", DSH_QUERY, None)
+    after_lines = (record.read_text(encoding="utf-8", errors="replace").splitlines()
+                   if record.is_file() else [])
+    added = []
+    for line in after_lines[record_lines_before_stop:]:
+        try:
+            added.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    report["fail_open"] = {"rc": code3, "bridge_stopped": True,
+                           "requests_after_stop": len(added),
+                           "memory_blocks_after_stop": sum(1 for i in added if i.get("textPresent")),
+                           "stderr_tail": scrub(stderr3[-300:], secret)}
+    check("fail_open_dsh_still_works", code3 == 0,
+          f"rc={code3} with the bridge stopped; stderr tail={scrub(stderr3[-300:], secret)}")
+    check("fail_open_no_memory_injected",
+          report["fail_open"]["memory_blocks_after_stop"] == 0,
+          f"memory blocks after the bridge stopped = {report['fail_open']['memory_blocks_after_stop']}")
+
     # ── 10. teardown ───────────────────────────────────────────────────────
     for process in (stub, bridge):
         try:

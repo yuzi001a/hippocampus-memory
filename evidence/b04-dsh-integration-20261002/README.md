@@ -5,7 +5,7 @@ other hostname), Node `v24.21.0`.
 
 ## Result
 
-**VERDICT = PASS — 16/16 checks, 0 failures** (`b04-integration.json`).
+**VERDICT = PASS — 18/18 checks, 0 failures** (`b04-integration.json`).
 
 | # | Check | Observed |
 | --- | --- | --- |
@@ -17,14 +17,16 @@ other hostname), Node `v24.21.0`.
 | 6 | `seed_recallable` | keyword prefetch returned 349 chars, marker present |
 | 7 | `adapter_row_mounted` | `--dump-config` mentions the adapter row |
 | 8 | `run1_exit_zero` | real DSH CLI run rc=0 |
-| 9 | `run1_session_id` | `session-7500d871-76ec-42c1-b3ac-fb454b302a46` |
+| 9 | `run1_session_id` | `session-c59e6750-f896-4e94-aab3-18a922caaeb4` |
 | 10 | `capture_user_and_assistant` | 2 durable rows, roles `user` + `assistant` |
 | 11 | `capture_used_native_event_id` | ids are the DSH `MessageId`s, not derived |
 | 12 | `injected_memory_not_recaptured` | 0 rows contain the injected memory text |
 | 13 | `reload_exit_zero` | same session resumed, rc=0 |
 | 14 | `reload_no_duplicate_source` | rows 2→4, duplicate `(role,event_id)` rows = 0 |
-| 15 | `memory_in_same_request` | 2 of 6 recorded model requests carried a memory block |
-| 16 | `memory_carries_seeded_fact` | both blocks carry the seeded fact |
+| 15 | `fail_open_dsh_still_works` | rc=0 for a full turn **with the bridge stopped** |
+| 16 | `fail_open_no_memory_injected` | 0 memory blocks among the requests made after the stop |
+| 17 | `memory_in_same_request` | 2 of 10 recorded model requests carried a memory block |
+| 18 | `memory_carries_seeded_fact` | both blocks carry the seeded fact |
 
 The core claim — *a recalled block reaches the model request of the same turn* — is visible in
 `stub-requests.jsonl`: each matched record carries, verbatim,
@@ -39,6 +41,10 @@ The core claim — *a recalled block reaches the model request of the same turn*
 A: The b04-isolated-marker-7f3a deploy window is on Thursdays at 02:00.
 ```
 
+The two `fail_open` rows are a real end-to-end failure injection: the bridge process is terminated,
+then a fresh DSH turn runs to completion (`rc=0`, `run3.stdout.jsonl`) and the stub records the
+requests it received — none carrying memory. DSH stays usable with the memory backend gone.
+
 ## What is real here, and what is not
 
 Real: the DSH CLI (`@deepseek-ai/dsh@0.2.0-rc.2`), this adapter package, the B01 bridge
@@ -52,8 +58,8 @@ Deliberately substituted, and **not** covered by this run:
   absent), so the run proves *what was sent to the model*, not *what a model would answer*.
 - **Embeddings are disabled** (`storage.embed.endpoint` and `.model` both empty → v3core's documented
   keyword-only path), so recall here is keyword-based. A live embedding endpoint was not exercised.
-- **Failure injection** (bridge down, protocol mismatch, oversize block, bad config) is covered by
-  the unit layer, not by this run.
+- Failure injection is covered for **bridge-down** only; protocol mismatch, oversize block and
+  invalid config remain unit-covered (`tests/plugin.test.mjs`).
 
 ## Reproduction
 
@@ -75,13 +81,14 @@ Deliberately substituted, and **not** covered by this run:
 
 | File | sha256 | What it is |
 | --- | --- | --- |
-| `b04-integration.json` | `52591a3b769849b40b1969b00f5e9a9dc014f13d9b0d91cd5d70057db8b5e0ea` | the machine-readable report |
-| `b04_integration.py` | `dc70777e6644df9fc0ea491330cff24364adf2309856284c6d29eaf4053e1c71` | the driver (hash printed by the run itself as `HASH_HELPER`) |
+| `b04-integration.json` | `8ddda78636595559f06aa95891ce2ccdf24d24ffe6d2946d4059e85066df96e3` | the machine-readable report |
+| `b04_integration.py` | `f3d91387f247741a263d32ff023ebb824c24c2494160b1e830772e1d3536f227` | the driver (hash printed by the run itself as `HASH_HELPER`) |
 | `b04-run-on-y400.ps1` | `da3825ffdd7aea4cf1bc4d7117df99085fcf954e7addd7a97878d804b536c894` | the wrapper (hostname gate) |
-| `stub-requests.jsonl` | `bd12faf3eb328967ba86900aa83bbfa584403b5cbd40240b4acde4e7022f66b1` | what the model endpoint received |
-| `bridge.log` | `e648b50efe3f40c92c6681e4ae76d6efa700b3dd7ca1121214f5897f7a0de8a7` | bridge-side log |
-| `run1.stdout.jsonl` | `a0ffa747d79fbee0ddee562503c7868fc81b2a06f2d2b372932d0fa445966368` | first DSH turn (`--json` stream) |
-| `run2.stdout.jsonl` | `751f08d216302e59c7230a213d2c4a6e0383f452f53b87cf5da4b9ecbb9acdc1` | reloaded-session turn |
+| `stub-requests.jsonl` | `642f8ffb8c66aada691ebf50c47f54c4c4316e11c8727cfefdfd45dbcb3e3ce7` | what the model endpoint received |
+| `bridge.log` | `facaaf1e8a2cb9cf6f3967957601e47185f7993d17dcc0d6bbb393056f2da9f8` | bridge-side log |
+| `run1.stdout.jsonl` | `789be48a23a4973bf253904da01012b86337f1bc8c673b1a2226d920bc580ab2` | first DSH turn (`--json` stream) |
+| `run2.stdout.jsonl` | `def7a11f56fa0387ef28d68fc3022b4be7438566b5b1c3404fc8b10e12a2204f` | reloaded-session turn |
+| `run3.stdout.jsonl` | `e6ed2d43dd59aac2e21e9e92454f703afbd8bbf33a23f386ae85516e6d13dd22` | the fail-open turn (bridge stopped) |
 | `profile-config.yaml` | `fc341286c68d11e14112ae8eb09b1e1f0adc6a986cce09b67033968959ee0ede` | the disposable core config (no credentials) |
 
 `stub-requests.jsonl` is append-only; the report's request counts are read after teardown, so the

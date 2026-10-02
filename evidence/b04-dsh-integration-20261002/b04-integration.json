@@ -36,7 +36,7 @@
     },
     "run1_session_id": {
       "ok": true,
-      "observed": "session_id=session-7500d871-76ec-42c1-b3ac-fb454b302a46"
+      "observed": "session_id=session-c59e6750-f896-4e94-aab3-18a922caaeb4"
     },
     "capture_user_and_assistant": {
       "ok": true,
@@ -44,7 +44,7 @@
     },
     "capture_used_native_event_id": {
       "ok": true,
-      "observed": "native event ids=['05e00e4a-9d8e-4843-a18b-c3090ed0954d', 'df48ed44-33de-4a4e-b6f1-841ee38cb571']"
+      "observed": "native event ids=['a20d2a08-052e-42b5-98e1-a48e8686f675', '3cfcdf16-77a2-4664-ba33-626731ee767c']"
     },
     "injected_memory_not_recaptured": {
       "ok": true,
@@ -58,9 +58,17 @@
       "ok": true,
       "observed": "rows 2->4, duplicate (role,event_id) rows=0"
     },
+    "fail_open_dsh_still_works": {
+      "ok": true,
+      "observed": "rc=0 with the bridge stopped; stderr tail="
+    },
+    "fail_open_no_memory_injected": {
+      "ok": true,
+      "observed": "memory blocks after the bridge stopped = 0"
+    },
     "memory_in_same_request": {
       "ok": true,
-      "observed": "2 of 6 model requests carried a memory block"
+      "observed": "2 of 10 model requests carried a memory block"
     },
     "memory_carries_seeded_fact": {
       "ok": true,
@@ -103,7 +111,7 @@
     "password_redacted_by_cli": true
   },
   "bridge": {
-    "port": 65206,
+    "port": 65269,
     "health": {
       "ok": true,
       "pg": true,
@@ -111,7 +119,7 @@
     }
   },
   "stub": {
-    "port": 65211,
+    "port": 65274,
     "record": "C:\\hp-testbed\\b04-integration-20261002\\runs\\b04-integration-run-1\\runs\\stub-requests.jsonl",
     "credential_free": true
   },
@@ -161,7 +169,7 @@
     "stdout_chars": 587,
     "stderr_tail": ""
   },
-  "session_id": "session-7500d871-76ec-42c1-b3ac-fb454b302a46",
+  "session_id": "session-c59e6750-f896-4e94-aab3-18a922caaeb4",
   "capture": {
     "rows": 2,
     "roles": [
@@ -169,8 +177,8 @@
       "user"
     ],
     "event_ids": [
-      "05e00e4a-9d8e-4843-a18b-c3090ed0954d",
-      "df48ed44-33de-4a4e-b6f1-841ee38cb571"
+      "a20d2a08-052e-42b5-98e1-a48e8686f675",
+      "3cfcdf16-77a2-4664-ba33-626731ee767c"
     ],
     "hosts": [
       "dsh"
@@ -191,12 +199,19 @@
     "rows_after": 4,
     "duplicate_identity_rows": 0
   },
+  "fail_open": {
+    "rc": 0,
+    "bridge_stopped": true,
+    "requests_after_stop": 4,
+    "memory_blocks_after_stop": 0,
+    "stderr_tail": ""
+  },
   "teardown": {
     "bridge_stopped": true,
     "stub_stopped": true
   },
   "model_request": {
-    "requests": 6,
+    "requests": 10,
     "requests_with_memory": 2,
     "matched_has_marker": true,
     "matched_chars": [

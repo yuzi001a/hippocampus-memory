@@ -10,14 +10,15 @@ lets a real DSH host be exercised without a model provider:
   this adapter mounted → assertions) is the release owner's, and lives with the run's evidence:
   `evidence/b04-dsh-integration-20261002/`.
 
-**Result on 2026-10-02 — 16/16 checks PASS, 0 failures.** Real DSH CLI `0.2.0-rc.2` + this adapter +
+**Result on 2026-10-02 — 18/18 checks PASS, 0 failures.** Real DSH CLI `0.2.0-rc.2` + this adapter +
 real B01 bridge + disposable PostgreSQL; model endpoint = the stub; embeddings disabled
 (keyword-only recall). Filed evidence: `b04-integration.json` (the machine-readable report),
-`stub-requests.jsonl` (what the model actually received), `bridge.log`, `run1.stdout.jsonl`,
-`profile-config.yaml`.
+`stub-requests.jsonl` (what the model actually received), `bridge.log`, `run1/2/3.stdout.jsonl`,
+`profile-config.yaml`. The run includes a real fail-open injection: the bridge is killed and a fresh
+DSH turn must still complete with nothing injected.
 
 What that run does **not** cover, and must not be read as covered: a live model provider, a live
-embedding endpoint, and the failure-injection cases below (those are unit-covered — see
+embedding endpoint, and every failure class except bridge-down (the rest are unit-covered — see
 `tests/plugin.test.mjs`, "every failure class fails open with at most one warning per class").
 
 Do not record a result here that was not actually observed. `exit 0` from a unit run is not
