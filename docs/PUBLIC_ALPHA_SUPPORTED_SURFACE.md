@@ -1,5 +1,8 @@
 # Public Alpha Supported Surface
 
+> **Historical snapshot notice (2026-10-02):** This file is retained as the evidence contract for an earlier public-alpha baseline. It is **not** the maintained summary of current `main`; automatic pi (B03) and DSH (B04) integrations were completed after this snapshot. For current support, tested host versions and limitations, read [`STATUS.md`](STATUS.md).
+>
+
 > **The single contract for what the public-alpha release of v3 Memory
 > Plugin promises to do, in what environment, and with what evidence.**
 >
