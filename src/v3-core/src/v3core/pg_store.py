@@ -737,8 +737,66 @@ class PgEmbedStore:
             self._fire_topics_commit(on_topics_commit)
         return removed
 
+    def _get_qa_pair(self, source_id: str) -> dict | None:
+        """按引擎自己打印的 qa 引用形态取 qa_pairs 原文。
+
+        接受两种形式:
+          * 数字代理形式 ``qa_<qa_pairs.id>`` —— recall_pool.py 里
+            ``f"qa_{_r[0]}"``（``_r[0]`` 即 qa_pairs.id）打印的就是它;
+          * 规范形式 ``qa_pairs.source_id`` 原串（如
+            ``qa_sync/pi/b03-session-a/b03A-0001``）。
+
+        查不到一律返回 None（不抛异常），由调用方落回旧命名空间分支。
+        """
+        _rest = source_id[3:]
+        try:
+            with self.lease() as conn:
+                if not conn:
+                    return None
+                with conn.cursor() as cur:
+                    if _rest.isdigit():
+                        cur.execute(
+                            "SELECT id, source_id, session_id, turn_id, question, answer, "
+                            "timestamp FROM qa_pairs WHERE id = %s LIMIT 1",
+                            (int(_rest),),
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT id, source_id, session_id, turn_id, question, answer, "
+                            "timestamp FROM qa_pairs WHERE source_id = %s LIMIT 1",
+                            (source_id,),
+                        )
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    # content 必须非空: question 缺失时只让 Q 段为空，A 段保留
+                    _ts = str(row[6])[:19] if row[6] else ""
+                    return {
+                        "content": f"[{_ts}] Q: {row[4] or ''}\nA: {row[5] or ''}",
+                        "metadata": {
+                            "role": "qa",
+                            "qa_id": row[0],
+                            "qa_source_id": row[1],
+                            # 必须是该行自己的 session_id，绝不从传入字符串编造
+                            "session_id": row[2],
+                            "turn_id": row[3],
+                            "timestamp": str(row[6]) if row[6] else None,
+                        },
+                    }
+        except Exception as e:
+            logger.error("_get_qa_pair(%r) 失败: %s", source_id, e)
+            return None
+
     def get_message_context(self, source_id: str) -> dict | None:
         """按 source_id/id 从 conversation_stream 获取消息原文。"""
+        # 缺陷修复: 召回引擎打印的引用（qa_<row id> / 规范 qa_*）此前读路径
+        # 从不解析，qa_1 落空 -> "source_id 未找到"。这里先解析引擎自己发出的
+        # 引用，查不到再原样落回下面未改动的 conversation_stream 逻辑。
+        sid = (source_id or "").strip()
+        if sid.startswith("qa_"):
+            _qa = self._get_qa_pair(sid)
+            if _qa:
+                return _qa
         try:
             with self.lease() as conn:
                 if not conn:
@@ -786,7 +844,10 @@ class PgEmbedStore:
                 if not conn:
                     return None
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COALESCE(body, summary, '') FROM topics WHERE topic_id = %s", (source_id,))
+                    # topic lane 打印的是 f"topic_{tid}"（recall_pool.py），
+                    # topics.topic_id 存的是裸 tid，故先剥命名空间前缀
+                    _lookup = source_id[6:] if source_id.startswith("topic_") else source_id
+                    cur.execute("SELECT COALESCE(body, summary, '') FROM topics WHERE topic_id = %s", (_lookup,))
                     row = cur.fetchone()
                     if row:
                         return {"content": row[0] if row[0] else ""}
