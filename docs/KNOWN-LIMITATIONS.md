@@ -1,5 +1,8 @@
 # Known Limitations — v3 Memory Plugin (Public Alpha Hardening)
 
+> **Current-status note (2026-10-02):** This is the longer engineering limitation inventory and contains historical items. For the maintained public snapshot of what is supported now, start with [`STATUS.md`](STATUS.md). Items below are retained when useful for traceability even if later milestones narrowed or closed them.
+>
+
 > This document lists things that are **known to be incomplete, deferred,
 > experimental, or unverified** at the time of writing. It does not list
 > features the engine simply doesn't have — for that, see

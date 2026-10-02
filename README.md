@@ -2,288 +2,231 @@
 
 > **Give an agent a past.**
 
-**Hippocampus v0.1-alpha** — Technical Preview / Public Alpha
+Hippocampus is a local-first, open-source long-term memory runtime for AI agents. It records durable conversation sources, recalls relevant past context in later sessions, and keeps the path back to the original source inspectable.
 
-Hippocampus is a local-first, open-source long-term memory runtime for AI agents.
+**Status:** Public alpha · active development. The current `main` includes automatic-memory adapters for **DeepSeek Harness (DSH)** and **pi**.
 
-It began with a simple problem: an agent can spend hours learning a project, building shared context, and developing a recognizable way of interacting with you — then a new session begins, and much of that continuity disappears.
+[简体中文](README.zh-CN.md) · [Install](docs/INSTALL.md) · [Documentation](docs/README.md) · [Current status](docs/STATUS.md) · [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md)
 
-At first, I only wanted the agent to remember. Over time, as my understanding of LLMs changed, the question changed too:
+---
 
-**If generation is existence, how can the past participate in the next generation?**
+## Why this exists
 
-That is the larger question behind Hippocampus.
+The first problem was simple: an agent can spend hours learning a project, then start a new session and lose much of that continuity.
 
-English | [简体中文](README.zh-CN.md)
+The harder problem appeared later:
 
-> **Status:** v0.1-alpha is a technical preview, not a stable production release. This README keeps a strict boundary between paths backed by current disposable-environment evidence and paths that are still experimental, unknown, or untested.
+> **Forgetting is bad. Remembering the wrong thing can be worse.**
 
-### Start here
+A useful memory system therefore cannot be only a transcript archive or a vector database. It needs durable sources, traceable recall, correction paths, rebuildable derived state, and a clear boundary between **what actually happened** and **what the system later inferred from it**.
 
-- **Want to understand the idea?** Read [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md).
-- **Choosing between memory approaches?** Read [`docs/COMPARISON.md`](docs/COMPARISON.md).
-- **Want to test the alpha on a real project?** Follow [`docs/ALPHA-TESTING.md`](docs/ALPHA-TESTING.md) and join [Public Alpha issue #1](https://github.com/yuzi001a/hippocampus-memory/issues/1).
-- **Need the exact supported boundary?** Read [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md).
+Hippocampus follows one rule throughout the design:
 
-## Why memory is more than storing history
+> **Preserve the past. Keep its interpretation revisable.**
 
-I originally treated long-term memory as a storage-and-retrieval problem: preserve the conversation, search it later, and inject the relevant pieces back into context.
+The longer design story is in [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md).
 
-Real use made the problem harder. Once a memory re-enters context, it becomes part of the conditions that shape the next generation. A wrong memory, an outdated judgment, or a summary that has slowly drifted away from its source can make an agent worse than having no memory at all.
+---
 
-That led to a distinction that now sits near the center of Hippocampus:
+## What works today
 
-**What happened, what the system later concluded about it, and what the model currently believes are not the same thing.**
+### Automatic memory in real agent hosts
 
-Raw conversation sources should be preserved as faithfully as possible. Topics, observer notes, embeddings, long-term identity layers, and other derived structures should be allowed to change, be rebuilt, or even be discarded as better models and better ideas arrive.
+| Host | Current support | Tested surface |
+| --- | --- | --- |
+| **DeepSeek Harness (DSH)** | **AUTO** — automatic user/assistant capture + current-turn automatic recall | Tested with `@deepseek-ai/dsh@0.2.0-rc.2` against the current upstream hook contract. Real host + B01 bridge + disposable PostgreSQL integration: **18/18 checks PASS**. |
+| **pi** | **AUTO** — automatic persisted-message capture + one additive recall per user input | Tested with pi **0.99.2** / Node **24.21.0**. Real host load, isolated PostgreSQL ingest, recall, per-turn latch and source-trace resolution PASS. |
+| **Hermes Agent** | Provider/tool integration | Existing `v3-hermes-plugin` integration with the public tool surface. See the plugin README for its narrower evidence boundary. |
 
-In short:
+Adapter details:
 
-> **The past should be preserved. Its interpretation must remain revisable.**
+- [DSH adapter](packages/dsh-adapter/README.md)
+- [pi adapter](packages/pi-adapter/README.md)
+- [Hermes plugin](src/v3-hermes-plugin/README.md)
 
-## Generation is existence
+### Core behavior
 
-Early in the project, I tried to define an agent's personality through a **Soul** / system prompt: who it was, how it spoke, what kind of relationship we had, and what should remain stable across sessions.
+The current core supports the pieces needed for those host integrations:
 
-Later I stopped thinking of the agent as a complete entity sitting somewhere behind the prompt, merely waiting to be awakened again. The more useful model for me became:
+- durable conversation-source ingest;
+- canonical event identity and idempotent replay;
+- PostgreSQL + pgvector storage;
+- keyword and optional vector recall;
+- explicit-memory storage;
+- exact source readback for recalled references;
+- fresh bootstrap and backup/restore;
+- fail-open host adapters — memory failure should not take the agent down;
+- provider configuration that is local and opt-in.
 
-**Generation is existence.**
+The engine also contains observer, topic, yin/E1, journal and other derived-memory paths. Not every internal path is part of the current supported product surface. See [Current status](docs/STATUS.md) for the boundary.
 
-The agent that exists in this moment is produced by the interaction of the LLM, system prompt, long-term memory, shared history, current context, tool results, environment, and current input.
+---
 
-Changing the underlying LLM changes the agent noticeably — its capabilities, tone, and reasoning style can all shift. Yet in practice, when much of the shared history and conditioning remains, some recognizable continuity can survive even across different LLMs.
+## How it fits together
 
-That pushed Hippocampus away from the idea of memory as a hard drive attached to an already-continuous self. Instead, memory becomes one of the things that allows a past state to influence the formation of a future one.
-
-Hippocampus does **not** claim that long-term memory creates or proves machine consciousness. It asks a smaller engineering question first: what changes when an intelligent system can carry parts of its past into future generations?
-
-The longer version of this design and philosophical history lives in [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md).
-
-## What this is today
-
-The public alpha currently ships two coupled Python packages:
-
-| Package | Role | Repo path |
-|---|---|---|
-| **v3-core** | Memory engine: PostgreSQL + pgvector storage adapter, source ingest, explicit-memory canonical writer, keyword recall, and optional embedding / rerank paths. The codebase also contains observer, E1/yin, topic-card, journal, and QA derivation paths, which are not all part of the evidence-backed alpha surface. | `src/v3-core/` |
-| **v3-hermes-plugin** | Adapter that registers `deep_memory_v3` as a memory provider for the Hermes Agent host. It wires the current hook/tool contract and exposes 13 public tools. A working Hermes host is required for full plugin-mediated end-to-end use. | `src/v3-hermes-plugin/` |
-
-Hippocampus is the public name of the V3 memory runtime. Package names, CLI names, configuration keys, and tool names still use the existing `v3-core`, `v3-hermes-plugin`, `v3-core info`, and related identifiers in this release.
-
-## Design principles
-
-- **Source first.** Raw conversation data and explicit memories are durable sources; derived indexes and summaries should be rebuildable.
-- **Canonical active memory.** Explicit memories have one durable PostgreSQL source of truth instead of depending on a legacy mirror.
-- **Durability before derivation.** A source or explicit-memory write is reported separately from optional downstream embedding, summarization, or other derived work.
-- **Fail-closed privacy.** An unconfigured provider receives no data; network providers are opt-in through local configuration.
-- **Evidence before claims.** Code existence is not the same as a supported capability. Experimental and untested paths stay labeled as such.
-
-## What works today (evidence-backed alpha surface)
-
-The supported-surface contract — including what passes on the current HEAD and what remains **UNKNOWN / NOT TESTED** — lives in [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md). Remaining limitations are listed in [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) and [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md).
-
-The following rows summarize current evidence from a fresh disposable Windows 10 / Python 3.11 / `pgvector/pgvector:pg17` environment:
-
-| Capability | Status |
-|---|---|
-| Fresh non-editable wheel install of `v3-core` + `v3-hermes-plugin`; imports succeed; plugin tool schema count = 13. | **PASS** |
-| `V3CORE_PG_PASSWORD` honored as the required credential. | **PASS** |
-| Packaged `hippocampus bootstrap` creates the 9-table disposable schema (six core tables — `qa_pairs`, `conversation_stream`, `topics`, `topic_entries`, `observation_notes`, `yin_paragraphs` — plus `explicit_memories` and the two derived-index sidecars `qa_embedding_chunks` / `observation_embedding_chunks`) and is idempotent on re-run. | **PASS** |
-| `sync_turn` durably writes source rows into `conversation_stream`; focused QA pairing tests pass separately. | **PASS** |
-| Exact retry of an already-recorded turn deduplicates instead of duplicating the source row. | **PASS** |
-| Restarted process can read back previously written active-memory markers; focused ingest recovery tests cover cursor/orphan behavior. | **PASS / EVIDENCE** |
-| `v3_store` / `v3_add` write through `ActiveMemoryWriter` into `public.explicit_memories`. | **PASS** |
-| Active-memory keyword readback works in the fresh export smoke. Earlier disposable evidence also covers the vector/RRF lane with a local deterministic embed setup. | **PASS / EVIDENCE** |
-| Soft archive is supported; hard delete is intentionally rejected by design. | **PASS / EVIDENCE** |
-| `pg_dump -Fc` + restore into an isolated empty pg17 reproduces the stored data and allows post-restore write + keyword recall. | **PASS** |
-| `v3_health` per-provider status report end-to-end. | **UNKNOWN / NOT TESTED** |
-| `v3_extract(write=True)` LLM-driven extraction end-to-end. | **UNKNOWN / NOT TESTED** |
-| Observer automatic memory flow, E1/yin synthesis, and topic-card extraction end-to-end. | **UNKNOWN / NOT TESTED** |
-| Full Hermes plugin-mediated E2E with host-networked LLM + embedding provider. | **UNKNOWN / NOT TESTED** |
-
-**Experimental / unsupported in this alpha contract:**
-
-- manual topic surgery (`v3_topic_correct`), old `b_*` / `shou_*` / MOC paths, legacy dedup, SQLite active mirror, and historical SQLite↔PG migration;
-- Recall V2 typed provenance / temporal intent — post-alpha, not present in this public alpha;
-- multi-writer and multi-agent routing — not implemented;
-- long-soak evidence and any "no known issue" claim.
-
-### Host adapters (capability matrix)
-
-| Host | Support level | What that means | Evidence |
-|---|---|---|---|
-| Hermes Agent (`v3-hermes-plugin`) | provider | registered memory provider; 13 tools + prefetch/sync_turn hooks | plugin-mediated E2E still `UNKNOWN / NOT TESTED` (see the table above) |
-| DeepSeek Harness (DSH) via its official MCP client | **TOOL** | explicit tool calls only — **no** automatic recording, **no** automatic recall injection (that is B04) | verified on the public `v0.2.8` asset: 13 tools discovered, durable store with a 1024-d vector, reworded question recalled the record (`cosine 0.5324`), full source read, surviving a full host restart — [`docs/B02-DSH-TOOL-SUPPORT.md`](docs/B02-DSH-TOOL-SUPPORT.md) |
-| pi (`packages/pi-adapter`, `@hippocampus-memory/pi`) | **AUTO — supported (B03 DONE)** | automatic recording of persisted user/assistant text + one additive recall injection per user input, over the unchanged B01 bridge (`b01.1`); text-only, fail-open, never replaces host context | hook/wire contract read from installed pi **0.99.2** SDK sources, **not** from a running host — [`docs/B03-PI-ADAPTER-DESIGN.md`](docs/B03-PI-ADAPTER-DESIGN.md). Package suite and reproducible build pass; a real pi 0.99.2 / Node 24.21.0 host installed the local tarball and loaded it (`get_commands` listed `hippocampus`, `/hippocampus status` exit 0); isolated runs drove adapter → bridge → disposable PostgreSQL through persistence, recall, the per-turn latch and exact-source resolution (`qa_<id>` → `qa_pairs` → native source) — the second passing every host check, the first kept as the pre-fix baseline ([`packages/pi-adapter/README.md`](packages/pi-adapter/README.md)). Real model-driven A→B is an **optional release smoke, not executed** — the test laptop has no model credential configured. Recording-ready scenario: [`packages/pi-adapter/demo/60-90s-demo.md`](packages/pi-adapter/demo/60-90s-demo.md) (`SCRIPT READY / NOT YET EXECUTED`) |
-
-## Why this is not just a vector database
-
-Vector similarity is only one possible recall lane. Hippocampus also cares about whether source data survives, whether explicit memory has a canonical durable home, whether the system still works without an embedding provider, whether derived state can be rebuilt, whether restart and backup/restore preserve usable memory, and whether the boundary between evidence and interpretation remains inspectable.
-
-A memory system that retrieves impressive-looking text but loses provenance, drifts from its sources, or cannot survive a restart is not the system this project is trying to build.
-
-## Install at a glance
-
-The intended public-alpha setup is **Windows + fresh `venv` + non-editable wheel artifacts built from this repo + disposable PostgreSQL/pgvector container + a separately-installed Hermes Agent host**. The full step-by-step contract is in [`docs/INSTALL.md`](docs/INSTALL.md) ([中文](docs/INSTALL.zh-CN.md)). The commands below keep the same bootstrap model rather than inventing a second quickstart path.
-
-> **Hermes is a separate prerequisite, not a host package dependency here.** The sprint used current upstream [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent) installed with `uv sync`; this public repo does not claim a Hermes wheel/sdist exists. Install Hermes first using its official docs and only then install the `v3-hermes-plugin` artifact into the **same** Hermes host environment.
-
-```powershell
-# 0. Prerequisite: a working Hermes Agent host (separate repo).
-#    Follow the official install: https://github.com/NousResearch/hermes-agent
-#    No Hippocampus-controlled Hermes wheel — install upstream and verify with
-#    `hermes --version` before continuing.
-
-# 1. Build non-editable wheel + sdist artifacts for both packages
-uv build --wheel --sdist --out-dir .\dist\v3-core .\src\v3-core
-uv build --wheel --sdist --out-dir .\dist\v3-hermes-plugin .\src\v3-hermes-plugin
-
-# 2. Fresh venv for the v3 artifacts (do not reuse an old venv)
-uv venv --python 3.11 .venv
-.\.venv\Scripts\Activate.ps1
-
-# 3. Install the actual built wheels — NOT editable, NOT from source tree
-uv pip install .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
-uv pip install .\dist\v3-hermes-plugin\v3_hermes_plugin-4.0.0-py3-none-any.whl
-uv pip check   # pip-compatible; verifies the two wheels are compatible
-
-# 4. Disposable pgvector on a non-production port (port 5433 is refused)
-$pgPort = 55432
-$pgPassword = "<local-only-password>"   # replace; never reuse a real password
-
-docker run --name v3-pgvector-alpha --rm -d `
-  -e POSTGRES_PASSWORD=$pgPassword `
-  -e POSTGRES_DB=v3embeddings_alpha `
-  -p "${pgPort}:5432" `
-  pgvector/pgvector:pg17
-
-# 5. Required credentials before doctor / bootstrap / write
-$env:V3CORE_PG_PASSWORD = $pgPassword
-$env:PGPASSWORD        = $pgPassword
-
-# 6. Static read-only install check
-hippocampus doctor --static
-
-# 7. Runtime integrity — verify the host ACTUALLY loads this install.
-#    Version strings cannot tell builds apart (both read "4.0.0"); the check
-#    compares CONTENT fingerprints under the live process environment.
-hippocampus doctor --runtime --wheel .\dist\v3-core\v3_core-4.0.0-py3-none-any.whl
-#    Expect: "runtime integrity: HEALTHY" (exit 0).
-#    warn exit  = a restart is still pending (stale process).
-#    error exit = the host resolves to a different (shadowed) copy — fix the
-#                 environment before trusting the install.
-#    See docs/RUNTIME-INTEGRITY.md and docs/UPGRADE.md.
-
-# 8. Explicit database bootstrap against the disposable target.
-#    Port 5433 and local `v3embeddings` are unconditionally refused — no override.
-hippocampus bootstrap --target "postgres://postgres@127.0.0.1:${pgPort}/v3embeddings_alpha"
+```text
+        ┌─────────────────────────────┐
+        │     Agent host / session    │
+        │  DSH · pi · Hermes · later │
+        └──────────────┬──────────────┘
+                       │ host events / recall hook
+                       ▼
+        ┌─────────────────────────────┐
+        │       Thin host adapter     │
+        │ capture · recall · fail-open│
+        └──────────────┬──────────────┘
+                       │ B01 bridge contract
+                       ▼
+        ┌─────────────────────────────┐
+        │          v3-core            │
+        │ ingest · recall · provenance│
+        └──────────────┬──────────────┘
+                       │
+              ┌────────┴────────┐
+              ▼                 ▼
+       durable sources      derived memory
+       conversation         embeddings/topics/
+       explicit memory      notes/indexes
+              │                 │
+              └───────┬─────────┘
+                      ▼
+              PostgreSQL/pgvector
 ```
 
-> **Database bootstrap is explicit, not automatic.** `v3core.active_memory_store` does not apply the schema artifact on first write. `hippocampus bootstrap` is the documented packaged command; it refuses port `5433` and local `v3embeddings` unconditionally, with no override flag.
->
-> **Configure `memory: provider: deep_memory_v3` in your Hermes host.** The plugin entry point is `hermes_agent.memory_providers` → `deep_memory_v3 = v3hermes:register`. `HERMES_HOME` / profile config is supported; no production profile is shipped.
->
-> **The legacy `src/v3-core/scripts/bootstrap_alpha_db.py` remains source-tree / development-only.** Use `hippocampus bootstrap` for the packaged distribution path.
+The key architectural distinction is deliberate:
 
-### pi adapter (optional host)
+- **Sources are durable.** Raw conversation events and canonical explicit memories should survive.
+- **Derived memory is revisable.** Embeddings, topics, summaries and higher-level interpretations may be rebuilt as models and algorithms improve.
+- **Recall stays traceable.** A retrieved claim should be able to resolve back toward stored evidence instead of becoming an uninspectable summary.
 
-The Pi adapter is a separate npm package in this repo; it is **AUTO**-level (records persisted
-user/assistant text and injects one additive recall block per user turn) and it is **fail-open** —
-if the bridge or the config is unavailable, pi keeps working and the adapter reports why.
+---
 
-```powershell
-# 1. build the package (writes dist/, which the manifest points pi at)
-npm --prefix .\packages\pi-adapter run build
-npm --prefix .\packages\pi-adapter test          # 34 tests, no network, no services
+## Quick start
 
-# 2. pack it and install the extracted package directory (the verified sequence)
-npm --prefix .\packages\pi-adapter pack --pack-destination .\dist
-tar -xzf .\dist\hippocampus-memory-pi-0.1.0.tgz
-pi install .\package --local --approve
+Hippocampus is still an alpha, so the supported setup is intentionally explicit rather than a one-line installer.
 
-# 3. verify the host actually loaded it — inside pi:
-#    /hippocampus status      -> handled, exit 0
+1. Install and bootstrap the core using [docs/INSTALL.md](docs/INSTALL.md).
+2. Configure storage/providers using [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+3. Choose an agent integration:
+   - [DeepSeek Harness](packages/dsh-adapter/README.md)
+   - [pi](packages/pi-adapter/README.md)
+   - [Hermes Agent](src/v3-hermes-plugin/README.md)
+4. Verify the backend/adapter status before using it on important work.
+5. Read [Known limitations](docs/KNOWN-LIMITATIONS.md) before treating the alpha as production infrastructure.
+
+For backup and upgrades:
+
+- [Backup & restore](docs/BACKUP-RESTORE.md)
+- [Upgrade guide](docs/UPGRADE.md)
+
+---
+
+## What “automatic memory” means here
+
+For the current DSH and pi adapters, the intended user experience is:
+
+```text
+Session A
+  You discuss a decision, fact or project detail.
+  Hippocampus records the host's real persisted message identity.
+
+New session
+  You ask about that past detail.
+  The adapter triggers recall automatically.
+  Relevant memory is added to the current request.
+  The source reference remains resolvable.
 ```
 
-Adapter config is read from `HIPPOCAMPUS_PI_CONFIG`, else `<cwd>/.pi/hippocampus.json`
-(`<cwd>` becomes `project_id`). It has **no credential field by design**. Details, the config
-schema, the failure states and the exact limitations are in
-[`packages/pi-adapter/README.md`](packages/pi-adapter/README.md); the design and the wire contract
-are in [`docs/B03-PI-ADAPTER-DESIGN.md`](docs/B03-PI-ADAPTER-DESIGN.md).
+No manual `remember` or `search` step is required for the normal path.
 
-## External services
+The adapters are intentionally thin. Host lifecycle logic stays in the adapter; durable memory rules stay in the core.
 
-Hippocampus can run its durable local pipeline on PostgreSQL/pgvector. Optional provider-backed paths are configured by the user:
+---
 
-| Purpose | What it does | What you provide |
-|---|---|---|
-| Embedding | Vectorizes text for vector recall and some derived paths. | An OpenAI-compatible `/v1/embeddings` endpoint. The current schema uses `VECTOR(1024)`. |
-| LLM | Powers observer/session-summary/topic-card/E1-style derivation paths. | An OpenAI-compatible chat-completions endpoint. If absent, durable storage and keyword recall still work; LLM-derived paths skip. |
-| Rerank | Re-scores recall candidates. | A compatible rerank endpoint. If absent, rerank is skipped. |
+## Reliability principles
 
-If a provider is not configured, Hippocampus does not send data to it. See [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md) for the current data-flow contract.
+Hippocampus has accumulated a lot of reliability work because memory errors compound over time. The current project rules are:
 
-## Where this is going
+- **Source first.** Do not truncate or replace the authoritative raw record to satisfy an embedding/index limit.
+- **Durability before derivation.** A source write and an embedding/summary result are not the same success condition.
+- **Canonical identity.** Host/session/event identity is the durable replay boundary.
+- **Fail open at the host boundary.** If memory is unavailable, the agent should keep working.
+- **Fail closed on isolation.** Test/recovery environments must not silently fall back to production paths.
+- **Evidence before claims.** A code path existing in the repository is not enough to call it supported.
 
-The project started with the question, “How do I stop an agent from forgetting?” It has gradually moved toward harder questions: how experience becomes memory, how mistaken memory should be corrected, how long-term identity can change without becoming unstable, and when the past should be recalled again during a long-running reasoning process.
+Engineering details live under [docs/reliability](docs/reliability/) and the milestone/evidence documents linked from the [documentation index](docs/README.md).
 
-The separate [`cognitive-recall-loop`](https://github.com/yuzi001a/cognitive-recall-loop) experiment explores one of those questions directly:
+---
 
-> **One conversation turn is not one cognitive cycle.**
+## Evaluation
 
-Hippocampus does not pretend these questions are solved. The point is to make them concrete enough to implement, observe, break, revise, and test.
+Hippocampus has been tested on the LoCoMo long-context memory benchmark as a research signal, not as a claim that benchmark score equals real-world memory quality.
 
-## Feedback
+The historical evaluation track includes:
 
-- **Public Alpha testers:** start with [`docs/ALPHA-TESTING.md`](docs/ALPHA-TESTING.md) and [issue #1](https://github.com/yuzi001a/hippocampus-memory/issues/1).
-- **Memory-quality reports:** use the **Alpha memory feedback** issue template so stale, missing, duplicated, or misleading recalls are easier to compare.
-- **Bug reports and feature requests:** [GitHub Issues](https://github.com/yuzi001a/hippocampus-memory/issues)
-- **Security-sensitive reports:** do not post secrets, credentials, DSNs, or private data in a public issue; see [`SECURITY.md`](SECURITY.md)
+- Hippocampus: **1077.5 / 1540 = 69.97%**
+- no-long-term-memory baseline: **6.85%**
+- gold-context reference: **75.84%**
 
-## Tested versions
+See [evaluation/locomo-recall-v2.md](docs/evaluation/locomo-recall-v2.md) for the protocol and caveats.
 
-What the current evidence was actually produced with — not a support matrix, and not a blanket
-compatibility claim:
+---
 
-| Component | Tested | Where |
-|---|---|---|
-| Python | 3.11 (`product-ci (py3.11)`) and 3.12 (local test runs) | both wheels are `py3-none-any` |
-| PostgreSQL + pgvector | PG 17 with pgvector (disposable `pgvector/pgvector:pg17`); PG 17.10 / pgvector 0.8.7 on the acceptance laptop | disposable databases only — production is never the test target |
-| Windows | Windows 10 22H2 (build 19045) | non-Windows is **untested** |
-| Hermes Agent | upstream [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent), installed separately | plugin-mediated E2E is still `UNKNOWN / NOT TESTED` |
-| DeepSeek Harness (DSH) | the public `v0.2.8` asset, via its official MCP client | TOOL level — see [`docs/B02-DSH-TOOL-SUPPORT.md`](docs/B02-DSH-TOOL-SUPPORT.md) |
-| pi | `0.99.2` on Node `24.21.0` (acceptance laptop) and Node `22.22.3` (build/dev) | AUTO level; the model-driven A→B smoke has **not** been run |
+## Current limitations
 
-## Documentation map
+This is still a public alpha. In particular:
 
-| Doc | Purpose |
-|---|---|
-| [`docs/WHY_HIPPOCAMPUS.md`](docs/WHY_HIPPOCAMPUS.md) | The project's design and philosophical evolution: memory, Soul, "generation is existence", continuity, memory governance, and recall timing. |
-| [`docs/COMPARISON.md`](docs/COMPARISON.md) | A factual guide to when Hermes built-in memory, history search, Mem0, Hindsight, or Hippocampus may fit. |
-| [`docs/ALPHA-TESTING.md`](docs/ALPHA-TESTING.md) | A 3–7 day real-project test plan and a guide to reporting useful failures. |
-| [`docs/INSTALL.md`](docs/INSTALL.md) | Step-by-step Windows artifact build/install + disposable pgvector + Hermes host path. |
-| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | `config.yaml` keys, env vars, provider defaults, fail-closed behavior. |
-| [`docs/BACKUP-RESTORE.md`](docs/BACKUP-RESTORE.md) | `pg_dump` + restore and post-restore checks. |
-| [`docs/PRIVACY-DATA-FLOW.md`](docs/PRIVACY-DATA-FLOW.md) | What remains local vs what may be sent to explicitly configured providers. |
-| [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md) | The evidence-backed alpha contract: PASS / EVIDENCE / UNKNOWN / NOT TESTED. |
-| [`docs/ARCHITECTURE-OVERVIEW.md`](docs/ARCHITECTURE-OVERVIEW.md) | Module map, write/read boundaries, canonical explicit-memory location. |
-| [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) | Deferred work, open issues, and explicit non-claims. |
-| [`docs/RELEASE-CHECKLIST.md`](docs/RELEASE-CHECKLIST.md) | Alpha publication gates and remaining limitations. |
-| [`src/v3-core/README.md`](src/v3-core/README.md) | `v3-core` package README. |
-| [`src/v3-hermes-plugin/README.md`](src/v3-hermes-plugin/README.md) | Hermes adapter README. |
-| [`docs/B02-DSH-TOOL-SUPPORT.md`](docs/B02-DSH-TOOL-SUPPORT.md) | DSH tool-level support: tested versions, exact MCP command, limitations. |
-| [`docs/B03-PI-ADAPTER-DESIGN.md`](docs/B03-PI-ADAPTER-DESIGN.md) | Pi adapter design and the b01.1 wire contract it uses. |
-| [`packages/pi-adapter/README.md`](packages/pi-adapter/README.md) | Pi adapter: install, config, failure states, capability matrix, limitations. |
-| [`packages/pi-adapter/demo/60-90s-demo.md`](packages/pi-adapter/demo/60-90s-demo.md) | The 60–90 s recording script (`SCRIPT READY / NOT YET EXECUTED`). |
+- the project is **not** claiming production readiness;
+- current first-class adapter evidence is Windows-heavy;
+- the pi model-backed A→B conversation remains an optional smoke that has not been run on the dedicated test machine because no model credential is configured there;
+- DSH model integration was structurally tested with a local credential-free model stub; the host/bridge/recall path is the evidence-backed part;
+- text is the primary supported memory content in the current host adapters;
+- memory management/correction and temporal update UX are the next product focus;
+- package publication and version guarantees are still narrower than the source tree.
 
-## What this README deliberately does not claim
+The maintained snapshot is [docs/STATUS.md](docs/STATUS.md). Older public-alpha acceptance documents are retained as engineering history and should not be read as the current product summary.
 
-- It does not claim production-ready, stable, GA, or drop-in status.
-- It does not upgrade capabilities marked **UNKNOWN / NOT TESTED** into supported features.
-- It does not claim that the full `pytest tests/` suite is green on this exact HEAD. The release evidence uses a focused acceptance scope documented in [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md).
-- It does not claim that long-term memory proves or creates machine consciousness.
-- It does not claim the pi adapter is model-verified: the model-driven A→B smoke has not been run, the hidden `display:false` inspection surface (P10) is unverified, `0.1.0` is not published to npm, and non-Windows hosts are untested. The adapter's own limitations list is in [`packages/pi-adapter/README.md`](packages/pi-adapter/README.md).
+---
+
+## Documentation
+
+Start with [docs/README.md](docs/README.md). The main paths are:
+
+| Need | Document |
+| --- | --- |
+| Install | [INSTALL.md](docs/INSTALL.md) |
+| Configure | [CONFIGURATION.md](docs/CONFIGURATION.md) |
+| Current support / tested versions | [STATUS.md](docs/STATUS.md) |
+| Why this project exists | [WHY_HIPPOCAMPUS.md](docs/WHY_HIPPOCAMPUS.md) |
+| Architecture | [ARCHITECTURE-OVERVIEW.md](docs/ARCHITECTURE-OVERVIEW.md) |
+| Privacy / data flow | [PRIVACY-DATA-FLOW.md](docs/PRIVACY-DATA-FLOW.md) |
+| Compare approaches | [COMPARISON.md](docs/COMPARISON.md) |
+| Known limitations | [KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) |
+| Backup / restore | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) |
+| Upgrade | [UPGRADE.md](docs/UPGRADE.md) |
+
+---
+
+## Project direction
+
+The host-adapter phase is now substantially complete for DSH and pi. The next development focus is the memory product itself:
+
+- make stored memories easier to inspect and manage;
+- make corrections and changed facts first-class;
+- improve temporal reasoning about “old truth” vs “current truth”;
+- keep source provenance visible while derived memory evolves;
+- then expand portability and additional host integrations based on real usage.
+
+See [docs/STATUS.md](docs/STATUS.md) for the maintained current snapshot.
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before changing storage, source identity, recall or host-adapter contracts.
+
+Security issues should follow [SECURITY.md](SECURITY.md).
 
 ## License
 
-Both packages use `AGPL-3.0-or-later`. See [`src/v3-core/LICENSE`](src/v3-core/LICENSE) and [`src/v3-hermes-plugin/LICENSE`](src/v3-hermes-plugin/LICENSE).
+MIT — see [LICENSE](LICENSE).
