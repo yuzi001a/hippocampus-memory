@@ -1,232 +1,249 @@
+<div align="center">
+
 # Hippocampus
 
-> **Give an agent a past.**
+### Give an agent a past.
 
-Hippocampus is a local-first, open-source long-term memory runtime for AI agents. It records durable conversation sources, recalls relevant past context in later sessions, and keeps the path back to the original source inspectable.
+**Long-term memory for AI agents — local-first, source-traceable, and built to survive new sessions.**
 
-**Status:** Public alpha · active development. The current `main` includes automatic-memory adapters for **DeepSeek Harness (DSH)** and **pi**.
+[![Status](https://img.shields.io/badge/status-public%20alpha-orange)](docs/STATUS.md)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![DSH](https://img.shields.io/badge/DeepSeek%20Harness-auto%20memory-success)](packages/dsh-adapter/README.md)
+[![pi](https://img.shields.io/badge/pi-auto%20memory-success)](packages/pi-adapter/README.md)
 
-[简体中文](README.zh-CN.md) · [Install](docs/INSTALL.md) · [Documentation](docs/README.md) · [Current status](docs/STATUS.md) · [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md)
+[Get started](docs/INSTALL.md) · [中文](README.zh-CN.md) · [How it works](docs/ARCHITECTURE-OVERVIEW.md) · [Current status](docs/STATUS.md)
 
----
-
-## Why this exists
-
-The first problem was simple: an agent can spend hours learning a project, then start a new session and lose much of that continuity.
-
-The harder problem appeared later:
-
-> **Forgetting is bad. Remembering the wrong thing can be worse.**
-
-A useful memory system therefore cannot be only a transcript archive or a vector database. It needs durable sources, traceable recall, correction paths, rebuildable derived state, and a clear boundary between **what actually happened** and **what the system later inferred from it**.
-
-Hippocampus follows one rule throughout the design:
-
-> **Preserve the past. Keep its interpretation revisable.**
-
-The longer design story is in [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md).
+</div>
 
 ---
 
-## What works today
+## Your agent should not wake up as a stranger
 
-### Automatic memory in real agent hosts
+You can spend days working with an agent. It learns the project, the decisions you made, the way you like things done.
 
-| Host | Current support | Tested surface |
-| --- | --- | --- |
-| **DeepSeek Harness (DSH)** | **AUTO** — automatic user/assistant capture + current-turn automatic recall | Tested with `@deepseek-ai/dsh@0.2.0-rc.2` against the current upstream hook contract. Real host + B01 bridge + disposable PostgreSQL integration: **18/18 checks PASS**. |
-| **pi** | **AUTO** — automatic persisted-message capture + one additive recall per user input | Tested with pi **0.99.2** / Node **24.21.0**. Real host load, isolated PostgreSQL ingest, recall, per-turn latch and source-trace resolution PASS. |
-| **Hermes Agent** | Provider/tool integration | Existing `v3-hermes-plugin` integration with the public tool surface. See the plugin README for its narrower evidence boundary. |
+Then a new session starts.
 
-Adapter details:
+The context is gone.
 
-- [DSH adapter](packages/dsh-adapter/README.md)
-- [pi adapter](packages/pi-adapter/README.md)
-- [Hermes plugin](src/v3-hermes-plugin/README.md)
-
-### Core behavior
-
-The current core supports the pieces needed for those host integrations:
-
-- durable conversation-source ingest;
-- canonical event identity and idempotent replay;
-- PostgreSQL + pgvector storage;
-- keyword and optional vector recall;
-- explicit-memory storage;
-- exact source readback for recalled references;
-- fresh bootstrap and backup/restore;
-- fail-open host adapters — memory failure should not take the agent down;
-- provider configuration that is local and opt-in.
-
-The engine also contains observer, topic, yin/E1, journal and other derived-memory paths. Not every internal path is part of the current supported product surface. See [Current status](docs/STATUS.md) for the boundary.
-
----
-
-## How it fits together
-
-```text
-        ┌─────────────────────────────┐
-        │     Agent host / session    │
-        │  DSH · pi · Hermes · later │
-        └──────────────┬──────────────┘
-                       │ host events / recall hook
-                       ▼
-        ┌─────────────────────────────┐
-        │       Thin host adapter     │
-        │ capture · recall · fail-open│
-        └──────────────┬──────────────┘
-                       │ B01 bridge contract
-                       ▼
-        ┌─────────────────────────────┐
-        │          v3-core            │
-        │ ingest · recall · provenance│
-        └──────────────┬──────────────┘
-                       │
-              ┌────────┴────────┐
-              ▼                 ▼
-       durable sources      derived memory
-       conversation         embeddings/topics/
-       explicit memory      notes/indexes
-              │                 │
-              └───────┬─────────┘
-                      ▼
-              PostgreSQL/pgvector
-```
-
-The key architectural distinction is deliberate:
-
-- **Sources are durable.** Raw conversation events and canonical explicit memories should survive.
-- **Derived memory is revisable.** Embeddings, topics, summaries and higher-level interpretations may be rebuilt as models and algorithms improve.
-- **Recall stays traceable.** A retrieved claim should be able to resolve back toward stored evidence instead of becoming an uninspectable summary.
-
----
-
-## Quick start
-
-Hippocampus is still an alpha, so the supported setup is intentionally explicit rather than a one-line installer.
-
-1. Install and bootstrap the core using [docs/INSTALL.md](docs/INSTALL.md).
-2. Configure storage/providers using [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-3. Choose an agent integration:
-   - [DeepSeek Harness](packages/dsh-adapter/README.md)
-   - [pi](packages/pi-adapter/README.md)
-   - [Hermes Agent](src/v3-hermes-plugin/README.md)
-4. Verify the backend/adapter status before using it on important work.
-5. Read [Known limitations](docs/KNOWN-LIMITATIONS.md) before treating the alpha as production infrastructure.
-
-For backup and upgrades:
-
-- [Backup & restore](docs/BACKUP-RESTORE.md)
-- [Upgrade guide](docs/UPGRADE.md)
-
----
-
-## What “automatic memory” means here
-
-For the current DSH and pi adapters, the intended user experience is:
+Hippocampus gives agents a durable past. It records what actually happened, brings relevant memories into later sessions automatically, and keeps those memories traceable back to their source.
 
 ```text
 Session A
-  You discuss a decision, fact or project detail.
-  Hippocampus records the host's real persisted message identity.
+You: The internal codename is "North Star".
+
+        ↓  Hippocampus remembers
 
 New session
-  You ask about that past detail.
-  The adapter triggers recall automatically.
-  Relevant memory is added to the current request.
-  The source reference remains resolvable.
+You: What was the codename again?
+
+Agent: North Star.
+       ↳ recalled from the earlier conversation
 ```
 
-No manual `remember` or `search` step is required for the normal path.
-
-The adapters are intentionally thin. Host lifecycle logic stays in the adapter; durable memory rules stay in the core.
+For supported automatic adapters, you do **not** need to manually call `remember` or `search`.
 
 ---
 
-## Reliability principles
+## What makes Hippocampus different
 
-Hippocampus has accumulated a lot of reliability work because memory errors compound over time. The current project rules are:
+### 🧠 Memory that follows the agent across sessions
 
-- **Source first.** Do not truncate or replace the authoritative raw record to satisfy an embedding/index limit.
-- **Durability before derivation.** A source write and an embedding/summary result are not the same success condition.
-- **Canonical identity.** Host/session/event identity is the durable replay boundary.
-- **Fail open at the host boundary.** If memory is unavailable, the agent should keep working.
-- **Fail closed on isolation.** Test/recovery environments must not silently fall back to production paths.
-- **Evidence before claims.** A code path existing in the repository is not enough to call it supported.
+Hippocampus can automatically capture real user/assistant messages and recall relevant history when a later conversation needs it.
 
-Engineering details live under [docs/reliability](docs/reliability/) and the milestone/evidence documents linked from the [documentation index](docs/README.md).
+### 🔎 A memory can point back to what really happened
+
+A remembered claim should not become an orphaned summary. Hippocampus keeps source provenance so recalled material can be traced back toward the original conversation.
+
+### ♻️ The past is durable; its interpretation can change
+
+Raw history is treated differently from embeddings, topics, notes, and summaries.
+
+**Preserve the source. Rebuild the interpretation.**
+
+That matters because forgetting is inconvenient — but confidently remembering the wrong thing can be worse.
+
+### 🏠 Local-first by design
+
+Your durable memory store lives under your control. External embedding, rerank, or LLM providers are optional and explicitly configured.
+
+### 🧩 Built for more than one agent
+
+The memory engine is separate from the host integration. Thin adapters connect agent runtimes to the same memory core.
+
+---
+
+## Works with
+
+| Agent host | Experience today |
+| --- | --- |
+| **DeepSeek Harness (DSH)** | **Automatic memory.** Captures user/assistant messages and recalls relevant memory into the current turn. |
+| **pi** | **Automatic memory.** Captures persisted messages and recalls once per user input. |
+| **Hermes Agent** | Existing provider/tool integration through `v3-hermes-plugin`. |
+
+The current tested versions and exact evidence boundaries live in [STATUS.md](docs/STATUS.md).
+
+---
+
+## Bring your existing history
+
+A memory system is much less useful if it only starts remembering the day you install it.
+
+Hippocampus already contains import support for:
+
+- **Hermes history** — `state.db`, JSONL and JSON exports;
+- **curated memory files** — `MEMORY.md`, `USER.md`, `SOUL.md`, `AGENTS.md` and other Markdown notes.
+
+A broader **one-click history migration** flow — automatic discovery plus DSH/pi history import — is the next installation milestone.
+
+---
+
+## The idea in one picture
+
+```text
+              your agent
+          DSH · pi · Hermes
+                 │
+        real conversation events
+                 │
+                 ▼
+          ┌───────────────┐
+          │  Hippocampus  │
+          │               │
+          │  remember     │
+          │  retrieve     │
+          │  trace source │
+          └───────┬───────┘
+                  │
+          ┌───────┴────────┐
+          │                │
+          ▼                ▼
+    durable sources   revisable memory
+    what happened     what it may mean
+          │                │
+          └───────┬────────┘
+                  ▼
+           future sessions
+```
+
+The important split is simple:
+
+> **What happened, what the system later concluded, and what the model believes right now are not the same thing.**
+
+That distinction is the foundation of the project.
+
+---
+
+## Try it
+
+Hippocampus is currently a **public alpha**. The install path is explicit rather than polished into a one-line installer yet.
+
+**1. Install the core**
+
+Follow [the installation guide](docs/INSTALL.md).
+
+**2. Pick your agent**
+
+- [DeepSeek Harness adapter](packages/dsh-adapter/README.md)
+- [pi adapter](packages/pi-adapter/README.md)
+- [Hermes plugin](src/v3-hermes-plugin/README.md)
+
+**3. Start a new session later and ask about something from the past**
+
+If the relevant memory is recalled, its source remains inspectable.
+
+For configuration, backup and upgrades:
+
+[Configuration](docs/CONFIGURATION.md) · [Backup & restore](docs/BACKUP-RESTORE.md) · [Upgrade](docs/UPGRADE.md)
+
+---
+
+## Why not just use a vector database?
+
+Because long-term memory has more failure modes than “similarity search returned the wrong chunk.”
+
+A useful memory layer has to care about:
+
+- whether the original history survived;
+- whether retries created duplicates;
+- whether old facts were superseded;
+- whether a summary drifted away from its source;
+- whether memory can be rebuilt after models change;
+- whether the agent still works when the memory backend is unavailable.
+
+Hippocampus treats embeddings as one retrieval tool, not as the definition of memory.
+
+---
+
+## Built from real long-running use
+
+This project grew out of using agents on ongoing work where continuity mattered.
+
+That experience changed the original goal from:
+
+> “make the agent remember more”
+
+to:
+
+> **“make the agent remember without losing the difference between memory and evidence.”**
+
+That is also why the next phase is focused less on adding another retrieval trick and more on **memory inspection, correction, changed facts, and time**.
+
+Read the longer story in [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md).
+
+---
+
+## Where the project is now
+
+**Done:** durable core · install/bootstrap · shared bridge · pi automatic memory · DSH automatic memory · source trace · reliability hardening.
+
+**Now:** one-click import of existing history.
+
+**Next:** memory inspection and correction, then temporal memory — understanding that “true once” does not always mean “true now.”
+
+See [Current status](docs/STATUS.md) for the maintained technical snapshot.
 
 ---
 
 ## Evaluation
 
-Hippocampus has been tested on the LoCoMo long-context memory benchmark as a research signal, not as a claim that benchmark score equals real-world memory quality.
+Hippocampus has also been evaluated on LoCoMo as a research signal:
 
-The historical evaluation track includes:
+| Setup | Score |
+| --- | ---: |
+| Hippocampus | **69.97%** |
+| No long-term memory | **6.85%** |
+| Gold-context reference | **75.84%** |
 
-- Hippocampus: **1077.5 / 1540 = 69.97%**
-- no-long-term-memory baseline: **6.85%**
-- gold-context reference: **75.84%**
-
-See [evaluation/locomo-recall-v2.md](docs/evaluation/locomo-recall-v2.md) for the protocol and caveats.
-
----
-
-## Current limitations
-
-This is still a public alpha. In particular:
-
-- the project is **not** claiming production readiness;
-- current first-class adapter evidence is Windows-heavy;
-- the pi model-backed A→B conversation remains an optional smoke that has not been run on the dedicated test machine because no model credential is configured there;
-- DSH model integration was structurally tested with a local credential-free model stub; the host/bridge/recall path is the evidence-backed part;
-- text is the primary supported memory content in the current host adapters;
-- memory management/correction and temporal update UX are the next product focus;
-- package publication and version guarantees are still narrower than the source tree.
-
-The maintained snapshot is [docs/STATUS.md](docs/STATUS.md). Older public-alpha acceptance documents are retained as engineering history and should not be read as the current product summary.
+Benchmark score is not treated as a substitute for real product behavior. Protocol and caveats: [LoCoMo evaluation](docs/evaluation/locomo-recall-v2.md).
 
 ---
 
 ## Documentation
 
-Start with [docs/README.md](docs/README.md). The main paths are:
+**For users:** [Install](docs/INSTALL.md) · [Configuration](docs/CONFIGURATION.md) · [Status](docs/STATUS.md) · [Known limitations](docs/KNOWN-LIMITATIONS.md)
 
-| Need | Document |
-| --- | --- |
-| Install | [INSTALL.md](docs/INSTALL.md) |
-| Configure | [CONFIGURATION.md](docs/CONFIGURATION.md) |
-| Current support / tested versions | [STATUS.md](docs/STATUS.md) |
-| Why this project exists | [WHY_HIPPOCAMPUS.md](docs/WHY_HIPPOCAMPUS.md) |
-| Architecture | [ARCHITECTURE-OVERVIEW.md](docs/ARCHITECTURE-OVERVIEW.md) |
-| Privacy / data flow | [PRIVACY-DATA-FLOW.md](docs/PRIVACY-DATA-FLOW.md) |
-| Compare approaches | [COMPARISON.md](docs/COMPARISON.md) |
-| Known limitations | [KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) |
-| Backup / restore | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) |
-| Upgrade | [UPGRADE.md](docs/UPGRADE.md) |
+**For builders:** [Architecture](docs/ARCHITECTURE-OVERVIEW.md) · [Privacy/data flow](docs/PRIVACY-DATA-FLOW.md) · [Documentation index](docs/README.md)
+
+**For the curious:** [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md) · [Comparison](docs/COMPARISON.md)
 
 ---
 
-## Project direction
+## Public alpha
 
-The host-adapter phase is now substantially complete for DSH and pi. The next development focus is the memory product itself:
+Hippocampus is under active development. Current first-party integration evidence is still Windows-heavy, package/distribution UX is being simplified, and not every internal experimental memory path is part of the supported surface.
 
-- make stored memories easier to inspect and manage;
-- make corrections and changed facts first-class;
-- improve temporal reasoning about “old truth” vs “current truth”;
-- keep source provenance visible while derived memory evolves;
-- then expand portability and additional host integrations based on real usage.
-
-See [docs/STATUS.md](docs/STATUS.md) for the maintained current snapshot.
+Claims on this page are intentionally narrower than “everything the repository can theoretically do.”
 
 ---
 
 ## Contributing
 
-Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before changing storage, source identity, recall or host-adapter contracts.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports should follow [SECURITY.md](SECURITY.md).
 
-Security issues should follow [SECURITY.md](SECURITY.md).
+MIT licensed — see [LICENSE](LICENSE).
 
-## License
+<div align="center">
 
-MIT — see [LICENSE](LICENSE).
+**Give an agent a past — without asking it to forget where that past came from.**
+
+</div>
