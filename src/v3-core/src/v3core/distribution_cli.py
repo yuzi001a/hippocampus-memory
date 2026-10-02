@@ -2405,13 +2405,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     imp.add_argument(
         "source",
-        choices=("list", "hermes", "memory-md", "openclaw", "hindsight"),
-        help="'list' shows every registered importer and its honest capability level.",
+        choices=("list", "hermes", "memory-md", "openclaw", "hindsight", "dsh", "pi", "auto"),
+        help="'list' shows every registered importer and its honest capability level; "
+        "'auto' auto-discovers and imports every supported host (I01).",
     )
     imp.add_argument("--root", default=None, help="Directory or file to import from.")
     imp.add_argument("--profile-dir", default=None)
     imp.add_argument("--dry-run", action="store_true", help="Parse and report only; write nothing.")
     imp.add_argument("--limit", type=int, default=None, help="Import at most N items (smoke).")
+    imp.add_argument(
+        "--hosts",
+        default=None,
+        help="For 'auto': comma-separated host list (default: hermes,dsh,pi,memory-md).",
+    )
+    imp.add_argument(
+        "--override",
+        action="append",
+        default=None,
+        metavar="HOST=PATH",
+        help="For 'auto': point a host at an explicit path (repeatable). "
+        "Precedence: override > env > platform default > cwd.",
+    )
+    imp.add_argument(
+        "--json",
+        action="store_true",
+        help="For 'auto': emit the machine-readable import report (import_report.json shape).",
+    )
 
     rb = sub.add_parser(
         "rebuild",
@@ -2689,6 +2708,96 @@ def _install(args) -> int:
     )
 
 
+def _build_import_pool():
+    """Construct the PgPool used by live imports from the resolved profile.
+
+    Returns ``(pool, None)`` on success or ``(None, error_message)``. The
+    caller prints the error and exits — imports never silently no-op.
+    """
+    try:
+        import psycopg2
+
+        from v3core.config import resolve_config
+        from v3core.pg_pool import PgPool
+
+        cfg = resolve_config()
+        # V3Config exposes flat attributes (pg / embed / rerank / llm); the
+        # nested `storage` shape kept silently evaluating to None.
+        pg = getattr(cfg, "pg", None) or getattr(getattr(cfg, "storage", None), "pg", None)
+        if pg is None:
+            raise RuntimeError("no storage.pg block in the resolved profile config")
+        password = (os.environ.get("V3CORE_PG_PASSWORD")
+                    or os.environ.get("PGPASSWORD") or "")
+
+        def _connect():
+            return psycopg2.connect(
+                host=pg.host, port=int(pg.port), dbname=pg.database,
+                user=pg.user, password=password, connect_timeout=10,
+            )
+
+        return PgPool(connect=_connect, max_connections=4), None
+    except Exception as exc:  # noqa: BLE001
+        return None, (
+            f"could not construct a database pool for the import: "
+            f"{type(exc).__name__}: {exc}. Check the profile config and "
+            f"V3CORE_PG_PASSWORD, or run with --dry-run."
+        )
+
+
+def _import_auto(args, importers) -> int:
+    """I01: one-command import — discover → parse → write raw + QA pairs."""
+    from pathlib import Path as _Path
+
+    profile_dir = _resolve_profile_dir(args.profile_dir)
+
+    hosts = None
+    if getattr(args, "hosts", None):
+        hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
+
+    overrides = {}
+    for spec in getattr(args, "override", None) or []:
+        if not isinstance(spec, str) or "=" not in spec or not spec.split("=", 1)[0].strip():
+            print(json.dumps({"command": "import.auto", "status": "error",
+                              "detail": f"--override expects HOST=PATH, got {spec!r}"},
+                             ensure_ascii=False))
+            return 2
+        k, v = spec.split("=", 1)
+        overrides[k.strip()] = _Path(v.strip()).expanduser().resolve()
+
+    if not args.dry_run:
+        pool, pool_err = _build_import_pool()
+        if pool is None:
+            print(json.dumps({"command": "import.auto", "status": "error",
+                              "detail": pool_err}, ensure_ascii=False))
+            return 1
+        importers.install_pool(pool)
+
+    import io as _io
+
+    human_out = _io.StringIO() if getattr(args, "json", False) else sys.stdout
+    try:
+        report = importers.import_auto(
+            hosts=hosts,
+            overrides=overrides or None,
+            dry_run=args.dry_run,
+            profile_dir=profile_dir,
+            out=human_out,
+        )
+    except ValueError as exc:
+        print(json.dumps({"command": "import.auto", "status": "error", "detail": str(exc)},
+                         ensure_ascii=False))
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(json.dumps({"command": "import.auto", "status": "error", "detail": str(exc)},
+                         ensure_ascii=False))
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps({"command": "import.auto", **report},
+                         ensure_ascii=False, indent=2, default=str))
+    return 0 if report["status"] in ("ok", "partial") else 1
+
+
 def _import(args) -> int:
     try:
         from v3core import importers
@@ -2703,6 +2812,8 @@ def _import(args) -> int:
         ]
         print(json.dumps({"command": "import", "status": "ok", "importers": rows}, ensure_ascii=False, indent=2))
         return 0
+    if args.source == "auto":
+        return _import_auto(args, importers)
     if not args.root:
         print(json.dumps({"command": "import", "status": "error",
                           "detail": "--root is required for a real import (a directory or a file)."},
@@ -2716,36 +2827,13 @@ def _import(args) -> int:
     # to write without one (no silent no-op). Construct it from the resolved
     # profile config, exactly as the engine does for its own writes.
     if not args.dry_run:
-        try:
-            import psycopg2
-
-            from v3core.config import resolve_config
-            from v3core.pg_pool import PgPool
-
-            cfg = resolve_config()
-            # V3Config exposes flat attributes (pg / embed / rerank / llm); the
-            # nested `storage` shape kept silently evaluating to None.
-            pg = getattr(cfg, "pg", None) or getattr(getattr(cfg, "storage", None), "pg", None)
-            if pg is None:
-                raise RuntimeError("no storage.pg block in the resolved profile config")
-            password = (os.environ.get("V3CORE_PG_PASSWORD")
-                        or os.environ.get("PGPASSWORD") or "")
-
-            def _connect():
-                return psycopg2.connect(
-                    host=pg.host, port=int(pg.port), dbname=pg.database,
-                    user=pg.user, password=password, connect_timeout=10,
-                )
-
-            importers.install_pool(PgPool(connect=_connect, max_connections=4))
-        except Exception as exc:  # noqa: BLE001
+        pool, pool_err = _build_import_pool()
+        if pool is None:
             print(json.dumps({
-                "command": "import", "status": "error",
-                "detail": f"could not construct a database pool for the import: "
-                          f"{type(exc).__name__}: {exc}. Check the profile config and "
-                          f"V3CORE_PG_PASSWORD, or run with --dry-run.",
+                "command": "import", "status": "error", "detail": pool_err,
             }, ensure_ascii=False))
             return 1
+        importers.install_pool(pool)
     try:
         stats = importers.import_source(
             source=args.source,

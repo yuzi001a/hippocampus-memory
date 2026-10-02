@@ -89,6 +89,14 @@ class ImportItem:
     category: str | None = None
     tags: list[str] | None = None
     provenance: dict | None = None
+    # I01 identity fields (additive; None keeps legacy behaviour):
+    #   host          — 'hermes' | 'dsh' | 'pi' | ... (F2 identity part 1)
+    #   event_id      — native message/event id, or a stable
+    #                   'derived:<token>' id when the source has none
+    #   identity_kind — 'native' | 'import-derived'
+    host: str | None = None
+    event_id: str | None = None
+    identity_kind: str | None = None
 
 
 @dataclass
@@ -104,6 +112,9 @@ class ImportStats:
     newest: str | None = None
     dry_run: bool = False
     errors: list[str] = field(default_factory=list)
+    # I01 additive counters:
+    identity_derived: int = 0  # event_id generated as 'derived:…'
+    qa_pairs_derived: int = 0  # qa_pairs rows derived from raw history
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -122,11 +133,40 @@ class Importer(abc.ABC):
         Production importers must implement parse() fully; framework_ready
         importers must raise ``NotImplementedError`` with a clear message
         naming the artifact format still needed.
+
+    Exclusion accounting (I01): importers track rows they deliberately
+    exclude from the import stream in ``excluded_counts`` — a
+    reason → count dict with stable reason keys:
+
+      * ``skipped_roles``        — non user/assistant roles (tool, system…)
+      * ``skipped_empty``       — empty / whitespace-only content
+      * ``skipped_system_text`` — system-generated pseudo messages
+                                  (compaction summaries, [System note: …])
+      * ``skipped_display_kind``— host-declared non-conversation display kinds
+      * ``skipped_injected``    — self-memory (Hippocampus) injections
+      * ``skipped_entries``     — non-message session entries
+      * ``skipped_nontext``     — non-text content blocks (image, thinking…)
+
+    A skipped row is *reported*, never silently dropped (§18).
     """
 
     name: str = ""
     description: str = ""
     capability: str = "production"  # 'production' | 'framework_ready'
+
+    #: reason → count, filled while parse() runs (call reset_excluded_counts()
+    #: before a fresh parse batch to clear previous runs).
+    excluded_counts: dict[str, int] = {}
+
+    def reset_excluded_counts(self) -> None:
+        self.excluded_counts = {}
+
+    def _track_excluded(self, reason: str, count: int = 1) -> None:
+        # Guard against the shared class-level dict: always write to the
+        # instance dict before mutating.
+        if "excluded_counts" not in self.__dict__:
+            self.excluded_counts = {}
+        self.excluded_counts[reason] = self.excluded_counts.get(reason, 0) + count
 
     @abc.abstractmethod
     def discover(self, root: Path) -> list[Path]:
@@ -269,6 +309,23 @@ _RAW_DEDUPE_SQL = """
     )
 """
 
+# I01: F2 identity dedupe — (host, session_id, event_id). Used whenever the
+# item carries a host + event_id (native or import-derived). Falls back to
+# the legacy (session_id, role, timestamp) predicate for items without one.
+_RAW_DEDUPE_SQL_F2 = """
+    INSERT INTO public.conversation_stream
+        (session_id, role, content, trigger, turn_id, timestamp, source,
+         tool_calls, tool_results, host, event_id)
+    SELECT %s, %s, %s, 'import', %s, %s::timestamptz, %s,
+           %s::jsonb, %s::jsonb, %s, %s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM public.conversation_stream
+         WHERE host = %s
+           AND session_id = %s
+           AND event_id = %s
+    )
+"""
+
 _RAW_DEDUPE_SQL_NO_TS = """
     INSERT INTO public.conversation_stream
         (session_id, role, content, trigger, turn_id, source,
@@ -284,7 +341,13 @@ def _emit_raw_messages(
     source_tag: str,
     stats: ImportStats,
 ) -> None:
-    """Bulk-insert raw messages with (session_id, role, timestamp) dedupe.
+    """Bulk-insert raw messages with F2 identity dedupe.
+
+    Dedupe predicate: ``(host, session_id, event_id)`` when the item
+    carries a host (event_id is generated as ``derived:<host>:<sess>:<n>``
+    when a source truly has none — stable across re-runs because parse
+    order is deterministic). Items without a host fall back to the legacy
+    ``(session_id, role, timestamp)`` predicate.
 
     Connection contract: ``pool`` is any object that yields an object with
     ``.cursor()``, ``.commit()``, and ``.close()`` (a real PgPool lease, or
@@ -294,7 +357,7 @@ def _emit_raw_messages(
     oldest_ts: str | None = None
     newest_ts: str | None = None
 
-    for it in items:
+    for idx, it in enumerate(items, start=1):
         if it.kind != KIND_RAW:
             continue
         if not it.text:
@@ -321,10 +384,26 @@ def _emit_raw_messages(
         except (TypeError, ValueError):
             turn_id = None
 
+        host = (it.host or "").strip() or None
+        event_id = (it.event_id or "").strip() or None
+        if host and not event_id:
+            # Import-derived identity — stable, visibly not-native.
+            event_id = f"derived:{host}:{sess}:{idx}"
+            stats.identity_derived += 1
+
         lease = pool.lease(timeout=5.0)
         try:
             cur = lease.connection.cursor()
-            if ts:
+            if host and event_id:
+                cur.execute(
+                    _RAW_DEDUPE_SQL_F2,
+                    (
+                        sess, role, it.text, turn_id, ts, source_tag,
+                        tool_calls, tool_results, host, event_id,
+                        host, sess, event_id,
+                    ),
+                )
+            elif ts:
                 cur.execute(
                     _RAW_DEDUPE_SQL,
                     (
@@ -474,6 +553,8 @@ def _build_registry() -> dict[str, type[Importer]]:
     from .memory_md import MemoryMarkdownImporter
     from .openclaw import OpenClawImporter
     from .hindsight import HindsightImporter
+    from .dsh_sessions import DshSessionImporter
+    from .pi_sessions import PiSessionImporter
 
     # Re-export the concrete classes at package level so tests / external
     # callers can isinstance-check against them without importing the
@@ -483,12 +564,16 @@ def _build_registry() -> dict[str, type[Importer]]:
         "MemoryMarkdownImporter": MemoryMarkdownImporter,
         "OpenClawImporter": OpenClawImporter,
         "HindsightImporter": HindsightImporter,
+        "DshSessionImporter": DshSessionImporter,
+        "PiSessionImporter": PiSessionImporter,
     })
     return {
         "hermes": HermesSessionImporter,
         "memory-md": MemoryMarkdownImporter,
         "openclaw": OpenClawImporter,
         "hindsight": HindsightImporter,
+        "dsh": DshSessionImporter,
+        "pi": PiSessionImporter,
     }
 
 
@@ -772,6 +857,12 @@ def _current_pool() -> Any | None:
     return _CURRENT_POOL[0] if _CURRENT_POOL else None
 
 
+# ── I01: one-command auto import ────────────────────────────────────────
+# Deferred to a submodule  (importers.auto_import) to keep this file
+# focused; re-exported here as the stable public surface.
+
+from .auto_import import import_auto  # noqa: E402  (needs the names above)
+
 __all__ = [
     "KIND_RAW",
     "KIND_CURATED",
@@ -784,9 +875,12 @@ __all__ = [
     "MemoryMarkdownImporter",
     "OpenClawImporter",
     "HindsightImporter",
+    "DshSessionImporter",
+    "PiSessionImporter",
     "IMPORTERS",
     "get_importer",
     "list_importers",
     "import_source",
+    "import_auto",
     "install_pool",
 ]
