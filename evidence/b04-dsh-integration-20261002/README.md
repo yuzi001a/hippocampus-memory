@@ -83,17 +83,29 @@ Deliberately substituted, and **not** covered by this run:
 
 ## Files
 
-| File | sha256 | What it is |
+| File | sha256 (git blob) | What it is |
 | --- | --- | --- |
-| `b04-integration.json` | `c7f0a0ff08dec1dc8c32f767386901ab983e862b994df1b817064616c3d87aa8` | the machine-readable report |
-| `b04_integration.py` | `bbe60445cf1c13fb8b4eb4acb7e582f28ab83a8468787b868326abe962d8a4a3` | the driver (hash printed by the run itself as `HASH_HELPER`) |
+| `b04-integration.json` | `75ae5f0547747c24686257bc4ef532b4c3852dc531297324d17a75661cf11eaa` | the machine-readable report |
+| `b04_integration.py` | `bbe60445cf1c13fb8b4eb4acb7e582f28ab83a8468787b868326abe962d8a4a3` | the driver — **identical to the `HASH_HELPER` this run printed** |
 | `b04-run-on-y400.ps1` | `da3825ffdd7aea4cf1bc4d7117df99085fcf954e7addd7a97878d804b536c894` | the wrapper (hostname gate) |
 | `stub-requests.jsonl` | `bc551dcad5a017650e6493f2ac00ab35e00828a51ee74eeb9b1fccff271b9dc1` | what the model endpoint received |
-| `bridge.log` | `7dcb09bc6750b6970e3ba5466efb4d32bf5ac99a6b33b359787c229ae1123983` | bridge-side log |
-| `run1.stdout.jsonl` | `f63f517cfec86fb15703b4592b86aa4579312f83747dfa056263146834701bc8` | first DSH turn (`--json` stream) |
-| `run2.stdout.jsonl` | `5d6ad06cee0a437ae9238e58cab6451b0f5f5b72029167838078925489f07917` | reloaded-session turn |
-| `run3.stdout.jsonl` | `caed6ce4fb8c1ce8847d0db585f003989c5a9c78fe7c1f26dea39fa4d536fd18` | the fail-open turn (bridge stopped) |
-| `profile-config.yaml` | `fc341286c68d11e14112ae8eb09b1e1f0adc6a986cce09b67033968959ee0ede` | the disposable core config (no credentials) |
+| `bridge.log` | `fd2dd22288ea528bf8492b931313646f8a01fff40e3274f649fa67086aa77c85` | bridge-side log |
+| `run1.stdout.jsonl` | `7c8579bd599f291b965d0078c98cad7401331b22d56db8842bb277cc542953ee` | first DSH turn (`--json` stream) |
+| `run2.stdout.jsonl` | `b63de7dd81ff8442fcbf5335af1ef6695cf73281d0f0069948f93332d5814979` | reloaded-session turn |
+| `run3.stdout.jsonl` | `affd8534c466a5d59d6599125f371471243d212e3dcd62d39d59d9392f4e58db` | the fail-open turn (bridge stopped) |
+| `profile-config.yaml` | `4f5911c1c9a07b76a3026548d064abcb8b65c6ef6b2aedc11e341f8657e88c30` | the disposable core config (no credentials) |
+
+These digests are of the content **as stored in git** (LF), not of the bytes a working tree happens
+to hold: this repository runs with `core.autocrlf=true` and no `.gitattributes`, so a fresh Windows
+checkout rewrites text files to CRLF and hashing the file on disk gives a different digest. Verify
+with, e.g.:
+
+```
+git show HEAD:evidence/b04-dsh-integration-20261002/b04_integration.py | sha256sum
+```
+
+The driver's digest is the useful one to check: the run prints it as `HASH_HELPER` before doing
+anything else, so this table ties the archived artifact to the exact bytes that produced the report.
 
 `stub-requests.jsonl` is append-only; the report's request counts are read after teardown, so the
 counts and this file describe the same completed run.
