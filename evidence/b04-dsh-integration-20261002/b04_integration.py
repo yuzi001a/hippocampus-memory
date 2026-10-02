@@ -487,7 +487,7 @@ def main() -> int:
         except json.JSONDecodeError:
             pass
     report["fail_open"] = {"rc": code3, "bridge_stopped": True,
-                           "requests_after_stop": len(added),
+                           "requests_after_stop": len([i for i in added if i.get("path")]),
                            "memory_blocks_after_stop": sum(1 for i in added if i.get("textPresent")),
                            "stderr_tail": scrub(stderr3[-300:], secret)}
     check("fail_open_dsh_still_works", code3 == 0,
@@ -521,13 +521,16 @@ def main() -> int:
                 stub_records.append(json.loads(line))
             except json.JSONDecodeError:
                 pass
+    # The record holds two kinds of line: one per received request, and one per
+    # request carrying a hippocampus block. Count the request lines, not the file.
+    request_records = [item for item in stub_records if item.get("path")]
     matched = [item.get("matchedText", "") for item in stub_records if item.get("textPresent")]
-    report["model_request"] = {"requests": len(stub_records),
+    report["model_request"] = {"requests": len(request_records),
                                "requests_with_memory": sum(1 for i in stub_records if i.get("textPresent")),
                                "matched_has_marker": any(SEED_MARKER in text for text in matched),
                                "matched_chars": [len(text) for text in matched]}
     check("memory_in_same_request", bool(matched),
-          f"{len(matched)} of {len(stub_records)} model requests carried a memory block")
+          f"{len(matched)} of {len(request_records)} model requests carried a memory block")
     check("memory_carries_seeded_fact", any(SEED_MARKER in text for text in matched),
           f"seeded marker present in the injected block = {any(SEED_MARKER in t for t in matched)}")
 
