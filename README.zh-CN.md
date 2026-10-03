@@ -92,12 +92,19 @@ Hippocampus 不希望长期记忆最后变成一堆“看起来像真的总结�
 
 如果一个长期记忆插件只能“从今天开始记”，那它对很多老用户的价值会打折。
 
-Hippocampus 目前已经具备：
+Hippocampus 现在已经具备 **一条命令导入旧历史**：
 
-- **Hermes 历史会话导入**：支持 `state.db`、JSONL、JSON；
-- **用户整理的记忆文件导入**：支持 `MEMORY.md`、`USER.md`、`SOUL.md`、`AGENTS.md` 等 Markdown。
+- **Hermes**：`state.db`、JSONL、JSON；
+- **DeepSeek Harness（DSH）**：本地 `session.v*.jsonl.zstd` 历史；
+- **pi**：本地 Session JSONL；
+- **用户整理的记忆文件**：`MEMORY.md`、`USER.md`、`SOUL.md`、`AGENTS.md` 等 Markdown。
 
-下一步正在补的是更完整的 **旧消息一键迁移**：自动发现本机已有 Agent 历史，并继续补 DSH / pi 的旧会话导入。
+```bash
+hippocampus import auto --dry-run   # 自动发现并预览
+hippocampus import auto             # 导入支持的本地历史
+```
+
+基础导入不需要 LLM 或 embedding provider，可重复执行不重复写入，并保留来源关系。详见 [旧历史导入说明](docs/IMPORT.md)。
 
 ---
 
@@ -200,11 +207,11 @@ Hippocampus 目前还是 **Public Alpha**，所以安装方式还没有包装成
 
 ## 项目现在走到哪了
 
-**已经完成：**核心持久化 · 安装/bootstrap · 统一 bridge · pi 自动记忆 · DSH 自动记忆 · source trace · 可靠性加固。
+**已经完成：**核心持久化 · 安装/bootstrap · 统一 bridge · pi 自动记忆 · DSH 自动记忆 · source trace · 可靠性加固 · 旧消息一键导入。
 
-**现在：**旧消息一键导入。
+**现在：****记忆纠正**——先把“以前采用 A，后来用户明确改成 B”表达清楚，并让新会话立即按 B 工作，同时保留 A 的历史来源。
 
-**下一步：**记忆查看和纠错，再进入时间记忆——解决“以前是真的”和“现在还是真的”之间的区别。
+**下一步：**让纠正传播到 Topic / Observer / E1 等派生记忆，再进入时间记忆——解决“以前是真的”和“现在还是真的”之间的区别。
 
 维护中的技术状态见 [STATUS.md](docs/STATUS.md)。
 

@@ -116,7 +116,7 @@ The next product work focuses on:
 - **management UX** — make memory status, provenance and updates understandable without reading database rows;
 - **real usage feedback** — let product use decide which deeper recall/reasoning work matters next.
 
-The one-click import milestone was intentionally placed before M01/M02 because continuity for existing users is a product prerequisite, not a later convenience.
+The correction path is deliberately narrow: explicit user corrections outrank model inference; newer text is not automatically “more true”; M01/M02 do not attempt full derived-memory propagation or generic knowledge-graph reasoning. Those belong to M03/M04.
 
 ## Research signal
 
