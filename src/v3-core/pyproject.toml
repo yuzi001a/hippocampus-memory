@@ -91,6 +91,7 @@ packages = {find = {where = ["src"]}}
     "schema/embedding_failures.sql",
     "schema/qa_embedding_chunks.sql",
     "schema/observation_embedding_chunks.sql",
+    "schema/memory_relations.sql",
     "schema/upgrade_v0_2.sql",
 ]
 

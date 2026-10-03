@@ -58,6 +58,25 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/explicit_memories.sql <<<
 
 -- -----------------------------------------------------------------------------
+-- memory_relations — M01 memory-correction relation sidecar.
+--
+-- Body is NOT inlined: schema/memory_relations.sql is the canonical
+-- artifact and is spliced here through the same include mechanism as
+-- explicit_memories, so the repo DDL stays single-sourced and the
+-- packaged copy ships inside the installed wheel.
+--
+-- Placement: immediately AFTER explicit_memories because every edge
+-- references public.explicit_memories(memory_id). Do not move this
+-- marker above the explicit_memories include — the fresh-install
+-- dependency-order test enforces the order.
+--
+-- The table is REQUIRED, not optional. A bootstrap that cannot splice it
+-- fails loudly (the expansion raises FileNotFoundError) rather than
+-- producing an install that silently lacks the correction schema.
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/memory_relations.sql <<<
+
+-- -----------------------------------------------------------------------------
 -- qa_pairs — QA raw trace; source-of-truth for observer rows + keyword/vector
 -- recall. Evidence: __init__.py ~L3750 inserts (source_id, session_id, turn_id,
 -- question, answer, tool_calls, tool_results, timestamp, source, embedding,

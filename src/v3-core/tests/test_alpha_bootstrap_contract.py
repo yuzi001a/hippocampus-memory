@@ -242,6 +242,39 @@ class TestAlphaBootstrapSQL:
     def test_explicit_memories_artifact_exists(self):
         assert EXPLICIT_SQL.is_file(), f"missing {EXPLICIT_SQL}"
 
+    def test_explicit_memories_packaged_copy_is_byte_identical_to_repo_root(self):
+        """Single-source discipline: the packaged mirror must be byte-for-byte
+        the repo-root canonical artifact — the same pin memory_relations.sql
+        and embedding_failures.sql already carry, so a future edit to only one
+        copy fails this test."""
+        packaged = (REPO_ROOT / "src" / "v3-core" / "src" / "v3core"
+                    / "schema" / "explicit_memories.sql")
+        assert packaged.is_file(), (
+            f"explicit_memories.sql 未打进 v3core 包: {packaged}"
+        )
+        assert packaged.read_bytes() == EXPLICIT_SQL.read_bytes(), (
+            "packaged explicit_memories.sql 与 canonical root DDL 必须逐字节一致"
+        )
+
+    def test_explicit_memories_sql_is_lf_only_for_packaged_hash_parity(self):
+        """The packaging/hash harness reads the packaged copy with newline
+        translation (``read_text`` → LF) and compares that hash against the RAW
+        repo bytes. A CRLF copy can therefore never match its own normalized
+        hash; memory_relations.sql is LF-only and passes. Both copies must be
+        LF-only with no trailing-newline drift so raw == normalized."""
+        packaged = (REPO_ROOT / "src" / "v3-core" / "src" / "v3core"
+                    / "schema" / "explicit_memories.sql")
+        for label, path in (("root", EXPLICIT_SQL), ("packaged", packaged)):
+            raw = path.read_bytes()
+            assert raw.count(bytes([13])) == 0, (
+                f"{label} explicit_memories.sql 必须是 LF-only: 含 CR 字节会让 "
+                f"packaged 的归一化哈希与 repo 原始字节哈希不一致 "
+                f"(packaged_artifact_matches_repo_source)"
+            )
+            assert path.read_text(encoding="utf-8").encode("utf-8") == raw, (
+                f"{label} explicit_memories.sql 归一化后与原始字节不一致"
+            )
+
     def test_pgvector_extension_required(self):
         sql = ALPHA_SQL.read_text(encoding="utf-8")
         assert "CREATE EXTENSION IF NOT EXISTS vector" in sql, (
@@ -548,13 +581,13 @@ class TestBootstrapScript:
         assert "explicit_memories" in ddl
         assert "BEGIN INCLUDED schema/explicit_memories.sql" in ddl
         assert "END INCLUDED schema/explicit_memories.sql" in ddl
-        # F3 added a fourth spliced artifact (the embedding_failures ledger);
-        # the explicit_memories / qa_embedding_chunks ordering still holds.
-        assert len(includes) == 4
+        # M01 adds memory_relations immediately after its explicit-memory parent.
+        assert len(includes) == 5
         assert any(p.endswith("observation_embedding_chunks.sql") for p in includes)
         assert any(p.endswith("embedding_failures.sql") for p in includes)
         assert includes[0].endswith("explicit_memories.sql")
-        assert includes[1].endswith("qa_embedding_chunks.sql")
+        assert includes[1].endswith("memory_relations.sql")
+        assert includes[2].endswith("qa_embedding_chunks.sql")
 
     def test_load_alpha_ddl_is_idempotent(self, bootstrap_mod):
         """Every CREATE uses IF NOT EXISTS; running load twice must not

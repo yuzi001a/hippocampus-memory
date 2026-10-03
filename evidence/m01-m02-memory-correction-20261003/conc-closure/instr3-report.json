@@ -1,0 +1,403 @@
+{
+  "label": "instrumented-prefix",
+  "checks": {
+    "module_resolves_under_expected_root": {
+      "ok": true,
+      "observed": "resolved='C:\\\\hp-testbed\\\\m01-m02-integration-20261003\\\\conc-closure-staging\\\\instr_prefix_pkg\\\\v3core\\\\__init__.py' expect_under='C:\\\\hp-testbed\\\\m01-m02-integration-20261003\\\\conc-closure-staging\\\\instr_prefix_pkg' rc=0"
+    },
+    "schema_bootstrapped": {
+      "ok": true,
+      "observed": "rc=0 applied=None"
+    },
+    "server_health_ok": {
+      "ok": true,
+      "observed": "health={'ok': True, 'pg': True, 'embed': False, 'core': 'initialized'} port=56548 pid=3548"
+    },
+    "fixture_a_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "canonical_reproduced": {
+      "ok": false,
+      "observed": "successes=1 mem_delta=0 rel_delta=0 a_status=active b_rows=0"
+    },
+    "fixture_a2_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "sequential_idempotent": {
+      "ok": true,
+      "observed": "first=CORRECTION_COMMITTED second=CORRECTION_DEDUPLICATED dedup=True mem_delta=1 rel_delta=1 b2=1 edges=1"
+    }
+  },
+  "reasons": [
+    "canonical_reproduced: successes=1 mem_delta=0 rel_delta=0 a_status=active b_rows=0"
+  ],
+  "host": "DESKTOP-EQP3OBU",
+  "v3core_resolved": "C:\\hp-testbed\\m01-m02-integration-20261003\\conc-closure-staging\\instr_prefix_pkg\\v3core\\__init__.py",
+  "db": "m01m02e2e_concclosure_i3",
+  "server": {
+    "label": "conc",
+    "port": 56548,
+    "pid": 3548,
+    "argv_profile": "--profile",
+    "health": {
+      "ok": true,
+      "pg": true,
+      "embed": false,
+      "core": "initialized"
+    }
+  },
+  "concurrency": {
+    "successes": 1,
+    "per_thread": {
+      "t0": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "replacement memory_id 已被相同 payload 占用；未覆盖任何行",
+        "durable": false,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+        "new_memory_id": "mem_efda26c1f17103c3876718c9a74282b14bba7ca4df9ce85e7c3260cb79968d4d",
+        "old_status": null,
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.016,
+          "end_offset": 0.062
+        }
+      },
+      "t1": {
+        "http": 200,
+        "success": true,
+        "status": "CORRECTION_DEDUPLICATED",
+        "error_code": null,
+        "error": null,
+        "durable": true,
+        "deduplicated": true,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+        "new_memory_id": "mem_efda26c1f17103c3876718c9a74282b14bba7ca4df9ce85e7c3260cb79968d4d",
+        "old_status": "archived",
+        "new_status": "active",
+        "current_memory_id": "mem_efda26c1f17103c3876718c9a74282b14bba7ca4df9ce85e7c3260cb79968d4d",
+        "relation": {
+          "relation_id": "rel_925c9d552a741dd130af121fc11b1998e82d54af0789b60bd114de7b085784b4",
+          "relation_type": "supersedes",
+          "from_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+          "to_memory_id": "mem_efda26c1f17103c3876718c9a74282b14bba7ca4df9ce85e7c3260cb79968d4d",
+          "correction_id": "cor_727427594942c0aa33c3bbea9a361c46c5f43d7c363149cb1464a6f3f11ffc1e",
+          "authority": "user_explicit",
+          "correction_reason": "concurrent identical correction",
+          "correction_source_id": null,
+          "provenance": "explicit_tool_request",
+          "effective_at": null,
+          "recorded_at": "2026-10-03T08:11:29.615874+00:00",
+          "request": {
+            "mode": "replace",
+            "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+            "effective_at": null,
+            "replacement_tags": null,
+            "correction_reason": "concurrent identical correction",
+            "replacement_title": null,
+            "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_concclosure_i3-B",
+            "correction_source_id": null
+          },
+          "correction_source": {
+            "provenance": "explicit_tool_request",
+            "correction_source_id": null,
+            "host": null,
+            "session_id": null,
+            "event_id": null
+          }
+        },
+        "warnings": null,
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.016,
+          "end_offset": 0.062
+        }
+      },
+      "t2": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i3 status='active'（期望 archived）",
+        "durable": true,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+        "new_memory_id": "mem_efda26c1f17103c3876718c9a74282b14bba7ca4df9ce85e7c3260cb79968d4d",
+        "old_status": "archived",
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i3 status='active'（期望 archived）"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.016,
+          "end_offset": 0.062
+        }
+      }
+    },
+    "memory_delta": 0,
+    "relation_delta": 0,
+    "a_before": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i3"
+    },
+    "a_after": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "content": "并发纠正基线内容。conc-closure-m01m02e2e_concclosure_i3-A",
+      "status": "active"
+    },
+    "b_rows": [],
+    "edges_from_a": [],
+    "memory_before": 1,
+    "memory_after": 1,
+    "relation_before": 0,
+    "relation_after": 0
+  },
+  "connect_log": [
+    {
+      "t": 1791015085.061666,
+      "tid": 8564,
+      "backend_pid": 4392,
+      "autocommit": false,
+      "dsn_db": null
+    },
+    {
+      "t": 1791015088.249055,
+      "tid": 7408,
+      "backend_pid": 8660,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_i3"
+    },
+    {
+      "t": 1791015088.4678,
+      "tid": 2412,
+      "backend_pid": 1844,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_i3"
+    }
+  ],
+  "diag": [
+    {
+      "t": 1791015088.795916,
+      "tid": 7916,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 3300,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 2388,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 3300,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "mode": "replace",
+      "backend": 1844,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 7548,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 2388,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "mode": "replace",
+      "backend": 1844,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 3300,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 7548,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "mode": "replace",
+      "backend": 1844,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 2388,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015089.608383,
+      "tid": 7548,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015089.624001,
+      "tid": 2388,
+      "event": "race_lost_insert_memory",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "txn": 2
+    },
+    {
+      "t": 1791015089.624001,
+      "tid": 2388,
+      "event": "race_lost_rolled_back",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "autocommit": false,
+      "txn": 0,
+      "reason": "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+    },
+    {
+      "t": 1791015089.624001,
+      "tid": 3300,
+      "event": "commit_attempt",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "txn": 0
+    },
+    {
+      "t": 1791015089.624001,
+      "tid": 2388,
+      "event": "race_resolve_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "autocommit": false,
+      "txn": 1
+    },
+    {
+      "t": 1791015089.639632,
+      "tid": 3300,
+      "event": "committed",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "txn": 0
+    },
+    {
+      "t": 1791015089.639632,
+      "tid": 2388,
+      "event": "race_resolve_edge",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "found": false,
+      "backend": 1844
+    },
+    {
+      "t": 1791015089.639632,
+      "tid": 3300,
+      "event": "race_resolve_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "backend": 1844,
+      "autocommit": false,
+      "txn": 0
+    },
+    {
+      "t": 1791015089.639632,
+      "tid": 3300,
+      "event": "race_resolve_edge",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "found": false,
+      "backend": 1844
+    },
+    {
+      "t": 1791015089.639632,
+      "tid": 3300,
+      "event": "verify_result",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i3",
+      "status": "DURABLE_FAILED",
+      "error_code": "DURABLE_FAILED",
+      "error": "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i3 status='active'（期望 archived）",
+      "old_status": "archived",
+      "new_status": null
+    }
+  ],
+  "connect_count": 3,
+  "sequential": {
+    "first": {
+      "success": true,
+      "status": "CORRECTION_COMMITTED",
+      "durable": true,
+      "deduplicated": false,
+      "new_memory_id": "mem_fd469a1b852c657c6f7900fa36e0e8b9ac063fe2f93dc44712c066f7b6316dde",
+      "new_status": "active",
+      "current_memory_id": "mem_fd469a1b852c657c6f7900fa36e0e8b9ac063fe2f93dc44712c066f7b6316dde",
+      "error": null
+    },
+    "second": {
+      "success": true,
+      "status": "CORRECTION_DEDUPLICATED",
+      "durable": true,
+      "deduplicated": true,
+      "new_memory_id": "mem_fd469a1b852c657c6f7900fa36e0e8b9ac063fe2f93dc44712c066f7b6316dde",
+      "new_status": "active",
+      "current_memory_id": "mem_fd469a1b852c657c6f7900fa36e0e8b9ac063fe2f93dc44712c066f7b6316dde",
+      "error": null
+    },
+    "a2_after": {
+      "memory_id": "m01m02e2e-conc-seq-m01m02e2e_concclosure_i3",
+      "content": "顺序纠正基线内容。conc-closure-m01m02e2e_concclosure_i3-SEQ-A",
+      "status": "archived"
+    },
+    "b2_rows": [
+      {
+        "memory_id": "mem_fd469a1b852c657c6f7900fa36e0e8b9ac063fe2f93dc44712c066f7b6316dde",
+        "status": "active"
+      }
+    ],
+    "edges_from_a2": [
+      {
+        "relation_id": "rel_e7775e4c60e0321aae958078517ef4b1563ec424cafb12e76c3bf89b133409b8",
+        "to_memory_id": "mem_fd469a1b852c657c6f7900fa36e0e8b9ac063fe2f93dc44712c066f7b6316dde"
+      }
+    ],
+    "memory_delta": 1,
+    "relation_delta": 1
+  }
+}

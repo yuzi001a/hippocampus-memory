@@ -8,6 +8,12 @@ import json
 import logging
 from pathlib import Path
 
+from .memory_correction import (
+    CANONICAL_FAILURE,
+    INVALID_REQUEST,
+    SCOPE_UNAVAILABLE,
+)
+
 
 try:
     from . import _safe_err
@@ -25,17 +31,189 @@ except (ImportError, AttributeError):
 
 logger = logging.getLogger("v3core.tools.get")
 
+
+#: Locked public read modes — anything else is a caller error.
+READ_MODES = ("current", "history")
+
+
+class _Invalid(ValueError):
+    """A caller-supplied read parameter is not acceptable."""
+
+
+def _explicit_history_requested(args: dict) -> bool:
+    """Did the caller explicitly ask for version-history semantics?
+
+    Only these two parameters count. A caller that supplies neither is
+    asking for the legacy plain read, and that path must stay unchanged
+    for every non-corrected active memory.
+    """
+    if args.get("include_history"):
+        return True
+    return args.get("mode") is not None
+
+
+def _read_parameters(args: dict) -> tuple[str, bool]:
+    """Validate the history parameters strictly and pick the read mode.
+
+    An OMITTED parameter takes its documented default; an explicitly
+    supplied ``null`` is a caller error — ``null`` is in neither the
+    ``mode`` string enum nor the ``include_history`` boolean schema — so it
+    fails before any lookup instead of collapsing into the omitted default.
+
+    Both parameters are checked, never coerced: ``bool('false')`` is truthy
+    and ``include_history=True`` must NOT silently switch the read to
+    history mode. ``include_history`` only attaches the history to the
+    mode that was actually requested (current by default), so the payload
+    stays the CURRENT version instead of the archived one.
+    """
+    if "mode" not in args:
+        mode = "current"
+    else:
+        mode = args["mode"]
+        if not isinstance(mode, str) or mode not in READ_MODES:
+            raise _Invalid(
+                f"mode must be one of {list(READ_MODES)} (got {mode!r}); "
+                f"include_history only attaches the history and never selects a mode"
+            )
+    if "include_history" not in args:
+        include_history = False
+    else:
+        include_history = args["include_history"]
+        if not isinstance(include_history, bool):
+            raise _Invalid(
+                f"include_history must be a boolean (got {include_history!r}); "
+                f"a truthy string is not a request for history"
+            )
+    return mode, include_history
+
+
+def _canonical_explicit_read(source_id: str, args: dict, core, kw: dict) -> str:
+    """Read an explicit memory through the canonical version-aware reader.
+
+    Used for an archived exact hit and for any explicit history request.
+    A missing relation schema is a truthful migration-required failure —
+    never a silent fall back to the archived raw payload.
+    """
+    from .memory_correction import (
+        _as_result,
+        read_version,
+        render_canonical_for_source,
+        resolve_scope,
+    )
+
+    try:
+        mode, include_history = _read_parameters(args)
+    except _Invalid as exc:
+        return json.dumps(
+            {
+                "success": False,
+                "source_id": source_id,
+                "error_code": INVALID_REQUEST,
+                "code": INVALID_REQUEST,
+                "error": str(exc),
+            },
+            ensure_ascii=False,
+        )
+    # ``core`` is the ACTUAL booted/constructed core for this read. When the
+    # caller's scope mapping carries no core — the host injected only a pool,
+    # or handle_hm_get built the core itself — resolve against a COPY that
+    # carries it. Otherwise the booted config / PG owner is lost and the read
+    # silently falls back to the default profile (or trips an injected-runtime
+    # guard). An explicitly supplied core / config / pool is never overwritten.
+    scope = dict(kw)
+    if scope.get("core") is None:
+        scope["core"] = core
+    try:
+        pool, pg, cfg = resolve_scope(scope)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps(
+            {
+                "success": False,
+                "source_id": source_id,
+                "error_code": SCOPE_UNAVAILABLE,
+                "code": SCOPE_UNAVAILABLE,
+                "error": f"memory version read unavailable: {_safe_err(e)}",
+            },
+            ensure_ascii=False,
+        )
+    try:
+        raw = read_version(
+            source_id,
+            mode=mode,
+            include_history=include_history,
+            pool=pool,
+            pg=pg,
+            config=cfg,
+        )
+        result = _as_result(raw)
+    except Exception as e:  # noqa: BLE001
+        return json.dumps(
+            {
+                "success": False,
+                "source_id": source_id,
+                "error_code": CANONICAL_FAILURE,
+                "code": CANONICAL_FAILURE,
+                "error": f"memory version read failed: {_safe_err(e)}",
+            },
+            ensure_ascii=False,
+        )
+    if not result.get("success"):
+        code = result.get("error_code") or result.get("code")
+        payload = {
+            "success": False,
+            "source_id": source_id,
+            "error": str(result.get("error") or code or "memory read failed"),
+        }
+        if code:
+            # The canonical code is preserved, never dropped on this path.
+            payload["error_code"] = code
+            payload["code"] = code
+        return json.dumps(payload, ensure_ascii=False)
+    # Report the mode that was actually requested unless the canonical
+    # reader stated one itself — never label a history read as 'current'.
+    result.setdefault("mode", mode)
+    return json.dumps(
+        render_canonical_for_source(result, source_id), ensure_ascii=False
+    )
+
 # ── hm_get ──────────────────────────────────────────────────────────────────
 
 HM_GET_SCHEMA = {
     "name": "hm_get",
-    "description": "[3-读取] Unified read tool — accepts any source_id (message, card, handbook, file) and returns full content.",
+    "description": (
+        "[3-读取] Unified read tool — accepts any source_id (message, card, "
+        "handbook, file) and returns full content. For an explicit memory id "
+        "it returns the current version by default; pass mode='history' "
+        "(optionally include_history) to read the original version and the "
+        "full version history."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "source_id": {
                 "type": "string",
                 "description": "Source ID to look up. Handles: handbook/xxx keys, PG message IDs, PG card source_ids, and file-based messages.",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["current", "history"],
+                "description": (
+                    "optional. Only meaningful for an explicit-memory source_id: "
+                    "current (default) resolves the replacement chain to the "
+                    "terminal current version; history returns the requested "
+                    "original version with its full history. Omit to keep the "
+                    "legacy plain read."
+                ),
+            },
+            "include_history": {
+                "type": "boolean",
+                "description": (
+                    "optional, must be a real boolean. Return the full ordered "
+                    "version/edge history alongside the payload. It does NOT "
+                    "change the mode: with the default mode=current the "
+                    "payload stays the CURRENT version and the history is "
+                    "attached to it."
+                ),
             },
         },
         "required": ["source_id"],
@@ -56,7 +234,30 @@ def handle_hm_get(args: dict, **kw) -> str:
         source_id = args.get("source_id", "").strip()
         if not source_id:
             return json.dumps(
-                {"success": False, "error": "source_id required"},
+                {
+                    "success": False,
+                    "error_code": INVALID_REQUEST,
+                    "code": INVALID_REQUEST,
+                    "error": "source_id required",
+                },
+                ensure_ascii=False,
+            )
+
+        # History parameters are validated strictly BEFORE any lookup, so a
+        # malformed mode / include_history fails as a caller error instead
+        # of being coerced (``bool('false')`` is truthy) or silently
+        # dropped. Nothing is written or read on this path.
+        try:
+            _read_parameters(args)
+        except _Invalid as exc:
+            return json.dumps(
+                {
+                    "success": False,
+                    "source_id": source_id,
+                    "error_code": INVALID_REQUEST,
+                    "code": INVALID_REQUEST,
+                    "error": str(exc),
+                },
                 ensure_ascii=False,
             )
 
@@ -95,6 +296,46 @@ def handle_hm_get(args: dict, **kw) -> str:
         # ``explicit_memories.memory_id`` as source_id. Read it before the
         # historical message/card fallbacks so search -> source-read is one
         # coherent contract.
+
+        # A DECLARED runtime scope must be complete BEFORE a default profile
+        # would be resolved. Resolving the default profile here can silently
+        # read it instead of the caller's declared runtime — an incomplete
+        # injected runtime must fail closed instead. Only a declared runtime
+        # is checked (presence, not truthiness, so an explicit
+        # ``runtime_context=False`` / ``None`` / ``''`` counts); the legacy
+        # no-runtime call keeps constructing the core exactly as before.
+        #
+        # A supplied ``core`` is itself a fully booted runtime, so it is NOT
+        # by itself a refusal reason: its own ``.pg`` / ``.config`` are used
+        # directly below. The guard therefore fires only when the caller
+        # declares a runtime WITHOUT supplying a core, or when it declares an
+        # explicitly empty ``effective_config`` (which would otherwise force
+        # a default-profile resolution).
+        _declared_runtime = (
+            "runtime_context" in kw
+            or "effective_config" in kw
+            or kw.get("core") is not None
+        )
+        _explicit_empty_config = (
+            "effective_config" in kw and kw.get("effective_config") is None
+        )
+        if _explicit_empty_config or (kw.get("core") is None and _declared_runtime):
+            from .memory_correction import resolve_scope as _resolve_scope
+
+            try:
+                _resolve_scope(dict(kw))
+            except Exception as e:  # noqa: BLE001
+                return json.dumps(
+                    {
+                        "success": False,
+                        "source_id": source_id,
+                        "error_code": SCOPE_UNAVAILABLE,
+                        "code": SCOPE_UNAVAILABLE,
+                        "error": f"hm read scope unavailable: {_safe_err(e)}",
+                    },
+                    ensure_ascii=False,
+                )
+
         from .. import V3Core
 
         core = kw.get("core") or V3Core(
@@ -124,6 +365,24 @@ def handle_hm_get(args: dict, **kw) -> str:
                         row = cur.fetchone()
                 if row:
                     record = dict(row) if hasattr(row, "keys") else dict(zip(columns, row))
+                    # An explicit-memory exact hit. Two contracts:
+                    #
+                    #   * a plain read (no history parameters) of an
+                    #     ACTIVE row keeps the existing raw payload. By
+                    #     the canonical invariant an active row has no
+                    #     outgoing corrects edge, so "current" and "raw"
+                    #     are the same version here — the legacy shape
+                    #     (source_id/content/metadata) stays byte-stable.
+                    #   * an ARCHIVED row, or any explicit history
+                    #     request, goes through the canonical reader so
+                    #     a plain source inspection can never answer
+                    #     with a superseded payload.
+                    if _explicit_history_requested(args) or str(
+                        record.get("status", "") or ""
+                    ) != "active":
+                        return _canonical_explicit_read(
+                            source_id, args, core, kw
+                        )
                     return json.dumps(
                         {
                             "success": True,
@@ -198,6 +457,25 @@ def handle_hm_get(args: dict, **kw) -> str:
             from ..config import resolve_config
             _cfg = kw.get("effective_config")
             if _cfg is None:
+                # A supplied core already carries its own booted config.
+                _cfg = getattr(core, "config", None)
+            if _cfg is None:
+                if _declared_runtime:
+                    # A runtime was declared but no config can be resolved
+                    # without falling back to the DEFAULT profile, which the
+                    # caller did not declare. Fail closed, same shape as the
+                    # entry guard.
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "source_id": source_id,
+                            "error_code": SCOPE_UNAVAILABLE,
+                            "code": SCOPE_UNAVAILABLE,
+                            "error": "hm read scope unavailable: "
+                            "effective config is missing",
+                        },
+                        ensure_ascii=False,
+                    )
                 _cfg = resolve_config()
             _store = DeepStore(_cfg)
             # Try with .md extension first, then without
