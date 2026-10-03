@@ -201,11 +201,11 @@ Read the longer story in [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md).
 
 ## Where the project is now
 
-**Done:** durable core · install/bootstrap · shared bridge · pi automatic memory · DSH automatic memory · source trace · reliability hardening · one-click history import.
+**Done:** durable core · install/bootstrap · shared bridge · pi automatic memory · DSH automatic memory · source trace · reliability hardening · one-click history import · explicit memory correction.
 
-**Now:** **memory correction** — representing “A used to be true, but the user explicitly changed it to B” without erasing the original history.
+**Now:** **correction propagation** — when a user replaces A with B, derived memory such as Topic / Observer / E1 should stop reintroducing A as the current truth.
 
-**Next:** propagate corrections into derived memory, then temporal recall — understanding that “true once” does not always mean “true now.”
+**Next:** temporal recall — understanding that “true once” does not always mean “true now.”
 
 See [Current status](docs/STATUS.md) for the maintained technical snapshot.
 
