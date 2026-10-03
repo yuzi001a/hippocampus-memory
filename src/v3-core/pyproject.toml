@@ -44,6 +44,10 @@ dependencies = [
     "pyahocorasick>=2.3.0",
     # Token-aware long-QA representation; avoids provider-side truncation.
     "tokenizers>=0.20.0",
+    # I01: DSH session files are zstd-compressed JSONL (multi-frame).
+    # python-zstandard handles frame concatenation natively; the dsh
+    # importer fails with a clear message when this is missing.
+    "zstandard>=0.21",
 ]
 
 [project.optional-dependencies]

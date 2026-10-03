@@ -1,0 +1,35 @@
+basePath: "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\data"
+mode: cloud
+storage:
+  pg:
+    host: 127.0.0.1
+    port: 55432
+    database: i01e2e_20261003c
+    user: f2e2e
+  embed:
+    endpoint: ''
+    model: ''
+    dim: 1024
+    apiKey: ''
+    api_key: ''
+    proxy: ''
+  rerank:
+    endpoint: ''
+    model: ''
+    proxy: ''
+    timeout: 30
+    apiKey: ''
+    api_key: ''
+e1:
+  enabled: false
+observer:
+  enabled: false
+tkg:
+  enabled: false
+llm:
+  provider: ''
+  model: ''
+  api_key: ''
+  base_url: ''
+  thinking: true
+  max_tokens: 0

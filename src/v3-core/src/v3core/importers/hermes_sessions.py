@@ -60,6 +60,7 @@ _MSG_COL_CANDIDATES = {
     "id": ("id", "rowid", "message_id"),
     "tool_calls": ("tool_calls", "tool_call", "toolcall_json"),
     "tool_results": ("tool_results", "tool_result"),
+    "display_kind": ("display_kind",),
 }
 
 _SESSION_COL_CANDIDATES = {
@@ -71,6 +72,23 @@ _SESSION_COL_CANDIDATES = {
 _STATE_DB_NAMES = ("state.db", "hermes_state.db", "sessions.db")
 _JSONL_NAMES = (".jsonl", ".ndjson")
 _JSON_NAMES = (".json",)
+
+# I01: host-declared non-conversation display kinds — workflow notifications
+# written into the transcript by the runtime. Never user facts.
+_EXCLUDED_DISPLAY_KINDS = frozenset(
+    {
+        "hidden",
+        "auto_continue",
+        "async_delegation_complete",
+        "process_complete",
+        "model_switch",
+        "failed_turn",
+    }
+)
+
+# System-generated pseudo messages (content-level, belt + braces with
+# display_kind): compaction summaries and interruption notes.
+_SYSTEM_TEXT_PREFIXES = ("[CONTEXT COMPACTION", "[System note:")
 
 
 class HermesSessionImporter(Importer):
@@ -126,7 +144,8 @@ class HermesSessionImporter(Importer):
     # ── sqlite path ────────────────────────────────────────────────────
 
     def _parse_state_db(self, path: Path) -> Iterator[ImportItem]:
-        conn = sqlite3.connect(str(path))
+        # §6: source stores are read-only — URI read-only connection.
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
         try:
             conn.row_factory = sqlite3.Row
             tables = {
@@ -169,6 +188,7 @@ class HermesSessionImporter(Importer):
             id_col = mapping.get("id")
             tc_col = mapping.get("tool_calls")
             tr_col = mapping.get("tool_results")
+            dk_col = mapping.get("display_kind")
 
             select_cols = [role_col, content_col]
             if sess_id_col:
@@ -181,6 +201,8 @@ class HermesSessionImporter(Importer):
                 select_cols.append(tc_col)
             if tr_col:
                 select_cols.append(tr_col)
+            if dk_col:
+                select_cols.append(dk_col)
 
             order_clause = f"ORDER BY {id_col}" if id_col else ""
             sql = (
@@ -190,9 +212,25 @@ class HermesSessionImporter(Importer):
             cur = conn.execute(sql)
             for row in cur:
                 role = row[role_col] if role_col else None
+                role_s = str(role) if role is not None else "assistant"
                 content = row[content_col]
-                if content is None or not str(content).strip():
+
+                # I01 exclusion ladder — every skip is counted (§8/§18).
+                if role_s not in ("user", "assistant"):
+                    self._track_excluded("skipped_roles")
                     continue
+                if content is None or not str(content).strip():
+                    self._track_excluded("skipped_empty")
+                    continue
+                text = str(content)
+                if text.lstrip().startswith(_SYSTEM_TEXT_PREFIXES):
+                    self._track_excluded("skipped_system_text")
+                    continue
+                dk = row[dk_col] if dk_col else None
+                if dk is not None and str(dk) in _EXCLUDED_DISPLAY_KINDS:
+                    self._track_excluded("skipped_display_kind")
+                    continue
+
                 session_id = (
                     row[sess_id_col] if sess_id_col else None
                 ) or f"hermes:ungrouped:{path.name}"
@@ -201,10 +239,13 @@ class HermesSessionImporter(Importer):
                 raw_id = row[id_col] if id_col else None
                 tc_raw = row[tc_col] if tc_col else None
                 tr_raw = row[tr_col] if tr_col else None
+                event_id = str(raw_id) if raw_id is not None else None
                 provenance = {
                     "session_id": session_id,
                     "schema_columns": sorted(msg_cols),
                     "raw_id": raw_id,
+                    "native_id": event_id,
+                    "identity_kind": "native" if event_id else "import-derived",
                     "tool_calls": _coerce_json(tc_raw) if tc_raw else None,
                     "tool_results": _coerce_json(tr_raw) if tr_raw else None,
                     "artifact": path.name,
@@ -220,10 +261,13 @@ class HermesSessionImporter(Importer):
                     kind=KIND_RAW,
                     source_system=self.name,
                     source_ref=str(session_id),
-                    text=str(content),
-                    role=str(role) if role is not None else "assistant",
+                    text=text,
+                    role=role_s,
                     occurred_at=occurred,
                     provenance=provenance,
+                    host="hermes",
+                    event_id=event_id,
+                    identity_kind="native" if event_id else "import-derived",
                 )
         finally:
             conn.close()
@@ -359,10 +403,14 @@ class HermesSessionImporter(Importer):
             or obj.get("created")
         )
         occurred = _coerce_ts(ts_raw)
+        raw_id = obj.get("id")
+        event_id = str(raw_id) if raw_id is not None else None
         provenance = {
             "session_id": str(session_id),
             "artifact": path.name,
             "lineno": lineno,
+            "native_id": event_id,
+            "identity_kind": "native" if event_id else "import-derived",
             "tool_calls": obj.get("tool_calls") or obj.get("tool_call"),
             "tool_results": obj.get("tool_results") or obj.get("tool_result"),
             "raw_id": obj.get("id"),
@@ -377,6 +425,9 @@ class HermesSessionImporter(Importer):
             role=str(role),
             occurred_at=occurred,
             provenance=provenance,
+            host="hermes",
+            event_id=event_id,
+            identity_kind="native" if event_id else "import-derived",
         )
 
 

@@ -345,13 +345,17 @@ Remove-Item -Recurse -Force .\.venv
 - **不会**自动应用 `public.explicit_memories` DDL。请显式跑
   `hippocampus bootstrap`（第 8 步）。`v3core.active_memory_store`
   写路径不会应用 DDL。
-- **不会**导入历史数据、回放旧对话流，或运行任何历史迁移脚本。
+- **不会**自动导入历史数据。把既有的 Hermes / DSH / pi 历史带进记忆
+  是一条单独、显式的命令——见 [`docs/IMPORT.md`](IMPORT.md)。
+  安装本身不触碰任何既有数据。
 - **不会**触碰生产环境、迁移历史数据或替换已有部署。
 
 ---
 
 ## 14. 下一步
 
+- [`docs/IMPORT.md`](IMPORT.md) — 一条命令把既有的 Hermes / DSH / pi
+  历史导入记忆（`hippocampus import auto`，可先跑 dry-run 预览）。
 - [`docs/CONFIGURATION.md`](CONFIGURATION.md) — 全部配置键、
   环境变量、provider 未配置时的默认行为。
 - [`docs/BACKUP-RESTORE.md`](BACKUP-RESTORE.md) — `pg_dump` +

@@ -1,0 +1,653 @@
+{
+  "scope": "I01 isolated integration; real host formats + disposable PG; keyword-only core; no LLM; no embedding; no external endpoint",
+  "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3",
+  "checks": {
+    "hermes_fixture_generated": {
+      "ok": true,
+      "observed": "rc=0; out=wrote C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\AppData\\Local\\hermes\\state.db (20480 bytes)"
+    },
+    "pi_fixture_staged": {
+      "ok": true,
+      "observed": "copied 1 pi session file(s)"
+    },
+    "dsh_fixture_staged": {
+      "ok": true,
+      "observed": "copied 2 dsh session file(s)"
+    },
+    "dsh_fixture_byte_identical_to_b04_originals": {
+      "ok": true,
+      "observed": "2/2 files byte-identical to C:\\hp-testbed\\b04-integration-20261002\\dsh-home"
+    },
+    "v3core_resolves_to_i01_source": {
+      "ok": true,
+      "observed": "import v3core -> C:\\hp-testbed\\i01-integration-20261003\\i01-src\\src\\v3-core\\src\\v3core\\__init__.py"
+    },
+    "schema_bootstrapped": {
+      "ok": true,
+      "observed": "rc=0, applied=True"
+    },
+    "dry_run_rc0": {
+      "ok": true,
+      "observed": "rc=0"
+    },
+    "dry_run_found_hermes": {
+      "ok": true,
+      "observed": "found=True root=C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\AppData\\Local\\hermes reason=None"
+    },
+    "dry_run_hermes_messages": {
+      "ok": true,
+      "observed": "messages=9 (expected 9)"
+    },
+    "dry_run_found_dsh": {
+      "ok": true,
+      "observed": "found=True root=C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\.dsh reason=None"
+    },
+    "dry_run_dsh_messages": {
+      "ok": true,
+      "observed": "messages=6 (expected 6)"
+    },
+    "dry_run_found_pi": {
+      "ok": true,
+      "observed": "found=True root=C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\.pi\\agent\\sessions reason=None"
+    },
+    "dry_run_pi_messages": {
+      "ok": true,
+      "observed": "messages=6 (expected 6)"
+    },
+    "dry_run_found_memory-md": {
+      "ok": true,
+      "observed": "found=True root=C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\project"
+    },
+    "dry_run_zero_raw_written": {
+      "ok": true,
+      "observed": "raw_imported=0"
+    },
+    "dry_run_wrote_nothing": {
+      "ok": true,
+      "observed": "conversation_stream rows after dry-run = 0"
+    },
+    "live_rc0": {
+      "ok": true,
+      "observed": "rc=0"
+    },
+    "live_raw_imported": {
+      "ok": true,
+      "observed": "raw_imported=21 (expected 21 = 9+6+6)"
+    },
+    "live_qa_pairs_derived": {
+      "ok": true,
+      "observed": "qa_pairs_derived=9 (expected 9 = 3+3+3)"
+    },
+    "stream_rows_hermes": {
+      "ok": true,
+      "observed": "conversation_stream rows = 9"
+    },
+    "stream_rows_dsh": {
+      "ok": true,
+      "observed": "conversation_stream rows = 6"
+    },
+    "stream_rows_pi": {
+      "ok": true,
+      "observed": "conversation_stream rows = 6"
+    },
+    "native_identity_present": {
+      "ok": true,
+      "observed": "rows with missing host/event_id = 0"
+    },
+    "pi_native_event_id": {
+      "ok": true,
+      "observed": "pi row with event_id='9921d832' (native entry id) found"
+    },
+    "dsh_native_event_ids": {
+      "ok": true,
+      "observed": "dsh rows with uuid event_id = 6"
+    },
+    "qa_pairs_total": {
+      "ok": true,
+      "observed": "qa_pairs rows = 9"
+    },
+    "qa_source_id_format": {
+      "ok": true,
+      "observed": "qa_import/ prefixed source_ids = 9"
+    },
+    "qa_content_hermes": {
+      "ok": true,
+      "observed": "hermes QA rows containing '银杏' = 1"
+    },
+    "qa_content_dsh": {
+      "ok": true,
+      "observed": "dsh QA rows containing 'b04-isolated-marker-7f3a' = 3"
+    },
+    "qa_content_pi": {
+      "ok": true,
+      "observed": "pi QA rows containing '盘位核对表' = 1"
+    },
+    "memory_md_curated_written": {
+      "ok": true,
+      "observed": "user_curated_imported=2 errors=[]"
+    },
+    "memory_md_row_in_explicit_memories": {
+      "ok": true,
+      "observed": "explicit_memories rows containing 'I01-MEM-MARKER' = 2"
+    },
+    "self_memory_excluded": {
+      "ok": true,
+      "observed": "rows containing injected-memory markers = 0"
+    },
+    "rerun_stream_unchanged": {
+      "ok": true,
+      "observed": "conversation_stream 21 -> 21"
+    },
+    "rerun_qa_unchanged": {
+      "ok": true,
+      "observed": "qa_pairs 9 -> 9"
+    },
+    "rerun_deduped_reported": {
+      "ok": true,
+      "observed": "rerun duplicates_skipped=32 (expected >= 30)"
+    },
+    "bridge_health_ok": {
+      "ok": true,
+      "observed": "health=True"
+    },
+    "recall_hermes": {
+      "ok": true,
+      "observed": "prefetch('银杏') block chars=981, marker_present=True"
+    },
+    "recall_dsh": {
+      "ok": true,
+      "observed": "prefetch('b04-isolated-marker-7f3a') block chars=654, marker_present=True"
+    },
+    "recall_pi": {
+      "ok": true,
+      "observed": "prefetch('盘位核对表') block chars=981, marker_present=True"
+    },
+    "source_trace_complete": {
+      "ok": true,
+      "observed": "qa_import/pi/01a0fdab-fc1d-74a7-80f2-31beea48a420/9921d832 -> conversation_stream row matched verbatim=True"
+    },
+    "source_files_unchanged": {
+      "ok": true,
+      "observed": "changed=[] added=[]"
+    }
+  },
+  "failures": [],
+  "host": "DESKTOP-EQP3OBU",
+  "credentials": {
+    "keys_loaded": [
+      "PGPASSWORD"
+    ],
+    "printed": false,
+    "in_argv": false
+  },
+  "roots": {
+    "home": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home",
+    "project": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\project",
+    "data": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\data",
+    "isolated_from_production": true
+  },
+  "dsh_provenance": {
+    "b04_files": 2,
+    "byte_identical": 2
+  },
+  "source_snapshot": {
+    "files": 6,
+    "sha256": {
+      ".dsh\\sessions\\--C--hp-testbed-b04-integration-20261002-runs-b04-integration-run-1-project--\\session-60c82e3f-84fe-4f53-94c3-72779343a9a0\\session.v4.jsonl.zstd": "2180d8607712cf5175af02bda221ae85473458c1ac45a13e6b9c061dfe34ba43",
+      ".dsh\\sessions\\--C--hp-testbed-b04-integration-20261002-runs-b04-integration-run-1-project--\\session-9a48a9ec-0280-468e-b249-dd405f68ad93\\session.v4.jsonl.zstd": "f5ca000e1981381aad8e6d90332ddfacf708e266b92a6f7fae74b3176f585efe",
+      ".pi\\agent\\sessions\\--C--work--migration-project--\\2026-10-02T17-31-41-982Z_01a0fdab-fc1d-74a7-80f2-31beea48a420.jsonl": "266278480fa79c2e059eaea5f85d7a4dcfa028820156d468cdf08c66bf93ef52",
+      "AppData\\Local\\hermes\\make_fixture.py": "87573fc0f7e03aaf3f567d81db2504638d9e2ad31de2aa37396cb8cedd0b063c",
+      "AppData\\Local\\hermes\\state.db": "eaee29fd73039e4245cea813675ade08c1915de81f8433ade5aadf43b3f7a2de",
+      "MEMORY.md": "8a994ca853cb822e41efd4cd08d3912f4e1f2593c9f1d3fe90dce53007be5222"
+    }
+  },
+  "core_config": {
+    "path": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\profile\\config.yaml",
+    "embedding_mode": "keyword_only_disabled",
+    "credential_fields_empty": true
+  },
+  "v3core_resolved": "C:\\hp-testbed\\i01-integration-20261003\\i01-src\\src\\v3-core\\src\\v3core\\__init__.py",
+  "db_created_fresh": true,
+  "bootstrap": {
+    "returncode": 0,
+    "applied": true,
+    "stdout_tail": ": \"i01e2e_20261003c\",\n      \"host\": \"127.0.0.1\",\n      \"password\": \"***\",\n      \"port\": 55432,\n      \"user\": \"f2e2e\"\n    },\n    \"upgrade_applied\": true\n  },\n  \"target\": {\n    \"database\": \"i01e2e_20261003c\",\n    \"host\": \"127.0.0.1\",\n    \"password\": \"***\",\n    \"port\": 55432,\n    \"user\": \"f2e2e\"\n  }\n}\n"
+  },
+  "dry_run_report": {
+    "command": "import.auto",
+    "version": 1,
+    "dry_run": true,
+    "status": "ok",
+    "generated_at": "2026-10-02T18:37:33Z",
+    "started_at": "2026-10-02T18:37:33Z",
+    "finished_at": "2026-10-02T18:37:33Z",
+    "duration_s": 0.047,
+    "hosts": [
+      "hermes",
+      "dsh",
+      "pi",
+      "memory-md"
+    ],
+    "sources": [
+      {
+        "host": "hermes",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\AppData\\Local\\hermes",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "sqlite",
+        "version": null,
+        "artifacts": 1,
+        "sessions": 2,
+        "messages": 9,
+        "raw_imported": 0,
+        "qa_pairs_derived": 3,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 0,
+        "unsupported_skipped": 9,
+        "skipped": {
+          "skipped_system_text": 2,
+          "skipped_roles": 1,
+          "skipped_empty": 1,
+          "skipped_display_kind": 5
+        },
+        "oldest": "2026-06-01T00:01:00Z",
+        "newest": "2026-06-01T00:23:00Z",
+        "recall_ready": true,
+        "errors": []
+      },
+      {
+        "host": "dsh",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\.dsh",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "jsonl.zstd",
+        "version": "v4",
+        "artifacts": 2,
+        "sessions": 2,
+        "messages": 6,
+        "raw_imported": 0,
+        "qa_pairs_derived": 3,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 0,
+        "unsupported_skipped": 5,
+        "skipped": {
+          "skipped_injected": 5
+        },
+        "oldest": "2026-10-02T14:19:38Z",
+        "newest": "2026-10-02T14:19:58Z",
+        "recall_ready": true,
+        "errors": []
+      },
+      {
+        "host": "pi",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\.pi\\agent\\sessions",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "jsonl",
+        "version": "v3",
+        "artifacts": 1,
+        "sessions": 1,
+        "messages": 6,
+        "raw_imported": 0,
+        "qa_pairs_derived": 3,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 0,
+        "unsupported_skipped": 2,
+        "skipped": {
+          "skipped_injected": 1,
+          "skipped_entries": 1
+        },
+        "oldest": "2026-10-02T17:31:41.985Z",
+        "newest": "2026-10-02T17:31:41.991Z",
+        "recall_ready": true,
+        "errors": []
+      },
+      {
+        "host": "memory-md",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\project",
+        "resolved_from": "cwd",
+        "found": true,
+        "reason": null,
+        "format": "markdown",
+        "version": null,
+        "artifacts": 1,
+        "sessions": 0,
+        "messages": 0,
+        "raw_imported": 0,
+        "qa_pairs_derived": 0,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 0,
+        "unsupported_skipped": 0,
+        "skipped": {},
+        "oldest": null,
+        "newest": null,
+        "recall_ready": false,
+        "errors": []
+      }
+    ],
+    "totals": {
+      "artifacts": 5,
+      "sessions": 5,
+      "messages": 21,
+      "raw_imported": 0,
+      "qa_pairs_derived": 9,
+      "user_curated_imported": 0,
+      "duplicates_skipped": 0,
+      "unsupported_skipped": 16,
+      "oldest": "2026-06-01T00:01:00Z",
+      "newest": "2026-10-02T17:31:41.991Z",
+      "recall_ready": true
+    },
+    "errors": [],
+    "_rc": 0
+  },
+  "live_report": {
+    "command": "import.auto",
+    "version": 1,
+    "dry_run": false,
+    "status": "ok",
+    "generated_at": "2026-10-02T18:37:35Z",
+    "started_at": "2026-10-02T18:37:35Z",
+    "finished_at": "2026-10-02T18:37:35Z",
+    "duration_s": 0.484,
+    "hosts": [
+      "hermes",
+      "dsh",
+      "pi",
+      "memory-md"
+    ],
+    "sources": [
+      {
+        "host": "hermes",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\AppData\\Local\\hermes",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "sqlite",
+        "version": null,
+        "artifacts": 1,
+        "sessions": 2,
+        "messages": 9,
+        "raw_imported": 9,
+        "qa_pairs_derived": 3,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 0,
+        "unsupported_skipped": 9,
+        "skipped": {
+          "skipped_system_text": 2,
+          "skipped_roles": 1,
+          "skipped_empty": 1,
+          "skipped_display_kind": 5
+        },
+        "oldest": "2026-06-01T00:01:00Z",
+        "newest": "2026-06-01T00:23:00Z",
+        "recall_ready": true,
+        "errors": []
+      },
+      {
+        "host": "dsh",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\.dsh",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "jsonl.zstd",
+        "version": "v4",
+        "artifacts": 2,
+        "sessions": 2,
+        "messages": 6,
+        "raw_imported": 6,
+        "qa_pairs_derived": 3,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 0,
+        "unsupported_skipped": 5,
+        "skipped": {
+          "skipped_injected": 5
+        },
+        "oldest": "2026-10-02T14:19:38Z",
+        "newest": "2026-10-02T14:19:58Z",
+        "recall_ready": true,
+        "errors": []
+      },
+      {
+        "host": "pi",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\.pi\\agent\\sessions",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "jsonl",
+        "version": "v3",
+        "artifacts": 1,
+        "sessions": 1,
+        "messages": 6,
+        "raw_imported": 6,
+        "qa_pairs_derived": 3,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 0,
+        "unsupported_skipped": 2,
+        "skipped": {
+          "skipped_injected": 1,
+          "skipped_entries": 1
+        },
+        "oldest": "2026-10-02T17:31:41.985Z",
+        "newest": "2026-10-02T17:31:41.991Z",
+        "recall_ready": true,
+        "errors": []
+      },
+      {
+        "host": "memory-md",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\project",
+        "resolved_from": "cwd",
+        "found": true,
+        "reason": null,
+        "format": "markdown",
+        "version": null,
+        "artifacts": 1,
+        "sessions": 0,
+        "messages": 0,
+        "raw_imported": 0,
+        "qa_pairs_derived": 0,
+        "user_curated_imported": 2,
+        "duplicates_skipped": 0,
+        "unsupported_skipped": 0,
+        "skipped": {},
+        "oldest": null,
+        "newest": null,
+        "recall_ready": false,
+        "errors": []
+      }
+    ],
+    "totals": {
+      "artifacts": 5,
+      "sessions": 5,
+      "messages": 21,
+      "raw_imported": 21,
+      "qa_pairs_derived": 9,
+      "user_curated_imported": 2,
+      "duplicates_skipped": 0,
+      "unsupported_skipped": 16,
+      "oldest": "2026-06-01T00:01:00Z",
+      "newest": "2026-10-02T17:31:41.991Z",
+      "recall_ready": true
+    },
+    "errors": [],
+    "_rc": 0
+  },
+  "memory_md_live": {
+    "user_curated_imported": 2,
+    "errors": []
+  },
+  "rerun_report": {
+    "command": "import.auto",
+    "version": 1,
+    "dry_run": false,
+    "status": "ok",
+    "generated_at": "2026-10-02T18:37:42Z",
+    "started_at": "2026-10-02T18:37:42Z",
+    "finished_at": "2026-10-02T18:37:43Z",
+    "duration_s": 0.781,
+    "hosts": [
+      "hermes",
+      "dsh",
+      "pi",
+      "memory-md"
+    ],
+    "sources": [
+      {
+        "host": "hermes",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\AppData\\Local\\hermes",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "sqlite",
+        "version": null,
+        "artifacts": 1,
+        "sessions": 2,
+        "messages": 9,
+        "raw_imported": 0,
+        "qa_pairs_derived": 0,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 12,
+        "unsupported_skipped": 9,
+        "skipped": {
+          "skipped_system_text": 2,
+          "skipped_roles": 1,
+          "skipped_empty": 1,
+          "skipped_display_kind": 5
+        },
+        "oldest": "2026-06-01T00:01:00Z",
+        "newest": "2026-06-01T00:23:00Z",
+        "recall_ready": false,
+        "errors": []
+      },
+      {
+        "host": "dsh",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\.dsh",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "jsonl.zstd",
+        "version": "v4",
+        "artifacts": 2,
+        "sessions": 2,
+        "messages": 6,
+        "raw_imported": 0,
+        "qa_pairs_derived": 0,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 9,
+        "unsupported_skipped": 5,
+        "skipped": {
+          "skipped_injected": 5
+        },
+        "oldest": "2026-10-02T14:19:38Z",
+        "newest": "2026-10-02T14:19:58Z",
+        "recall_ready": false,
+        "errors": []
+      },
+      {
+        "host": "pi",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\home\\.pi\\agent\\sessions",
+        "resolved_from": "default",
+        "found": true,
+        "reason": null,
+        "format": "jsonl",
+        "version": "v3",
+        "artifacts": 1,
+        "sessions": 1,
+        "messages": 6,
+        "raw_imported": 0,
+        "qa_pairs_derived": 0,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 9,
+        "unsupported_skipped": 2,
+        "skipped": {
+          "skipped_injected": 1,
+          "skipped_entries": 1
+        },
+        "oldest": "2026-10-02T17:31:41.985Z",
+        "newest": "2026-10-02T17:31:41.991Z",
+        "recall_ready": false,
+        "errors": []
+      },
+      {
+        "host": "memory-md",
+        "root": "C:\\hp-testbed\\i01-integration-20261003\\runs\\i01-run-3\\project",
+        "resolved_from": "cwd",
+        "found": true,
+        "reason": null,
+        "format": "markdown",
+        "version": null,
+        "artifacts": 1,
+        "sessions": 0,
+        "messages": 0,
+        "raw_imported": 0,
+        "qa_pairs_derived": 0,
+        "user_curated_imported": 0,
+        "duplicates_skipped": 2,
+        "unsupported_skipped": 0,
+        "skipped": {},
+        "oldest": null,
+        "newest": null,
+        "recall_ready": false,
+        "errors": []
+      }
+    ],
+    "totals": {
+      "artifacts": 5,
+      "sessions": 5,
+      "messages": 21,
+      "raw_imported": 0,
+      "qa_pairs_derived": 0,
+      "user_curated_imported": 0,
+      "duplicates_skipped": 32,
+      "unsupported_skipped": 16,
+      "oldest": "2026-06-01T00:01:00Z",
+      "newest": "2026-10-02T17:31:41.991Z",
+      "recall_ready": false
+    },
+    "errors": [],
+    "_rc": 0
+  },
+  "bridge": {
+    "port": 62638,
+    "health": {
+      "ok": true,
+      "pg": true,
+      "embed": false
+    }
+  },
+  "recall": {
+    "hermes": {
+      "status": 200,
+      "chars": 981,
+      "hit": true
+    },
+    "dsh": {
+      "status": 200,
+      "chars": 654,
+      "hit": true
+    },
+    "pi": {
+      "status": 200,
+      "chars": 981,
+      "hit": true
+    }
+  },
+  "source_trace": {
+    "source_id": "qa_import/pi/01a0fdab-fc1d-74a7-80f2-31beea48a420/9921d832",
+    "host": "pi",
+    "session_id": "01a0fdab-fc1d-74a7-80f2-31beea48a420",
+    "q_event_id": "9921d832",
+    "question_matches_stream": true
+  },
+  "source_unchanged": {
+    "files": 6,
+    "changed": [],
+    "added": []
+  },
+  "reasons": [],
+  "verdict": "PASS",
+  "check_count": 42
+}

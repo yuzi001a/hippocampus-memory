@@ -160,10 +160,10 @@ def _reset_installed_pool(importer_module):
 # ── framework surface ─────────────────────────────────────────────────
 
 
-def test_four_importers_registered_with_known_capabilities(importer_module):
+def test_importers_registered_with_known_capabilities(importer_module):
     listing = importer_module.list_importers()
     names = [e["name"] for e in listing]
-    assert set(names) == {"hermes", "memory-md", "openclaw", "hindsight"}
+    assert set(names) == {"hermes", "memory-md", "openclaw", "hindsight", "dsh", "pi"}
 
     by_name = {e["name"]: e for e in listing}
     # Honest capability flags.
@@ -171,6 +171,9 @@ def test_four_importers_registered_with_known_capabilities(importer_module):
     assert by_name["memory-md"]["capability"] == "production"
     assert by_name["openclaw"]["capability"] == "framework_ready"
     assert by_name["hindsight"]["capability"] == "framework_ready"
+    # I01: first-class host importers.
+    assert by_name["dsh"]["capability"] == "production"
+    assert by_name["pi"]["capability"] == "production"
     # Each framework_ready entry carries a reason from its NotImplementedError.
     assert "reason" in by_name["openclaw"]
     assert "framework_ready" in by_name["openclaw"]["reason"].lower() or \
@@ -541,7 +544,7 @@ def test_limit_caps_parsed_items(importer_module, fake_pool):
 
 def test_list_importers_includes_descriptions(importer_module):
     listing = importer_module.list_importers()
-    assert len(listing) == 4
+    assert len(listing) == 6
     for entry in listing:
         assert entry["name"]
         assert entry["class"]
