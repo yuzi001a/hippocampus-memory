@@ -581,13 +581,16 @@ class TestBootstrapScript:
         assert "explicit_memories" in ddl
         assert "BEGIN INCLUDED schema/explicit_memories.sql" in ddl
         assert "END INCLUDED schema/explicit_memories.sql" in ddl
-        # M01 adds memory_relations immediately after its explicit-memory parent.
-        assert len(includes) == 5
+        # M01 adds memory_relations immediately after its explicit-memory parent;
+        # M03 adds derived_memory_invalidations immediately after memory_relations
+        # (it references both sidecars), before the qa chunks include.
+        assert len(includes) == 6
         assert any(p.endswith("observation_embedding_chunks.sql") for p in includes)
         assert any(p.endswith("embedding_failures.sql") for p in includes)
         assert includes[0].endswith("explicit_memories.sql")
         assert includes[1].endswith("memory_relations.sql")
-        assert includes[2].endswith("qa_embedding_chunks.sql")
+        assert includes[2].endswith("derived_memory_invalidations.sql")
+        assert includes[3].endswith("qa_embedding_chunks.sql")
 
     def test_load_alpha_ddl_is_idempotent(self, bootstrap_mod):
         """Every CREATE uses IF NOT EXISTS; running load twice must not

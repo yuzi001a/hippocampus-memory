@@ -77,6 +77,29 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/memory_relations.sql <<<
 
 -- -----------------------------------------------------------------------------
+-- derived_memory_invalidations — M03 derived-memory invalidation sidecar.
+--
+-- Body is NOT inlined: schema/derived_memory_invalidations.sql is the canonical
+-- artifact and is spliced here through the same ALPHA_BOOTSTRAP_INCLUDE
+-- mechanism as explicit_memories / memory_relations, so the repo DDL stays
+-- single-sourced and the packaged copy ships inside the installed wheel.
+--
+-- Placement: immediately AFTER memory_relations (and therefore after
+-- explicit_memories), because the sidecar references
+-- public.explicit_memories(memory_id) and records the
+-- public.memory_relations(relation_id) edge. Do not move this marker above
+-- either of them — the fresh-install dependency-order test enforces the order.
+--
+-- The table is REQUIRED, not optional. An expansion that cannot splice it
+-- fails loudly (FileNotFoundError) rather than producing an install that
+-- silently lacks the invalidation schema. Additive and idempotent by
+-- construction (CREATE TABLE / CREATE INDEX IF NOT EXISTS only): historic
+-- derived artifacts pre-date the sidecar and are left untouched — no backfill,
+-- no data rewrite.
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/derived_memory_invalidations.sql <<<
+
+-- -----------------------------------------------------------------------------
 -- qa_pairs — QA raw trace; source-of-truth for observer rows + keyword/vector
 -- recall. Evidence: __init__.py ~L3750 inserts (source_id, session_id, turn_id,
 -- question, answer, tool_calls, tool_results, timestamp, source, embedding,
