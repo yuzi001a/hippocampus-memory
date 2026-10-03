@@ -1079,18 +1079,44 @@ def test_M03_list_invalidations_exposes_the_debug_fields_and_content():
     assert len(_rows(db, derived_kind="topic")) == 1
 
 
-def test_M03_invalidated_ids_excludes_rebuilt_rows():
+def test_M03_invalidated_ids_includes_rows_of_every_state():
+    """A sidecar row suppresses its derived_id for EVERY state.
+
+    ``state`` records only the rebuild lifecycle (``stale`` / ``pending_rebuild``
+    / ``rebuilt`` / ``unresolved``) and is never an admissibility gate — a
+    ``rebuilt`` row must NOT lift suppression of the old derived id.
+    """
     db, seed = _ab_db()
     seed.topic_entry("t_d1", 42)
     _propagate(db)
     iid = next(iter(db.invalidations))
-    assert _mod().invalidated_ids(db, "topic") == {"t_d1"}
+    for state in ("stale", "pending_rebuild", "rebuilt", "unresolved"):
+        db.invalidations[iid]["state"] = state
+        assert _mod().invalidated_ids(db, "topic") == {"t_d1"}, (
+            f"state={state!r} must not lift suppression of the stale derived id"
+        )
 
-    db.invalidations[iid]["state"] = "rebuilt"
-    assert _mod().invalidated_ids(db, "topic") == set(), (
-        "a rebuilt artifact is replaced by its new version and must not "
-        "keep suppressing the old id"
+
+def test_M03_rebuilt_derived_keeps_old_id_suppressed_and_spares_replacement():
+    """§31 regression: ``old D1 stale`` / ``new D2 active`` /
+    ``replacement_derived_id = D2`` → current recall keeps ``D2 allowed`` and
+    ``D1 suppressed``, even after D1's row advances to ``state='rebuilt'``.
+    """
+    db, seed = _ab_db()
+    seed.topic_entry("t_d1", 42)
+    _propagate(db)
+
+    # The rebuild stage recorded D2 as D1's replacement and moved the row on.
+    d1_iid = _mod().invalidation_id("cor_ab", "topic", "t_d1")
+    db.invalidations[d1_iid]["state"] = "rebuilt"
+    db.invalidations[d1_iid]["replacement_derived_id"] = "t_d2"
+
+    ids = _mod().invalidated_ids(db, "topic")
+    assert "t_d1" in ids, (
+        "D1 must stay suppressed for the rest of time — 'rebuilt' is lifecycle, "
+        "not admissibility"
     )
+    assert "t_d2" not in ids, "D2 is the new artifact and must remain admissible"
 
 
 def test_M03_dry_run_writes_nothing_but_reports_the_work():

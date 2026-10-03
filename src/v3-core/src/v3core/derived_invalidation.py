@@ -87,6 +87,12 @@ that now terminates with nothing current — leaves them ``stale`` with
 layer only INVALIDATES: it never runs a rebuild, so ``rebuilt`` is always 0 here
 and a row reaches ``rebuilt`` only when the rebuild stage runs.
 
+``state`` tracks the rebuild lifecycle ONLY — it never encodes admissibility.
+Every sidecar row keeps its ``derived_id`` PERMANENTLY suppressed, so a row that
+reaches ``rebuilt`` still never re-activates the old artifact: task book §31
+freezes ``D2 allowed / D1 suppressed``, with ``replacement_derived_id`` pointing
+at the admissible new artifact ``D2`` while the stale ``D1`` stays suppressed.
+
 Receipt ``success`` is True for a completed propagation AND for a truthful
 "nothing to do" outcome (``NO_LINEAGE``: no source, or no structurally linked
 derived artifact). It is False only when the request is refused
@@ -1037,13 +1043,32 @@ def _content_for(cur: Any, kind: str, ids: Optional[set], sql: str,
 
 
 def invalidated_ids(pg: Any, derived_kind: str) -> set:
-    """The derived ids currently suppressed for ``derived_kind``.
+    """The derived ids PERMANENTLY suppressed for ``derived_kind``.
 
-    Only rows whose state is NOT ``rebuilt`` are returned: a rebuilt artifact
-    has been replaced by a new version, so the OLD id must stop being
-    suppressed. The returned set is empty on any read failure — a caller that
-    must fail closed on a missing sidecar table should treat an empty result as
-    "unknown", not as "nothing invalidated".
+    EVERY row of ``public.derived_memory_invalidations`` marks one derived
+    artifact that a committed correction has made permanently stale, so this
+    returns the ``derived_id`` of ALL rows of that kind: the ``state`` column is
+    deliberately NOT a filter. ``state`` only tracks the rebuild lifecycle
+    (``stale`` / ``pending_rebuild`` / ``rebuilt`` / ``unresolved``) and NEVER
+    encodes admissibility. A row reaching ``rebuilt`` records that a replacement
+    artifact was produced (``replacement_derived_id``) — it does NOT mean the
+    old id may re-enter injection. Rebuild success must never re-activate stale
+    content.
+
+    Authority (task book §31):
+
+        old D1 stale
+        new D2 active
+        replacement_derived_id = D2
+
+        current recall:
+        D2 allowed
+        D1 suppressed
+
+    ``D1`` stays suppressed for every state, forever; ``D2`` is a different id
+    and is never in this set. The returned set is empty on any read failure — a
+    caller that must fail closed on a missing sidecar table should treat an
+    empty result as "unknown", not as "nothing invalidated".
     """
     if derived_kind not in DERIVED_KINDS:
         return set()
@@ -1052,8 +1077,8 @@ def invalidated_ids(pg: Any, derived_kind: str) -> set:
             cur = conn.cursor()
             cur.execute(
                 f"SELECT derived_id FROM {_INVALIDATION_TABLE} "
-                f"WHERE derived_kind = %s AND state <> %s",
-                (derived_kind, STATE_REBUILT),
+                f"WHERE derived_kind = %s",
+                (derived_kind,),
             )
             rows = cur.fetchall()
     except Exception as exc:

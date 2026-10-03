@@ -81,7 +81,17 @@ V3_STORE_SCHEMA = {
 # explicit-memory boundary: 可透传给 core.store_card 的"来源溯源"kwargs。
 # 工具层绝不伪造这些字段 — caller 没传就不传, 让 core 走确定性的请求身份兜底.
 _PROVENANCE_KEYS = ("source_id", "source", "source_j_ids", "when", "where",
-                    "who", "why", "confidence", "observation_count")
+                    "who", "why", "confidence", "observation_count",
+                    # M03 frozen source-reference keys. Validated (never
+                    # fabricated) by ``ActiveMemoryWriter`` through the ONE
+                    # canonical resolver; a present-but-unresolvable reference
+                    # is refused, never downgraded to "no source".
+                    "source_conversation_stream_id", "source_qa_id")
+
+#: M03 source-reference keys that must reach the writer inside the
+#: ``provenance`` dict (``store_card`` merges it) rather than as loose kwargs,
+#: so they land in ``explicit_memories.provenance`` after validation.
+_SOURCE_REF_KEYS = ("source_conversation_stream_id", "source_qa_id")
 
 
 def _extract_provenance(args: dict) -> dict:
@@ -191,6 +201,14 @@ def handle_v3_store(args: dict, **kw) -> str:
         # ActiveMemoryWriter 内部 canonical id 派生使用 raw content.
         tags = args.get("tags") or []
         provenance = _extract_provenance(args)
+        # M03: the two frozen source-reference keys travel INSIDE the
+        # ``provenance`` dict so ``core.store_card`` merges them into the row's
+        # provenance jsonb; the writer then validates them through the one
+        # canonical resolver. Everything else keeps its flat-kwarg wire shape.
+        source_ref = {
+            key: provenance.pop(key) for key in _SOURCE_REF_KEYS
+            if key in provenance
+        }
 
         if not cat.strip() or not title.strip() or not content.strip():
             return json.dumps({
@@ -207,7 +225,11 @@ def handle_v3_store(args: dict, **kw) -> str:
             effective_config=kw.get("effective_config"),
             pg_pool=kw.get("pool") if kw.get("pool") is not None else kw.get("pg_pool"),
         )
-        result = core.store_card(cat, title, content, tags=tags, **provenance)
+        result = core.store_card(
+            cat, title, content, tags=tags,
+            **({"provenance": source_ref} if source_ref else {}),
+            **provenance,
+        )
 
         # 手帐机制 A: 提醒式登记（不硬拒绝）— 但仅在 legacy 写入路径生效.
         remind = ""

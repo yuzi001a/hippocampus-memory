@@ -62,6 +62,42 @@ def _read_max_chars(core) -> int:
         return DEFAULT_MAX_CHARS
 
 
+def _m03_filter_first_round_topics(core, pool, topics):
+    """M03: drop invalidated topics from the first-round recall dict.
+
+    Returns ``(kept_topics, degraded)``. This is an INJECTION-layer filter only:
+    the recall dict and every non-invalidated topic are unchanged. A sidecar read
+    failure fails OPEN (all candidates are kept) and reports ``degraded=True`` so
+    the caller can surface it — "cannot determine" is never treated as "nothing
+    invalidated".
+    """
+    from .derived_suppression import (
+        DERIVED_KIND_TOPIC,
+        DerivedSuppression,
+        log_degraded,
+        read_suppression,
+        suppress_topic_candidates,
+    )
+
+    if not topics:
+        return topics, False
+    store = pool
+    if store is None:
+        try:
+            store = getattr(core, "pg", None)
+        except Exception:
+            store = None
+    if store is None:
+        # No store handle at all: the lane cannot cross-check the sidecar. Report
+        # it as degraded rather than pretending nothing is stale.
+        suppression = DerivedSuppression(
+            DERIVED_KIND_TOPIC, frozenset(), True, "no pg store handle available")
+    else:
+        suppression = read_suppression(store, DERIVED_KIND_TOPIC)
+    log_degraded(suppression, "injector topic first round")
+    return suppress_topic_candidates(topics, suppression), bool(suppression.degraded)
+
+
 class MemoryInjector:
     """统一注入器
 
@@ -110,6 +146,9 @@ class MemoryInjector:
         self._last_situation_injected: str = ""  # 去重（手帐机制 C）
         # 首轮召回 session 幂等：已成功组装首轮的 session 集合
         self._first_round_done: set[str] = set()
+        # M03: last first-round recall saw a degraded (unreadable) invalidation
+        # sidecar — surfaced for observability, never used to change behaviour.
+        self.last_suppression_degraded: bool = False
 
     def _get_session_context(self, session_id: str, *, create: bool = True):
         """Return a real Core-owned Context, or None for legacy fake cores."""
@@ -441,6 +480,9 @@ class MemoryInjector:
         pg_pool = getattr(self._core, "pg_pool", None)
         if pg_pool is None:
             pg_pool = getattr(self._core, "_pg_pool", None)
+        # M03: keep the unwrapped pool for the invalidation-sidecar read — the
+        # DeadlinePoolView wrapper below is only for the recall call itself.
+        _m03_raw_pool = pg_pool
         deadline = coerce_deadline(deadline)
         if deadline is not None:
             deadline.check(context="new-session recall")
@@ -521,6 +563,14 @@ class MemoryInjector:
 
         topics = recall.get("topics") or []
         if isinstance(topics, list) and topics:
+            # ── M03: drop invalidated topics before they become units ──
+            # Injection-layer only; the recall dict and every non-invalidated
+            # topic are unchanged. A sidecar read failure fails OPEN but visible.
+            topics, _m03_degraded = _m03_filter_first_round_topics(
+                self._core, _m03_raw_pool, topics)
+            self.last_suppression_degraded = bool(
+                _m03_degraded or recall.get("suppression_degraded")
+            )
             for t in topics:
                 if not isinstance(t, dict):
                     continue

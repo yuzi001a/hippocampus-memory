@@ -1113,9 +1113,12 @@ class PgEmbedStore:
             emb_str = "[" + ",".join(str(x) for x in query_emb) + "]"
             with conn.cursor() as cur:
                 if pool_role == "yin_segment":
+                    # M03: expose the paragraph ``id`` so the injection layer can
+                    # suppress an invalidated paragraph (additive column only —
+                    # the row set, order and cosine are unchanged).
                     sql = (
                         "SELECT yin_version, section, content, "
-                        "1 - (embedding <=> %s::vector) AS cosine "
+                        "1 - (embedding <=> %s::vector) AS cosine, id "
                         "FROM yin_paragraphs WHERE embedding IS NOT NULL "
                     )
                     params = [emb_str, emb_str]
@@ -1144,5 +1147,17 @@ class PgEmbedStore:
                     )
                     params = [emb_str, emb_str, limit]
                 cur.execute(sql, params)
-                return [{"source_id": r[0], "title": r[1], "content": r[2], "cosine": float(r[3])}
-                        for r in cur.fetchall()]
+                out = []
+                for r in cur.fetchall():
+                    item = {
+                        "source_id": r[0],
+                        "title": r[1],
+                        "content": r[2],
+                        "cosine": float(r[3]),
+                    }
+                    # M03: the yin branch selects ``id`` as an extra trailing
+                    # column; other branches have no id and simply omit it.
+                    if len(r) > 4:
+                        item["id"] = r[4]
+                    out.append(item)
+                return out

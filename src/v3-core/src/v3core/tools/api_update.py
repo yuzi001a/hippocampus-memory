@@ -38,13 +38,19 @@ V3_UPDATE_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "organize", "dedup", "sync", "delete", "topic_maintain",
-                    "affinity", "correct",
+                    "affinity", "correct", "propagate", "rebuild",
                 ],
                 "description": (
                     "整理动作: organize=读写MEMORY/USER/SOUL, dedup=去重, "
                     "sync=同步手帐, delete=按source_id删除/归档, "
                     "topic_maintain=主题维护, affinity=共鸣度, "
-                    "correct=用显式更正内容替换一条已有记忆(新版本+归档旧版+关系边)"
+                    "correct=用显式更正内容替换一条已有记忆(新版本+归档旧版+关系边), "
+                    "propagate=按 correction_id 重跑派生层失效传播(幂等; "
+                    "修正提交后传播失败/需重放时使用), "
+                    "rebuild=按 correction_id/invalidation_id 局部重建失效的 topic "
+                    "(产出新件 T2 + 回写 replacement_derived_id; 仅 topic 支持, "
+                    "observer_note/yin_paragraph 如实返回 REBUILD_NOT_SUPPORTED; "
+                    "provider 不可用时如实 pending 且绝不编造内容)"
                 ),
             },
             "organize_action": {
@@ -113,11 +119,63 @@ V3_UPDATE_SCHEMA = {
                     "禁止编造 host/event/QA 引用"
                 ),
             },
+            "source_conversation_stream_id": {
+                "type": "string",
+                "description": (
+                    "correct only: 替代版本的来源会话消息 conversation_stream.id (可选)。"
+                    "必须是真实存在且 role=user 的消息; 解析不到 / 多解 / 与 "
+                    "source_qa_id 不一致 → 按冻结错误码拒绝写入, 绝不降级成'无来源'"
+                ),
+            },
+            "source_qa_id": {
+                "type": "string",
+                "description": (
+                    "correct only: 替代版本的来源 qa_pairs.id (可选)。"
+                    "必须是真实存在的行; 两个来源键解析出的规范身份必须一致, "
+                    "否则拒绝写入 (SOURCE_IDENTITY_CONFLICT)"
+                ),
+            },
             "effective_at": {
                 "type": "string",
                 "description": (
                     "correct only: 声明的生效时刻, 带时区的 ISO-8601 (可选)。"
                     "仅作审计 valid-from 记录 — 不会预约未来激活, 也不做 as-of 时间推理"
+                ),
+            },
+            "correction_id": {
+                "type": "string",
+                "description": (
+                    "propagate only: 要重跑派生层失效传播的 M02 correction_id "
+                    "(必填, 非空)。传播是幂等的 — 第二次运行不新增任何行; "
+                    "缺派生侧车表时如实返回 MIGRATION_REQUIRED, 绝不静默回退"
+                ),
+            },
+            "propagate_dry_run": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "propagate only: 预览开关 (默认 False = 真正重跑)。"
+                    "与 topic_maintain 的 dry_run 分开, 避免 topic_maintain 的 "
+                    "默认 True 把重跑静默变成预览"
+                ),
+            },
+            "invalidation_id": {
+                "type": "string",
+                "description": (
+                    "rebuild only: 要重建的 M03 侧车失效行 invalidation_id "
+                    "(可选; 与 correction_id 至少提供其一)。"
+                    "定位到 observer_note / yin_paragraph 时如实返回 "
+                    "REBUILD_NOT_SUPPORTED, 不会为它们重写架构"
+                ),
+            },
+            "rebuild_dry_run": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "rebuild only: 预览开关 (默认 False = 真正重建并写入新件)。"
+                    "与 topic_maintain 的 dry_run / propagate 的 propagate_dry_run "
+                    "分开, 避免默认 True 把重建静默变成预览。dry_run=True 时只读, "
+                    "不写任何行"
                 ),
             },
         },
@@ -170,6 +228,19 @@ def handle_v3_update(args: dict, **kw) -> str:
         elif action == "correct":
             from .memory_correction import handle_correct_action
             return handle_correct_action(args, **kw)
+        elif action == "propagate":
+            from .derived_propagation_tool import handle_v3_propagate
+            return handle_v3_propagate({
+                "correction_id": args.get("correction_id", ""),
+                "dry_run": args.get("propagate_dry_run", False),
+            }, **kw)
+        elif action == "rebuild":
+            from .derived_rebuild_tool import handle_v3_rebuild
+            return handle_v3_rebuild({
+                "correction_id": args.get("correction_id", ""),
+                "invalidation_id": args.get("invalidation_id", ""),
+                "dry_run": args.get("rebuild_dry_run", False),
+            }, **kw)
         else:
             return json.dumps({"success": False, "error": f"unknown action: {action}"}, ensure_ascii=False)
     except Exception as e:
