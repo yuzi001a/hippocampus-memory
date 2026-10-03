@@ -18,7 +18,7 @@ The project has completed its first major host-adapter phase:
 - source-trace closure for recalled QA references;
 - one-click import of existing history (Hermes / DSH / pi / memory-md).
 
-The one-click history import milestone has landed — see [`docs/IMPORT.md`](IMPORT.md) and `evidence/i01-history-import-20261003/` (isolated integration, 42/42 checks PASS). The main line now returns to memory inspection, correction, changed facts and temporal reasoning.
+One-click history import has landed, and **M01/M02 explicit-memory correction is now complete**. A user can replace or withdraw an explicit memory without deleting its historical source; current reads follow the corrected version while prior versions remain inspectable. Final isolated acceptance: **182 checks / 181 PASS / 0 FAIL / 1 NOT_EVALUATED / exit 0**, with exact-head CI green. Evidence: `evidence/m01-m02-memory-correction-20261003/`.
 
 ## Supported host surface
 
@@ -108,15 +108,11 @@ The host-adapter milestone is complete enough to stop making integrations the de
 
 **One-click history import has landed**: `hippocampus import auto` automatically discovers supported local agent history, previews it safely (`--dry-run`), imports it idempotently, and makes imported history usable by recall — see [`docs/IMPORT.md`](IMPORT.md) and `evidence/i01-history-import-20261003/`.
 
-The next product work focuses on:
+**M01/M02 are DONE.** Explicit user corrections outrank model inference; replace/withdraw operations preserve history, are idempotent, reject conflicting successors, and current explicit-memory reads follow the corrected state.
 
-- **memory inspection** — users should be able to see what the system believes it remembers;
-- **memory correction** — a later correction should not leave an obsolete fact silently dominant;
-- **temporal state** — distinguish “was true then” from “is true now”;
-- **management UX** — make memory status, provenance and updates understandable without reading database rows;
-- **real usage feedback** — let product use decide which deeper recall/reasoning work matters next.
+The current main-line task is **M03: propagate correction into affected derived memory**. The goal is narrow: a known-obsolete A should no longer be injected as the current conclusion from Topic / Observer / E1-derived content after the user has explicitly changed it to B. Provider failure must not undo the correction itself; affected derived content can be marked stale/pending rebuild.
 
-The correction path is deliberately narrow: explicit user corrections outrank model inference; newer text is not automatically “more true”; M01/M02 do not attempt full derived-memory propagation or generic knowledge-graph reasoning. Those belong to M03/M04.
+After M03, **M04** handles current-vs-historical query intent — e.g. “what do we use now?” versus “why did we use A then?”.
 
 ## Research signal
 
