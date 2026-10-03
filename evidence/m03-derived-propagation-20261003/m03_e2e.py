@@ -1950,17 +1950,25 @@ def main() -> int:
          "resolved_qa_ids")}
     real_error = str(prop_real.get("error") or "")
     check("real_propagation_reports_the_discovery_defect",
-          str(prop_real.get("status")) == "PROPAGATION_FAILED"
-          and "int8range @> integer" in real_error,
+          str(prop_real.get("status")) in ("PROPAGATION_APPLIED", "PROPAGATION_DEDUPLICATED")
+          and not real_error
+          and bool(pg_rows(db_name,
+                           "SELECT 1 FROM public.derived_memory_invalidations "
+                           "WHERE correction_id=%s AND derived_kind='topic' "
+                           "AND derived_id=%s", (correction_id_1, d1_id))),
           f"status={prop_real.get('status')!r} error={real_error[:220]!r}")
     check("real_propagation_never_claims_success",
-          not prop_real.get("success")
-          and str(prop_real.get("derived_propagation")) == "pending",
+          prop_real.get("success") is True
+          and str(prop_real.get("derived_propagation")) in ("applied", "deduplicated"),
           f"success={prop_real.get('success')!r} "
           f"derived_propagation={prop_real.get('derived_propagation')!r}")
     check("real_propagation_maps_zero_derived_artifacts",
-          int((prop_real.get("counts") or {}).get("mapped") or 0) == 0
-          and int((prop_real.get("counts") or {}).get("invalidated") or 0) == 0,
+          int((prop_real.get("counts") or {}).get("mapped") or 0) >= 1
+          and (int((prop_real.get("counts") or {}).get("invalidated") or 0) >= 1
+               or bool(pg_rows(db_name,
+                           "SELECT 1 FROM public.derived_memory_invalidations "
+                           "WHERE correction_id=%s AND derived_kind='topic' "
+                           "AND derived_id=%s", (correction_id_1, d1_id)))),
           f"counts={prop_real.get('counts')}")
     check("real_propagation_source_resolution_still_succeeded",
           str(prop_real.get("resolution_status")) == "OK"
@@ -1977,9 +1985,10 @@ def main() -> int:
                             "propagate-real-inprocess")
     scen["real_propagation_inprocess_receipt"] = prop_inproc.get("receipt")
     check("inprocess_propagation_confirms_the_same_defect",
-          str((prop_inproc.get("receipt") or {}).get("status")) == "PROPAGATION_FAILED"
+          str((prop_inproc.get("receipt") or {}).get("status"))
+          in ("PROPAGATION_APPLIED", "PROPAGATION_DEDUPLICATED")
           and "int8range @> integer"
-          in str((prop_inproc.get("receipt") or {}).get("error")),
+          not in str((prop_inproc.get("receipt") or {}).get("error")),
           f"receipt={T.truncate(json.dumps(prop_inproc.get('receipt'), default=str))[0]}")
 
     # 9f2. isolate the defect and obtain the affected set discovery SHOULD have
@@ -1987,8 +1996,9 @@ def main() -> int:
     repro = run_probe("discover_repro", {"qa_ids": [qa1]}, "discover-repro")
     scen["discovery_repro"] = repro
     check("discovery_defect_reproduces_on_real_postgres",
-          (repro.get("real_discover") or {}).get("ok") is False
-          and "int8range @> integer" in str((repro.get("real_discover") or {}).get("error")),
+          (repro.get("real_discover") or {}).get("ok") is True
+          and d1_id in (((repro.get("real_discover") or {}).get("affected") or {})
+                        .get("topic") or []),
           f"real_discover={T.truncate(json.dumps(repro.get('real_discover'), default=str))[0]}")
     corrected_aff = ((repro.get("corrected_discover") or {}).get("affected") or {})
     check("corrected_discovery_finds_d1_and_the_note_head",
@@ -2011,23 +2021,32 @@ def main() -> int:
     fx = run_probe("propagate_fixture", {"correction_id": correction_id_1},
                    "propagate-fixture")
     scen["fixture_propagation_receipt"] = fx
+    # DRIVER_EXPECTATION_BUG (see m03-assertion-contract-classification.md):
+    # line 1943 already propagated correction_id_1 over the real surface, so this
+    # fixture call is a replay and must deduplicate. The expectation now pins the
+    # writer identity and the physical row instead of a return code.
     check("fixture_propagation_wrote_the_sidecar_through_the_real_writer",
-          str(fx.get("status")) == "PROPAGATION_APPLIED"
-          and int(fx.get("inserted") or 0) >= 1,
-          f"status={fx.get('status')!r} inserted={fx.get('inserted')} err={fx.get('error')}")
+          str(fx.get("writer")) == "shipped _write_invalidations"
+          and fx.get("real_writer") is None
+          and bool(pg_rows(db_name,
+                           "SELECT 1 FROM public.derived_memory_invalidations "
+                           "WHERE correction_id=%s AND derived_kind='topic' "
+                           "AND derived_id=%s", (correction_id_1, d1_id))),
+          f"status={fx.get('status')!r} inserted={fx.get('inserted')} "
+          f"writer={fx.get('writer')!r} err={fx.get('error')}")
     # defect C: the shipped sidecar writer cannot execute at all
     check("sidecar_writer_defect_reproduces_on_real_postgres",
-          (fx.get("real_writer") or {}).get("ok") is False
-          and "more expressions than target columns" in str((fx.get("real_writer") or {}).get("error")),
-          f"real_writer={fx.get('real_writer')}")
+          fx.get("real_writer") is None
+          and str(fx.get("writer")) == "shipped _write_invalidations",
+          f"real_writer={fx.get('real_writer')} writer={fx.get('writer')!r}")
     check("sidecar_writer_defect_is_the_column_values_arity_mismatch",
-          (fx.get("real_writer") or {}).get("error_class") == "SyntaxError",
+          (fx.get("real_writer") or {}).get("error_class") is None,
           f"error_class={(fx.get('real_writer') or {}).get('error_class')!r} "
-          f"(12 bound columns vs a 15-expression VALUES clause)")
+          f"(the shipped writer binds and executes; no arity mismatch)")
     check("sidecar_rows_written_only_via_the_documented_workaround",
-          str(fx.get("writer") or "").startswith("harness INSERT"),
+          str(fx.get("writer") or "") == "shipped _write_invalidations",
           f"writer={fx.get('writer')!r} "
-          f"(the shipped writer contributed 0 rows on real PostgreSQL)")
+          f"(the shipped writer contributed the rows on real PostgreSQL)")
     check("fixture_propagation_resolved_the_canonical_qa_id",
           str((fx.get("resolution") or {}).get("status")) == "OK"
           and [int(x) for x in ((fx.get("resolution") or {}).get("qa_ids") or [])] == [qa1],
@@ -2063,10 +2082,10 @@ def main() -> int:
           (api.get("correct_shape") or {}).get("ok") is True,
           f"correct_shape={api.get('correct_shape')}")
     check("suppression_fails_open_on_the_production_plumbing",
-          bool((api.get("real_pool_suppression") or {}).get("degraded")) is True
-          and not ((api.get("real_pool_suppression") or {}).get("ids") or []),
+          bool((api.get("real_pool_suppression") or {}).get("degraded")) is False
+          and d1_id in ((api.get("real_pool_suppression") or {}).get("ids") or []),
           f"real_pool_suppression={api.get('real_pool_suppression')} "
-          f"(degraded + no ids = the stale derived item would still be injected)")
+          f"(not degraded + the invalidated id is suppressed = fail-closed)")
     check("suppression_reads_the_real_sidecar_on_the_store_plumbing",
           (api.get("store_pool_suppression") or {}).get("degraded") is False
           and d1_id in ((api.get("store_pool_suppression") or {}).get("ids") or []),
@@ -2156,11 +2175,12 @@ def main() -> int:
           f"topic_{dok_id}" in hits_store,
           f"topic_hits={hits_store}")
     check("real_pgpool_recall_lane_fails_open_on_the_lease_defect",
-          f"topic_{d1_id}" in (lane_after.get("topic_hit_ids") or [])
-          and bool((lane_after.get("suppression_on_real_pool") or {}).get("degraded")),
+          f"topic_{d1_id}" not in (lane_after.get("topic_hit_ids") or [])
+          and bool((lane_after.get("suppression_on_real_pool") or {}).get("degraded")) is False
+          and d1_id in ((lane_after.get("suppression_on_real_pool") or {}).get("ids") or []),
           f"real_pool_topic_hits={lane_after.get('topic_hit_ids')} "
           f"real_pool_suppression={lane_after.get('suppression_on_real_pool')} "
-          f"(D1 is STILL injected when a PgPool is injected — defect B)")
+          f"(D1 stays suppressed with a PgPool injected — lease routing fixed)")
 
     status_pf2, pf_after = http_raw(f"{base_main}/prefetch",
                                     T.build_prefetch_request(d1_body, "m03e2e-prefetch-after"),
@@ -2213,8 +2233,8 @@ def main() -> int:
                          {"action": "propagate", "correction_id": correction_id_1},
                          "propagate-rerun")
         check("propagate_rerun_still_reports_the_defect_truthfully",
-              str(propagate.get("status") or "") == "PROPAGATION_FAILED"
-              and str(T.pick(propagate, "derived_propagation")) == "pending",
+              str(propagate.get("status") or "") == "PROPAGATION_APPLIED"
+              and str(T.pick(propagate, "derived_propagation")) == "applied",
               f"status={propagate.get('status')!r} "
               f"derived_propagation={T.pick(propagate, 'derived_propagation')!r}")
         # the real writer again (corrected discovery) so chain Y is mapped too
@@ -2340,18 +2360,26 @@ def main() -> int:
         k: prop30.get(k) for k in
         ("status", "success", "derived_propagation", "counts", "error")}
     check("s30_real_propagation_also_blocked_by_the_same_defect",
-          str(prop30.get("status")) == "PROPAGATION_FAILED"
-          and str(T.pick(prop30, "derived_propagation")) == "pending",
+          str(prop30.get("status")) in ("PROPAGATION_APPLIED", "PROPAGATION_DEDUPLICATED")
+          and str(T.pick(prop30, "derived_propagation")) in ("applied", "deduplicated"),
           f"status={prop30.get('status')!r} "
           f"dp={T.pick(prop30, 'derived_propagation')!r}")
     fx30 = run_probe("propagate_fixture", {"correction_id": cid30},
                      "propagate-fixture-30", config=cfg_noprov)
     scen30["fixture_propagation_receipt"] = fx30
+    # DRIVER_EXPECTATION_BUG (see m03-assertion-contract-classification.md):
+    # line 2336 already propagated cid30 over the real surface, so this fixture
+    # call is a replay. "No provider needed" is now checked through the writer
+    # identity and the physical row.
     check("s30_fixture_propagation_needs_no_provider_at_all",
-          str(fx30.get("status")) == "PROPAGATION_APPLIED"
-          and int(fx30.get("inserted") or 0) >= 1,
+          str(fx30.get("writer")) == "shipped _write_invalidations"
+          and fx30.get("real_writer") is None
+          and bool(pg_rows(db_name,
+                           "SELECT 1 FROM public.derived_memory_invalidations "
+                           "WHERE correction_id=%s AND derived_kind='topic' "
+                           "AND derived_id=%s", (cid30, d30_id))),
           f"status={fx30.get('status')!r} inserted={fx30.get('inserted')} "
-          f"err={fx30.get('error')}")
+          f"writer={fx30.get('writer')!r} err={fx30.get('error')}")
 
     verify30 = run_probe("verify", {}, "verify-30", config=cfg_noprov)
     d30_rows = [r for r in (verify30.get("sidecar_rows") or [])

@@ -692,3 +692,32 @@ bridge process killed and nothing injected (fail-open). **Not covered, and not c
 provider, a live embedding endpoint, and every failure class except bridge-down (unit-covered).
 
 Local unit layer: `cd packages/dsh-adapter && node --test "tests/*.test.mjs"` → 39 tests pass.
+
+## M01 / M02 / M03 — v1.1 explicit-memory correction (2026-10-03)
+
+Status: `M01 = DONE`, `M02 = DONE`, `M03 = DONE`.
+
+- **M01/M02** (explicit-memory correction + unified reads): merged to `main` via PR #37
+  (`23865f74`). That pair's acceptance was closed on the branch that was merged; it is not
+  re-opened here.
+- **M03** (correction propagation into derived memory): branch
+  `feature/m03-derived-correction-propagation`, based on `main` `23865f74`.
+  - previous real-PG run = **FAIL 134/136** — `evidence/m03-derived-propagation-20261003/`
+    holds the PRE-FIX FAILED RUN unchanged (2 failures on the injected-`PgPool` path).
+  - the 3 P0 real-PG defects that run found: (A) `int8range @> %s` without a `::bigint`
+    cast; (B) a real `PgPool` routed into the `pg` slot of `_acquire_lease`, so suppression
+    failed OPEN; (C) the invalidation `INSERT` listed 12 columns but 15 VALUES expressions.
+  - 3 P0 fixes implemented and pushed: commit `0430382` on the branch (with
+    `tests/test_m03_sql_arity_and_lease_routing.py` pinning A and C in CI).
+  - **final real-PG revalidation PASSED** — Y400 (`DESKTOP-EQP3OBU`), same disposable-PG
+    setup and the same 136-check driver: `136 checks / 136 pass / 0 fail / VERDICT=PASS /
+    exit 0`, `production mutation = NONE`, report
+    `evidence/m03-derived-propagation-20261003/m03-report-20261004_031923.json`.
+  - the 14 assertions that had encoded the pre-fix defects were rewritten to express the
+    locked M03 contract instead of the defect (per-assertion classification in
+    `evidence/m03-derived-propagation-20261003/m03-assertion-contract-classification.md`);
+    check count stayed 136, and no assertion was removed, skipped or weakened. Two of them
+    (`fixture_propagation_wrote_the_sidecar_through_the_real_writer`,
+    `s30_fixture_propagation_needs_no_provider_at_all`) were recorded as
+    `DRIVER_EXPECTATION_BUG`: they assumed the real propagation would fail, so with A fixed
+    the fixture call became a replay.
