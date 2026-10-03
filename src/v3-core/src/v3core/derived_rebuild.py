@@ -659,7 +659,7 @@ def _write_rebuilt(
     the replacement and stamps ``resolved_at``. Suppression of ``T`` is
     unaffected — it is driven by the row's existence, not by ``state``.
     """
-    lease = _canonical._acquire_lease(None, pg)
+    lease = _canonical._acquire_lease(*_canonical._lease_slots(pg))
     conn = lease.connection
     took_txn_ownership = False
     inserted = False

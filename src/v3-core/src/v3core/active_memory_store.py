@@ -117,7 +117,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from ._deadline import PrefetchDeadlineExceeded
-from .pg_pool import DEFAULT_LEASE_TIMEOUT
+from .pg_pool import DEFAULT_LEASE_TIMEOUT, PgPool
 
 logger = logging.getLogger("v3core.active_memory_store")
 
@@ -414,6 +414,27 @@ def _acquire_lease(pool: Any, pg: Any, *, deadline: Any = None):
             return _OwnedConnectionLease(owned)
         return _PgStoreLeaseAdapter(pg.lease(timeout=timeout))
     raise _PoolUnavailable("ActiveMemory requires an injected pool or pg.")
+
+
+def _lease_slots(target: Any) -> tuple:
+    """``(pool, pg)`` for ``_acquire_lease`` from ONE injected target.
+
+    Callers that receive a single injected store/pool (the M03 derived
+    invalidation/rebuild plumbing does) must route it into the slot
+    ``_acquire_lease`` expects. A real ``PgPool`` belongs in the ``pool`` slot
+    (its ``lease()`` yields a ``PgLease``, NOT a DBAPI connection); anything
+    else — ``PgEmbedStore``, a store-shaped fake — belongs in the ``pg`` slot
+    so the ``open_side_connection`` seam / ``_PgStoreLeaseAdapter`` is used.
+
+    Putting a ``PgPool`` in the ``pg`` slot silently takes the adapter path,
+    where ``PgLease.__enter__()`` returns the lease itself, so
+    ``lease.connection`` is a ``PgLease`` and every ``.cursor()`` raises.
+    """
+    if target is None:
+        return None, None
+    if isinstance(target, PgPool):
+        return target, None
+    return None, target
 
 
 def _emb_str(vec: Iterable[float]) -> str:

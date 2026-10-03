@@ -228,8 +228,15 @@ def _lease(pg: Any):
     Reuses ``active_memory_store._acquire_lease`` so the ``open_side_connection``
     fail-closed rule is identical: a store that exposes the seam but yields no
     connection raises instead of silently borrowing the shared connection.
+
+    The single injected ``pg`` target is routed into the slot
+    ``_acquire_lease`` expects (``_lease_slots``): a real ``PgPool`` must go to
+    the ``pool`` slot, because its ``lease()`` yields a ``PgLease`` whose
+    ``__enter__`` returns the lease itself — treating it as a DBAPI connection
+    (the ``pg``-slot adapter path) makes every ``.cursor()`` raise and fails
+    suppression OPEN.
     """
-    lease = _canonical._acquire_lease(None, pg)
+    lease = _canonical._acquire_lease(*_canonical._lease_slots(pg))
     try:
         yield lease.connection
     finally:
@@ -462,7 +469,7 @@ def _discover(pg: Any, qa_ids: Any) -> tuple[dict, set]:
         for qa in ids:
             cur.execute(
                 f"SELECT id FROM {_OBSERVATION_TABLE} "
-                f"WHERE source_qa_range @> %s",
+                f"WHERE source_qa_range @> %s::bigint",
                 (qa,),
             )
             found = [r[0] for r in cur.fetchall() if r and r[0] is not None]
@@ -498,7 +505,7 @@ def _write_invalidations(pg: Any, rows: list[dict]) -> tuple[int, int]:
     leaks a live transaction to the next lease), and the delivered baseline is
     restored before the lease is released.
     """
-    lease = _canonical._acquire_lease(None, pg)
+    lease = _canonical._acquire_lease(*_canonical._lease_slots(pg))
     conn = lease.connection
     took_txn_ownership = False
     inserted = 0
@@ -517,8 +524,7 @@ def _write_invalidations(pg: Any, rows: list[dict]) -> tuple[int, int]:
                         INSERT INTO {_INVALIDATION_TABLE}
                             ({", ".join(_INVALIDATION_INSERT_COLUMNS)})
                         VALUES
-                            (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                             NOW(), NULL, NULL)
+                            (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (invalidation_id) DO NOTHING
                         RETURNING invalidation_id
                         """,
