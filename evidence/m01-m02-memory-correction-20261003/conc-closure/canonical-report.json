@@ -1,0 +1,158 @@
+{
+  "label": "canonical",
+  "checks": {
+    "module_resolves_under_expected_root": {
+      "ok": true,
+      "observed": "resolved='C:\\\\hp-testbed\\\\m01-m02-memory-correction-20261003\\\\src-root\\\\src\\\\v3-core\\\\src\\\\v3core\\\\__init__.py' expect_under='C:\\\\hp-testbed\\\\m01-m02-memory-correction-20261003\\\\src-root' rc=0"
+    },
+    "schema_bootstrapped": {
+      "ok": true,
+      "observed": "rc=0 applied=None"
+    },
+    "server_health_ok": {
+      "ok": true,
+      "observed": "health={'ok': True, 'pg': True, 'embed': False, 'core': 'initialized'} port=56413 pid=2212"
+    },
+    "fixture_a_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "canonical_reproduced": {
+      "ok": false,
+      "observed": "successes=0 mem_delta=0 rel_delta=0 a_status=active b_rows=0"
+    }
+  },
+  "reasons": [
+    "canonical_reproduced: successes=0 mem_delta=0 rel_delta=0 a_status=active b_rows=0"
+  ],
+  "host": "DESKTOP-EQP3OBU",
+  "v3core_resolved": "C:\\hp-testbed\\m01-m02-memory-correction-20261003\\src-root\\src\\v3-core\\src\\v3core\\__init__.py",
+  "db": "m01m02e2e_concclosure_c",
+  "server": {
+    "label": "conc",
+    "port": 56413,
+    "pid": 2212,
+    "argv_profile": "--profile",
+    "health": {
+      "ok": true,
+      "pg": true,
+      "embed": false,
+      "core": "initialized"
+    }
+  },
+  "concurrency": {
+    "successes": 0,
+    "per_thread": {
+      "t0": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_c status='active'（期望 archived）",
+        "durable": true,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_c",
+        "new_memory_id": "mem_aff94386c2ae2f0b4b2624a662315e1690dc6742d5f872af398857a924f4ae51",
+        "old_status": "archived",
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_c status='active'（期望 archived）"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.016,
+          "end_offset": 0.047
+        }
+      },
+      "t1": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "replacement memory_id 已被相同 payload 占用；未覆盖任何行",
+        "durable": false,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_c",
+        "new_memory_id": "mem_aff94386c2ae2f0b4b2624a662315e1690dc6742d5f872af398857a924f4ae51",
+        "old_status": null,
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.016,
+          "end_offset": 0.047
+        }
+      },
+      "t2": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "纠正事务失败: ForeignKeyViolation('insert or update on table \"memory_relations\" violates foreign key constraint \"memory_relations_to_memory_id_fkey\"\\nDETAIL:  Key (to_memory_id)=(mem_aff94386c2ae2f0b4b2624a662315e1690dc6742d5f872af398857a924f4ae51) is not present in table \"explicit_memories\".\\n')",
+        "durable": false,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_c",
+        "new_memory_id": "mem_aff94386c2ae2f0b4b2624a662315e1690dc6742d5f872af398857a924f4ae51",
+        "old_status": null,
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "纠正事务失败: ForeignKeyViolation('insert or update on table \"memory_relations\" violates foreign key constraint \"memory_relations_to_memory_id_fkey\"\\nDETAIL:  Key (to_memory_id)=(mem_aff94386c2ae2f0b4b2624a662315e1690dc6742d5f872af398857a924f4ae51) is not present in table \"explicit_memories\".\\n')"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.016,
+          "end_offset": 0.047
+        }
+      }
+    },
+    "memory_delta": 0,
+    "relation_delta": 0,
+    "a_before": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_c"
+    },
+    "a_after": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_c",
+      "content": "并发纠正基线内容。conc-closure-m01m02e2e_concclosure_c-A",
+      "status": "active"
+    },
+    "b_rows": [],
+    "edges_from_a": [],
+    "memory_before": 1,
+    "memory_after": 1,
+    "relation_before": 0,
+    "relation_after": 0
+  },
+  "connect_log": [
+    {
+      "t": 1791014434.748134,
+      "tid": 8040,
+      "backend_pid": 1920,
+      "autocommit": false,
+      "dsn_db": null
+    },
+    {
+      "t": 1791014437.810527,
+      "tid": 3388,
+      "backend_pid": 1452,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_c"
+    },
+    {
+      "t": 1791014438.201143,
+      "tid": 7948,
+      "backend_pid": 4524,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_c"
+    }
+  ],
+  "diag": [],
+  "connect_count": 3
+}

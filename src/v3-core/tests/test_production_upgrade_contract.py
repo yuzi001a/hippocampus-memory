@@ -155,6 +155,7 @@ def _full_shape():
         "yin_paragraphs",
         # extras from the upgrade-required + optional sets:
         "explicit_memories",
+        "memory_relations",
         "schema_versions",
         "qa_embedding_chunks",
         "observation_embedding_chunks",

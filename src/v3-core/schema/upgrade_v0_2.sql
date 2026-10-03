@@ -59,6 +59,21 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/explicit_memories.sql <<<
 
 -- -----------------------------------------------------------------------------
+-- memory_relations — M01 memory-correction relation sidecar.
+--
+-- Same single-source-of-truth pattern as explicit_memories: the marker
+-- below is replaced with the body of memory_relations.sql at apply time.
+-- Placement is immediately AFTER explicit_memories because every edge
+-- references public.explicit_memories(memory_id).
+--
+-- Additive and idempotent by construction (CREATE TABLE / CREATE INDEX
+-- IF NOT EXISTS only). Historic rows pre-date the relation and are left
+-- untouched — no backfill, no data rewrite, no assumption that old
+-- memories already have version relations.
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/memory_relations.sql <<<
+
+-- -----------------------------------------------------------------------------
 -- schema_versions — minimal migration ledger. One row per applied upgrade.
 -- A separate upgrade tool MAY add additional rows; this file's role is to
 -- create the table + record the v0.2 upgrade.
@@ -77,6 +92,15 @@ CREATE TABLE IF NOT EXISTS public.schema_versions (
 -- The v0.2 upgrade row. Idempotent: re-running the upgrade is a no-op.
 INSERT INTO public.schema_versions (version, description)
 VALUES ('v0.2', 'additive existing-install upgrade: explicit_memories + schema_versions ledger + ADD COLUMN IF NOT EXISTS guards')
+ON CONFLICT (version) DO NOTHING;
+
+-- M01 memory-correction migration row. This row is the operator-facing
+-- answer to "has this install been migrated for explicit correction?".
+-- It is keyed on the SAME artifact the apply path just ran, so the
+-- ledger can never claim the relation schema exists when it does not.
+-- Idempotent: re-running the upgrade is a no-op.
+INSERT INTO public.schema_versions (version, description)
+VALUES ('v0.3', 'additive memory-correction migration: public.memory_relations sidecar (schema/memory_relations.sql); existing memories are not backfilled')
 ON CONFLICT (version) DO NOTHING;
 
 -- -----------------------------------------------------------------------------

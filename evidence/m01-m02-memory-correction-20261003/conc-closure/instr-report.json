@@ -1,0 +1,362 @@
+{
+  "label": "instrumented",
+  "checks": {
+    "module_resolves_under_expected_root": {
+      "ok": true,
+      "observed": "resolved='C:\\\\hp-testbed\\\\m01-m02-integration-20261003\\\\conc-closure-staging\\\\instr\\\\v3core\\\\__init__.py' expect_under='C:\\\\hp-testbed\\\\m01-m02-integration-20261003\\\\conc-closure-staging\\\\instr' rc=0"
+    },
+    "schema_bootstrapped": {
+      "ok": true,
+      "observed": "rc=0 applied=None"
+    },
+    "server_health_ok": {
+      "ok": true,
+      "observed": "health={'ok': True, 'pg': True, 'embed': False, 'core': 'initialized'} port=56443 pid=2684"
+    },
+    "fixture_a_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "canonical_reproduced": {
+      "ok": false,
+      "observed": "successes=0 mem_delta=0 rel_delta=0 a_status=active b_rows=0"
+    }
+  },
+  "reasons": [
+    "canonical_reproduced: successes=0 mem_delta=0 rel_delta=0 a_status=active b_rows=0"
+  ],
+  "host": "DESKTOP-EQP3OBU",
+  "v3core_resolved": "C:\\hp-testbed\\m01-m02-integration-20261003\\conc-closure-staging\\instr\\v3core\\__init__.py",
+  "db": "m01m02e2e_concclosure_i2",
+  "server": {
+    "label": "conc",
+    "port": 56443,
+    "pid": 2684,
+    "argv_profile": "--profile",
+    "health": {
+      "ok": true,
+      "pg": true,
+      "embed": false,
+      "core": "initialized"
+    }
+  },
+  "concurrency": {
+    "successes": 0,
+    "per_thread": {
+      "t0": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i2 status='active'（期望 archived）",
+        "durable": true,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+        "new_memory_id": "mem_1520c0693bf3f0de29847ef8ac51627c792a622acfc27c445ac956fcbdb940a6",
+        "old_status": "archived",
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i2 status='active'（期望 archived）"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.078
+        }
+      },
+      "t1": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "replacement memory_id 已被相同 payload 占用；未覆盖任何行",
+        "durable": false,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+        "new_memory_id": "mem_1520c0693bf3f0de29847ef8ac51627c792a622acfc27c445ac956fcbdb940a6",
+        "old_status": null,
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.062
+        }
+      },
+      "t2": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "replacement memory_id 已被相同 payload 占用；未覆盖任何行",
+        "durable": false,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+        "new_memory_id": "mem_1520c0693bf3f0de29847ef8ac51627c792a622acfc27c445ac956fcbdb940a6",
+        "old_status": null,
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.062
+        }
+      }
+    },
+    "memory_delta": 0,
+    "relation_delta": 0,
+    "a_before": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i2"
+    },
+    "a_after": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "content": "并发纠正基线内容。conc-closure-m01m02e2e_concclosure_i2-A",
+      "status": "active"
+    },
+    "b_rows": [],
+    "edges_from_a": [],
+    "memory_before": 1,
+    "memory_after": 1,
+    "relation_before": 0,
+    "relation_after": 0
+  },
+  "connect_log": [
+    {
+      "t": 1791014523.926898,
+      "tid": 5136,
+      "backend_pid": 5708,
+      "autocommit": false,
+      "dsn_db": null
+    },
+    {
+      "t": 1791014527.004922,
+      "tid": 2140,
+      "backend_pid": 9000,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_i2"
+    },
+    {
+      "t": 1791014527.223657,
+      "tid": 1112,
+      "backend_pid": 320,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_i2"
+    }
+  ],
+  "diag": [
+    {
+      "t": 1791014527.551782,
+      "tid": 4332,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 1456,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 9056,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 8704,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 1456,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "mode": "replace",
+      "backend": 320,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 9056,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "mode": "replace",
+      "backend": 320,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 8704,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "mode": "replace",
+      "backend": 320,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 1456,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 9056,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791014528.2705,
+      "tid": 8704,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791014528.286128,
+      "tid": 9056,
+      "event": "race_lost_insert_memory",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "txn": 2
+    },
+    {
+      "t": 1791014528.286128,
+      "tid": 9056,
+      "event": "race_lost_rolled_back",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "autocommit": false,
+      "txn": 0,
+      "reason": "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+    },
+    {
+      "t": 1791014528.286128,
+      "tid": 8704,
+      "event": "race_lost_insert_memory",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "txn": 0
+    },
+    {
+      "t": 1791014528.286128,
+      "tid": 9056,
+      "event": "race_resolve_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "autocommit": false,
+      "txn": 1
+    },
+    {
+      "t": 1791014528.286128,
+      "tid": 1456,
+      "event": "commit_attempt",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "txn": 2
+    },
+    {
+      "t": 1791014528.286128,
+      "tid": 8704,
+      "event": "race_lost_rolled_back",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "autocommit": false,
+      "txn": 0,
+      "reason": "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+    },
+    {
+      "t": 1791014528.301747,
+      "tid": 9056,
+      "event": "race_resolve_edge",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "found": false,
+      "backend": 320
+    },
+    {
+      "t": 1791014528.301747,
+      "tid": 1456,
+      "event": "committed",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "txn": 0
+    },
+    {
+      "t": 1791014528.301747,
+      "tid": 8704,
+      "event": "race_resolve_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "autocommit": false,
+      "txn": 0
+    },
+    {
+      "t": 1791014528.301747,
+      "tid": 8704,
+      "event": "race_resolve_edge",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "found": false,
+      "backend": 320
+    },
+    {
+      "t": 1791014528.301747,
+      "tid": 1456,
+      "event": "race_resolve_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "backend": 320,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791014528.301747,
+      "tid": 1456,
+      "event": "race_resolve_edge",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "found": false,
+      "backend": 320
+    },
+    {
+      "t": 1791014528.301747,
+      "tid": 1456,
+      "event": "verify_result",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i2",
+      "status": "DURABLE_FAILED",
+      "error_code": "DURABLE_FAILED",
+      "error": "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i2 status='active'（期望 archived）",
+      "old_status": "archived",
+      "new_status": null
+    }
+  ],
+  "connect_count": 3
+}

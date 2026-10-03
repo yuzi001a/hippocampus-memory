@@ -95,7 +95,16 @@ def _build_writer_and_pool(kw: dict):
                 pg = core.pg
             except Exception:
                 pg = None
-        pool = getattr(core, "_pg_pool", None) or pg
+        # A real pool only when one actually exists. Never fall back to the
+        # PgEmbedStore here: ``_acquire_lease`` prefers ``pool`` when it is
+        # not None, so substituting the store for the pool would call
+        # ``pg.lease(...)`` directly — a ``@contextlib.contextmanager`` method
+        # returns a raw ``_GeneratorContextManager`` with no
+        # ``close()``/``connection``, which makes ``archive()`` raise
+        # ``AttributeError: ... object has no attribute 'close'``.
+        # With pool=None the existing ``_PgStoreLeaseAdapter`` path wraps the
+        # store's lease into a real lease object.
+        pool = getattr(core, "_pg_pool", None)
         cfg = cfg if cfg is not None else core.config
     else:
         # No core handle — fall back to kw-provided pool.

@@ -1,4 +1,4 @@
-"""v3_update — 统一整理入口 (v3_organize_memory / v3_dedup_daily / v3_moc_sync / v3_delete / v3_topic_maintain / v3_affinity)"""
+"""v3_update — 统一整理入口 (v3_organize_memory / v3_dedup_daily / v3_moc_sync / v3_delete / v3_topic_maintain / v3_affinity / correct)"""
 from __future__ import annotations
 import json
 import logging
@@ -22,14 +22,30 @@ logger = logging.getLogger("v3core.tools.api_update")
 
 V3_UPDATE_SCHEMA = {
     "name": "v3_update",
-    "description": "整理记忆 — organize组织MEMORY/USER/SOUL、dedup去重、sync同步手帐、delete按source_id归档/删除卡、topic_maintain主题维护、affinity共鸣度",
+    "description": (
+        "整理记忆 — organize组织MEMORY/USER/SOUL、dedup去重、sync同步手帐、"
+        "delete按source_id归档/删除卡、topic_maintain主题维护、affinity共鸣度、"
+        "correct显式纠正一条已存在的记忆 "
+        "(explicit correction of one existing memory; the old version is kept "
+        "and the new content becomes current. Only an explicit user correction "
+        "or an equivalently authorized operator request is allowed — a model "
+        "inference, or a merely newer statement, is NOT authorization)"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["organize", "dedup", "sync", "delete", "topic_maintain", "affinity"],
-                "description": "整理动作: organize=读写MEMORY/USER/SOUL, dedup=去重, sync=同步手帐, delete=按source_id删除/归档, topic_maintain=主题维护, affinity=共鸣度",
+                "enum": [
+                    "organize", "dedup", "sync", "delete", "topic_maintain",
+                    "affinity", "correct",
+                ],
+                "description": (
+                    "整理动作: organize=读写MEMORY/USER/SOUL, dedup=去重, "
+                    "sync=同步手帐, delete=按source_id删除/归档, "
+                    "topic_maintain=主题维护, affinity=共鸣度, "
+                    "correct=用显式更正内容替换一条已有记忆(新版本+归档旧版+关系边)"
+                ),
             },
             "organize_action": {
                 "type": "string",
@@ -43,15 +59,83 @@ V3_UPDATE_SCHEMA = {
             "shou_zhang_append": {"type": "string", "description": "追加手帐内容 (organize/apply optional)"},
             "source_id": {"type": "string", "description": "要删除/归档的卡 source_id (delete action 必填)"},
             "dry_run": {"type": "boolean", "description": "topic_maintain 预览开关 (默认 True)", "default": True},
+            "mode": {
+                "type": "string",
+                "enum": ["replace", "withdraw"],
+                "description": (
+                    "correct only: 纠正模式。replace=用新内容替换一条已有记忆(默认, "
+                    "省略即 replace); withdraw=撤回该记忆, 不创建任何替代版本, "
+                    "且必须完全不传 replacement_content/title/tags "
+                    "(即使传空串也会被拒绝)。撤回写 withdraws 关系边, replace 写 "
+                    "supersedes 关系边"
+                ),
+            },
+            "memory_id": {
+                "type": "string",
+                "description": (
+                    "correct only: the existing explicit memory_id to correct "
+                    "(must already exist and must be named by the user; no fuzzy "
+                    "or inferred target selection — a lookup failure is reported "
+                    "truthfully and NEVER creates a new standalone memory instead). "
+                    "Model inference is not authorization. / "
+                    "要被纠正的既有显式记忆 memory_id (必须已存在, 必须由用户明确指出; "
+                    "不接受模糊/推断定位, 找不到就如实失败, "
+                    "绝不新建一条独立记忆代替; 模型推断不是授权)"
+                ),
+            },
+            "replacement_content": {
+                "type": "string",
+                "required_for": "mode=replace",
+                "description": (
+                    "correct only, required when mode=replace: 更正后的新内容 (必填非空)。"
+                    "旧内容不会被原地改写 — 它会保留为历史版本, 新内容成为当前有效版本。"
+                    "mode=withdraw 时必须完全不传本字段 (传空串也会被拒绝)"
+                ),
+            },
+            "replacement_title": {
+                "type": "string",
+                "description": "correct only: 新版本标题 (可选, 省略则继承旧标题; 显式传空串会被拒绝)",
+            },
+            "replacement_tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "correct only: 新版本标签 (可选, 省略则继承旧标签; 必须是字符串数组)",
+            },
+            "correction_reason": {
+                "type": "string",
+                "description": "correct only: 更正原因 (可选, 作为关系边上的审计说明)",
+            },
+            "correction_source_id": {
+                "type": "string",
+                "description": (
+                    "correct only: 真实来源消息的 conversation_stream.id (可选)。"
+                    "必须是真实存在且 role=user 的消息; 不传则记 explicit_tool_request, "
+                    "禁止编造 host/event/QA 引用"
+                ),
+            },
+            "effective_at": {
+                "type": "string",
+                "description": (
+                    "correct only: 声明的生效时刻, 带时区的 ISO-8601 (可选)。"
+                    "仅作审计 valid-from 记录 — 不会预约未来激活, 也不做 as-of 时间推理"
+                ),
+            },
         },
         "required": ["action"],
         "additionalProperties": False,
     },
 }
 
+#: correct 的授权措辞 — 只有明确的用户更正/显式授权的运维请求才是授权。
+#: 模型推断出的、或仅仅"更新的"说法都不是授权。
+_CORRECT_AUTHORITY_NOTE = (
+    "correct 仅限用户明确要求更正这条记忆、或显式授权的运维请求; "
+    "模型 inference / 推断 / 仅仅更新的一句话都不是授权"
+)
+
 
 def handle_v3_update(args: dict, **kw) -> str:
-    """Unified update: delegate to organize / dedup / moc_sync / delete / topic_maintain / affinity"""
+    """Unified update: delegate to organize / dedup / moc_sync / delete / topic_maintain / affinity / correct"""
     action = args.get("action", "sync")
     try:
         if action == "organize":
@@ -83,6 +167,9 @@ def handle_v3_update(args: dict, **kw) -> str:
         elif action == "affinity":
             from .affinity import handle_v3_affinity
             return handle_v3_affinity({}, **kw)
+        elif action == "correct":
+            from .memory_correction import handle_correct_action
+            return handle_correct_action(args, **kw)
         else:
             return json.dumps({"success": False, "error": f"unknown action: {action}"}, ensure_ascii=False)
     except Exception as e:

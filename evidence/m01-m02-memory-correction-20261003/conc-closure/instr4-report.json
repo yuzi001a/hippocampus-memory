@@ -1,0 +1,411 @@
+{
+  "label": "instrumented-prefix-4",
+  "checks": {
+    "module_resolves_under_expected_root": {
+      "ok": true,
+      "observed": "resolved='C:\\\\hp-testbed\\\\m01-m02-integration-20261003\\\\conc-closure-staging\\\\instr_prefix_pkg\\\\v3core\\\\__init__.py' expect_under='C:\\\\hp-testbed\\\\m01-m02-integration-20261003\\\\conc-closure-staging\\\\instr_prefix_pkg' rc=0"
+    },
+    "schema_bootstrapped": {
+      "ok": true,
+      "observed": "rc=0 applied=None"
+    },
+    "server_health_ok": {
+      "ok": true,
+      "observed": "health={'ok': True, 'pg': True, 'embed': False, 'core': 'initialized'} port=56582 pid=2724"
+    },
+    "fixture_a_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "canonical_reproduced": {
+      "ok": false,
+      "observed": "successes=0 mem_delta=0 rel_delta=0 a_status=active b_rows=0"
+    },
+    "fixture_a2_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "sequential_idempotent": {
+      "ok": true,
+      "observed": "first=CORRECTION_COMMITTED second=CORRECTION_DEDUPLICATED dedup=True mem_delta=1 rel_delta=1 b2=1 edges=1"
+    }
+  },
+  "reasons": [
+    "canonical_reproduced: successes=0 mem_delta=0 rel_delta=0 a_status=active b_rows=0"
+  ],
+  "host": "DESKTOP-EQP3OBU",
+  "v3core_resolved": "C:\\hp-testbed\\m01-m02-integration-20261003\\conc-closure-staging\\instr_prefix_pkg\\v3core\\__init__.py",
+  "db": "m01m02e2e_concclosure_i4",
+  "server": {
+    "label": "conc",
+    "port": 56582,
+    "pid": 2724,
+    "argv_profile": "--profile",
+    "health": {
+      "ok": true,
+      "pg": true,
+      "embed": false,
+      "core": "initialized"
+    }
+  },
+  "concurrency": {
+    "successes": 0,
+    "per_thread": {
+      "t0": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "replacement memory_id 已被相同 payload 占用；未覆盖任何行",
+        "durable": false,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+        "new_memory_id": "mem_800ba294eb258a6d2d838d7c08ad85c373bc02f2bee93db08261f38db716d29a",
+        "old_status": null,
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.062
+        }
+      },
+      "t1": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "replacement memory_id 已被相同 payload 占用；未覆盖任何行",
+        "durable": false,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+        "new_memory_id": "mem_800ba294eb258a6d2d838d7c08ad85c373bc02f2bee93db08261f38db716d29a",
+        "old_status": null,
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.062
+        }
+      },
+      "t2": {
+        "http": 200,
+        "success": false,
+        "status": "DURABLE_FAILED",
+        "error_code": "DURABLE_FAILED",
+        "error": "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i4 status='active'（期望 archived）",
+        "durable": true,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+        "new_memory_id": "mem_800ba294eb258a6d2d838d7c08ad85c373bc02f2bee93db08261f38db716d29a",
+        "old_status": "archived",
+        "new_status": null,
+        "current_memory_id": null,
+        "relation": null,
+        "warnings": [
+          "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i4 status='active'（期望 archived）"
+        ],
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.062
+        }
+      }
+    },
+    "memory_delta": 0,
+    "relation_delta": 0,
+    "a_before": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i4"
+    },
+    "a_after": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "content": "并发纠正基线内容。conc-closure-m01m02e2e_concclosure_i4-A",
+      "status": "active"
+    },
+    "b_rows": [],
+    "edges_from_a": [],
+    "memory_before": 1,
+    "memory_after": 1,
+    "relation_before": 0,
+    "relation_after": 0
+  },
+  "connect_log": [
+    {
+      "t": 1791015135.497394,
+      "tid": 7868,
+      "backend_pid": 3288,
+      "autocommit": false,
+      "dsn_db": null
+    },
+    {
+      "t": 1791015138.716036,
+      "tid": 5788,
+      "backend_pid": 2236,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_i4"
+    },
+    {
+      "t": 1791015138.919155,
+      "tid": 1088,
+      "backend_pid": 7000,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_i4"
+    }
+  ],
+  "diag": [
+    {
+      "t": 1791015139.216025,
+      "tid": 3156,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015140.059734,
+      "tid": 4332,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015140.075364,
+      "tid": 7724,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015140.075364,
+      "tid": 4332,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "mode": "replace",
+      "backend": 7000,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791015140.075364,
+      "tid": 4696,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015140.075364,
+      "tid": 7724,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "mode": "replace",
+      "backend": 7000,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791015140.075364,
+      "tid": 4332,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015140.075364,
+      "tid": 4696,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "mode": "replace",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015140.075364,
+      "tid": 7724,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015140.075364,
+      "tid": 4696,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015140.090984,
+      "tid": 7724,
+      "event": "race_lost_insert_memory",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "txn": 2
+    },
+    {
+      "t": 1791015140.090984,
+      "tid": 4696,
+      "event": "race_lost_insert_memory",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "txn": 2
+    },
+    {
+      "t": 1791015140.090984,
+      "tid": 7724,
+      "event": "race_lost_rolled_back",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 0,
+      "reason": "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+    },
+    {
+      "t": 1791015140.090984,
+      "tid": 4332,
+      "event": "commit_attempt",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "txn": 0
+    },
+    {
+      "t": 1791015140.090984,
+      "tid": 4696,
+      "event": "race_lost_rolled_back",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 0,
+      "reason": "replacement memory_id 已被相同 payload 占用；未覆盖任何行"
+    },
+    {
+      "t": 1791015140.090984,
+      "tid": 7724,
+      "event": "race_resolve_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 0
+    },
+    {
+      "t": 1791015140.090984,
+      "tid": 4332,
+      "event": "committed",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "txn": 0
+    },
+    {
+      "t": 1791015140.090984,
+      "tid": 4696,
+      "event": "race_resolve_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 0
+    },
+    {
+      "t": 1791015140.106614,
+      "tid": 7724,
+      "event": "race_resolve_edge",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "found": false,
+      "backend": 7000
+    },
+    {
+      "t": 1791015140.106614,
+      "tid": 4696,
+      "event": "race_resolve_edge",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "found": false,
+      "backend": 7000
+    },
+    {
+      "t": 1791015140.106614,
+      "tid": 4332,
+      "event": "race_resolve_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "backend": 7000,
+      "autocommit": false,
+      "txn": 0
+    },
+    {
+      "t": 1791015140.106614,
+      "tid": 4332,
+      "event": "race_resolve_edge",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "found": false,
+      "backend": 7000
+    },
+    {
+      "t": 1791015140.106614,
+      "tid": 4332,
+      "event": "verify_result",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i4",
+      "status": "DURABLE_FAILED",
+      "error_code": "DURABLE_FAILED",
+      "error": "纠正已提交但 readback 显示 m01m02e2e-conc-m01m02e2e_concclosure_i4 status='active'（期望 archived）",
+      "old_status": "archived",
+      "new_status": null
+    }
+  ],
+  "connect_count": 3,
+  "sequential": {
+    "first": {
+      "success": true,
+      "status": "CORRECTION_COMMITTED",
+      "durable": true,
+      "deduplicated": false,
+      "new_memory_id": "mem_6e699e9f987062ea88b138ae002ff713cd2161426ab6e4ae16ece9cd4accd3e7",
+      "new_status": "active",
+      "current_memory_id": "mem_6e699e9f987062ea88b138ae002ff713cd2161426ab6e4ae16ece9cd4accd3e7",
+      "error": null
+    },
+    "second": {
+      "success": true,
+      "status": "CORRECTION_DEDUPLICATED",
+      "durable": true,
+      "deduplicated": true,
+      "new_memory_id": "mem_6e699e9f987062ea88b138ae002ff713cd2161426ab6e4ae16ece9cd4accd3e7",
+      "new_status": "active",
+      "current_memory_id": "mem_6e699e9f987062ea88b138ae002ff713cd2161426ab6e4ae16ece9cd4accd3e7",
+      "error": null
+    },
+    "a2_after": {
+      "memory_id": "m01m02e2e-conc-seq-m01m02e2e_concclosure_i4",
+      "content": "顺序纠正基线内容。conc-closure-m01m02e2e_concclosure_i4-SEQ-A",
+      "status": "archived"
+    },
+    "b2_rows": [
+      {
+        "memory_id": "mem_6e699e9f987062ea88b138ae002ff713cd2161426ab6e4ae16ece9cd4accd3e7",
+        "status": "active"
+      }
+    ],
+    "edges_from_a2": [
+      {
+        "relation_id": "rel_1a094239fb3955107d6b6a25edb74cb0b6b423eee40db9d687d1a45ac0987fe7",
+        "to_memory_id": "mem_6e699e9f987062ea88b138ae002ff713cd2161426ab6e4ae16ece9cd4accd3e7"
+      }
+    ],
+    "memory_delta": 1,
+    "relation_delta": 1
+  }
+}

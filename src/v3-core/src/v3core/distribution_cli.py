@@ -324,6 +324,7 @@ def _doctor(args: argparse.Namespace) -> int:
     for name in ("alpha_bootstrap.sql", "explicit_memories.sql",
                  "embedding_failures.sql",
                  "qa_embedding_chunks.sql", "observation_embedding_chunks.sql",
+                 "memory_relations.sql",
                  "upgrade_v0_2.sql"):
         try:
             text = _package_sql(name)
@@ -605,7 +606,7 @@ def _doctor_probe_database(explicit_dsn: str | None) -> dict[str, Any]:
             for table in ("explicit_memories", "qa_pairs", "topics",
                           "topic_entries", "observation_notes",
                           "conversation_stream", "yin_paragraphs",
-                          "embedding_failures"):
+                          "embedding_failures", "memory_relations"):
                 try:
                     cur.execute(
                         "SELECT 1 FROM information_schema.tables "
@@ -1245,6 +1246,13 @@ def _bootstrap(args: argparse.Namespace) -> int:
 _UPGRADE_REQUIRED_TABLES: tuple[str, ...] = (
     "explicit_memories",
     "schema_versions",
+    # M01 memory-correction relation sidecar. It is REQUIRED, not optional:
+    # a v0.2 install without public.memory_relations cannot serve any
+    # correction, and the canonical writer/reader report a truthful
+    # migration-required failure rather than a hidden fallback. The
+    # upgrade carries it through the same ALPHA_BOOTSTRAP_INCLUDE marker
+    # as every other canonical artifact.
+    "memory_relations",
 )
 # Optional tables the upgrade checks for but never adds directly. The
 # qa_embedding_chunks table is owned by child A; when child A's
@@ -1610,6 +1618,19 @@ def _upgrade_load_combined_sql(
         ).hexdigest()
     except FileNotFoundError:
         out["observation_embedding_chunks_sql_sha256"] = None
+    # M01: the memory-correction relation sidecar is a REQUIRED canonical
+    # artifact. Its presence/absence is recorded for the operator, and a
+    # missing artifact surfaces as a hard failure further down (the
+    # expansion itself raises FileNotFoundError — it is never spliced out
+    # of the body silently).
+    relation_present, _relation_text, relation_sha = _package_optional_sql(
+        "memory_relations.sql"
+    )
+    out["memory_relations_sql_present"] = bool(relation_present)
+    if not relation_present:
+        out["memory_relations_sql_missing"] = True
+    else:
+        out["memory_relations_sql_sha256"] = relation_sha
     if not include_qa_chunks_artifact:
         return (expanded, out)
     present, qa_text, qa_sha = _package_optional_sql(
@@ -1713,6 +1734,9 @@ def _upgrade_build_plan(
         "observation_embedding_chunks_table_present": bool(
             table_presence.get("observation_embedding_chunks")
         ),
+        "memory_relations_table_present": bool(
+            table_presence.get("memory_relations")
+        ),
         "schema_versions_v0_2": _upgrade_schema_version_row(parsed),
     }
     plan: dict[str, Any] = {
@@ -1738,6 +1762,7 @@ def _upgrade_build_plan(
             "observation_embedding_chunks.sql": sql_meta.get(
                 "observation_embedding_chunks_sql_sha256"
             ),
+            "memory_relations.sql": sql_meta.get("memory_relations_sql_sha256"),
         },
         "combined_sql": {
             "bytes": len(sql_text.encode("utf-8")),
@@ -1804,6 +1829,10 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
         observation_artifact_sha = plan["artifacts"].get(
             "observation_embedding_chunks.sql"
         )
+        relation_artifact_present, relation_artifact_sha = (
+            bool(plan["artifacts"].get("memory_relations.sql")),
+            plan["artifacts"].get("memory_relations.sql"),
+        )
         scan_clean = bool(plan["destructive_scan"]["clean"])
     else:
         # Plan build failed — fall back to independent probes for the
@@ -1816,6 +1845,9 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
         )
         observation_artifact_present, _, observation_artifact_sha = _package_optional_sql(
             "observation_embedding_chunks.sql"
+        )
+        relation_artifact_present, _, relation_artifact_sha = _package_optional_sql(
+            "memory_relations.sql"
         )
         scan_clean = False
     missing_required = [
@@ -1857,10 +1889,26 @@ def _upgrade_dry_run(args: argparse.Namespace) -> int:
         "observation_embedding_chunks_table_present": bool(
             table_presence.get("observation_embedding_chunks")
         ),
+        # M01 memory-correction relation sidecar: artifact + live table both
+        # reported so an operator sees a missing migration explicitly.
+        "memory_relations_artifact_present": bool(
+            plan["artifacts"].get("memory_relations.sql") if plan is not None
+            else relation_artifact_present
+        ),
+        "memory_relations_artifact_sha256": (
+            plan["artifacts"].get("memory_relations.sql") if plan is not None
+            else relation_artifact_sha
+        ),
+        "memory_relations_table_present": bool(
+            table_presence.get("memory_relations")
+        ),
         "would_apply": bool(
             missing_required
             or missing_columns_total > 0
             or not schema_version.get("present")
+            # A missing required relation schema is itself an addition the
+            # upgrade would make; keep it in the would_apply signal.
+            or not relation_artifact_present
         ),
         "plan": plan,
         "plan_sha256": plan_sha,
@@ -1996,6 +2044,28 @@ def _upgrade_apply(args: argparse.Namespace) -> int:
                 "v3-core install. Refusing to apply the v0.2 upgrade "
                 "without the child-A artifact. Reinstall a v3-core build "
                 "that ships qa_embedding_chunks.sql, then re-run upgrade."
+            ),
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+        return 2
+    # M01: the memory-correction relation sidecar is REQUIRED, not
+    # optional. Refuse the apply before any connection is opened rather
+    # than producing a half-upgraded install that cannot correct a
+    # memory and would only fail later with an opaque SQL error.
+    relation_present, _, _ = _package_optional_sql("memory_relations.sql")
+    if not relation_present:
+        out = {
+            "command": "upgrade",
+            "mode": "apply",
+            "applied": False,
+            "target": _redact_dsn(parsed),
+            "error": (
+                "memory_relations.sql artifact is NOT packaged in this "
+                "v3-core install. Refusing to apply the upgrade without the "
+                "memory-correction relation schema — an install without "
+                "public.memory_relations cannot perform an explicit "
+                "correction. Reinstall a v3-core build that ships "
+                "memory_relations.sql, then re-run upgrade."
             ),
         }
         print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))

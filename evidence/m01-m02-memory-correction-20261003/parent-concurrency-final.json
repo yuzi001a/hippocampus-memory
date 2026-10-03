@@ -1,0 +1,388 @@
+{
+  "label": "parent-final",
+  "checks": {
+    "module_resolves_under_expected_root": {
+      "ok": true,
+      "observed": "resolved='C:\\\\hp-testbed\\\\m01-m02-memory-correction-20261003\\\\src-root\\\\src\\\\v3-core\\\\src\\\\v3core\\\\__init__.py' expect_under='C:\\\\hp-testbed\\\\m01-m02-memory-correction-20261003\\\\src-root' rc=0"
+    },
+    "schema_bootstrapped": {
+      "ok": true,
+      "observed": "rc=0 applied=None"
+    },
+    "server_health_ok": {
+      "ok": true,
+      "observed": "health={'ok': True, 'pg': True, 'embed': False, 'core': 'initialized'} port=61874 pid=3164"
+    },
+    "fixture_a_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "canonical_reproduced": {
+      "ok": true,
+      "observed": "successes=3 mem_delta=1 rel_delta=1 a_status=archived b_rows=1"
+    },
+    "sequential_idempotent": {
+      "ok": true,
+      "observed": "status=CORRECTION_DEDUPLICATED durable=True dedup=True mem_delta=0 rel_delta=0"
+    }
+  },
+  "reasons": [],
+  "host": "DESKTOP-EQP3OBU",
+  "v3core_resolved": "C:\\hp-testbed\\m01-m02-memory-correction-20261003\\src-root\\src\\v3-core\\src\\v3core\\__init__.py",
+  "db": "m01m02e2e_parentconc_final",
+  "server": {
+    "label": "conc",
+    "port": 61874,
+    "pid": 3164,
+    "argv_profile": "--profile",
+    "health": {
+      "ok": true,
+      "pg": true,
+      "embed": false,
+      "core": "initialized"
+    }
+  },
+  "concurrency": {
+    "successes": 3,
+    "per_thread": {
+      "t0": {
+        "http": 200,
+        "success": true,
+        "status": "CORRECTION_DEDUPLICATED",
+        "error_code": null,
+        "error": null,
+        "durable": true,
+        "deduplicated": true,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+        "new_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "old_status": "archived",
+        "new_status": "active",
+        "current_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "relation": {
+          "relation_id": "rel_6db275b6a04a344637bc4b3562a62ccf2796cb0eac44cacbdb89d34816ace35a",
+          "relation_type": "supersedes",
+          "from_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+          "to_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+          "correction_id": "cor_01950dba62b07f2329da99e0508b8d7a8f56b45722f82430c9fcab5784b900a6",
+          "authority": "user_explicit",
+          "correction_reason": "concurrent identical correction",
+          "correction_source_id": null,
+          "provenance": "explicit_tool_request",
+          "effective_at": null,
+          "recorded_at": "2026-10-03T08:30:32.070625+00:00",
+          "request": {
+            "mode": "replace",
+            "memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+            "effective_at": null,
+            "replacement_tags": null,
+            "correction_reason": "concurrent identical correction",
+            "replacement_title": null,
+            "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_parentconc_final-B",
+            "correction_source_id": null
+          },
+          "correction_source": {
+            "provenance": "explicit_tool_request",
+            "correction_source_id": null,
+            "host": null,
+            "session_id": null,
+            "event_id": null
+          }
+        },
+        "warnings": null,
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.031,
+          "end_offset": 0.531
+        }
+      },
+      "t1": {
+        "http": 200,
+        "success": true,
+        "status": "CORRECTION_DEDUPLICATED",
+        "error_code": null,
+        "error": null,
+        "durable": true,
+        "deduplicated": true,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+        "new_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "old_status": "archived",
+        "new_status": "active",
+        "current_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "relation": {
+          "relation_id": "rel_6db275b6a04a344637bc4b3562a62ccf2796cb0eac44cacbdb89d34816ace35a",
+          "relation_type": "supersedes",
+          "from_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+          "to_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+          "correction_id": "cor_01950dba62b07f2329da99e0508b8d7a8f56b45722f82430c9fcab5784b900a6",
+          "authority": "user_explicit",
+          "correction_reason": "concurrent identical correction",
+          "correction_source_id": null,
+          "provenance": "explicit_tool_request",
+          "effective_at": null,
+          "recorded_at": "2026-10-03T08:30:32.070625+00:00",
+          "request": {
+            "mode": "replace",
+            "memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+            "effective_at": null,
+            "replacement_tags": null,
+            "correction_reason": "concurrent identical correction",
+            "replacement_title": null,
+            "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_parentconc_final-B",
+            "correction_source_id": null
+          },
+          "correction_source": {
+            "provenance": "explicit_tool_request",
+            "correction_source_id": null,
+            "host": null,
+            "session_id": null,
+            "event_id": null
+          }
+        },
+        "warnings": null,
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.031,
+          "end_offset": 0.718
+        }
+      },
+      "t2": {
+        "http": 200,
+        "success": true,
+        "status": "CORRECTION_COMMITTED",
+        "error_code": null,
+        "error": null,
+        "durable": true,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+        "new_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "old_status": "archived",
+        "new_status": "active",
+        "current_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "relation": {
+          "relation_id": "rel_6db275b6a04a344637bc4b3562a62ccf2796cb0eac44cacbdb89d34816ace35a",
+          "relation_type": "supersedes",
+          "from_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+          "to_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+          "correction_id": "cor_01950dba62b07f2329da99e0508b8d7a8f56b45722f82430c9fcab5784b900a6",
+          "authority": "user_explicit",
+          "correction_reason": "concurrent identical correction",
+          "correction_source_id": null,
+          "provenance": "explicit_tool_request",
+          "effective_at": null,
+          "recorded_at": "2026-10-03T08:30:32.070625+00:00",
+          "request": {
+            "mode": "replace",
+            "memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+            "effective_at": null,
+            "replacement_tags": null,
+            "correction_reason": "concurrent identical correction",
+            "replacement_title": null,
+            "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_parentconc_final-B",
+            "correction_source_id": null
+          },
+          "correction_source": {
+            "provenance": "explicit_tool_request",
+            "correction_source_id": null,
+            "host": null,
+            "session_id": null,
+            "event_id": null
+          }
+        },
+        "warnings": null,
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.031,
+          "end_offset": 0.906
+        }
+      }
+    },
+    "memory_delta": 1,
+    "relation_delta": 1,
+    "a_before": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final"
+    },
+    "a_after": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+      "content": "并发纠正基线内容。conc-closure-m01m02e2e_parentconc_final-A",
+      "status": "archived"
+    },
+    "b_rows": [
+      {
+        "memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "status": "active",
+        "content": "并发纠正替换内容。conc-closure-m01m02e2e_parentconc_final-B"
+      }
+    ],
+    "edges_from_a": [
+      {
+        "relation_id": "rel_6db275b6a04a344637bc4b3562a62ccf2796cb0eac44cacbdb89d34816ace35a",
+        "relation_type": "supersedes",
+        "from_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+        "to_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "correction_id": "cor_01950dba62b07f2329da99e0508b8d7a8f56b45722f82430c9fcab5784b900a6",
+        "recorded_at": "2026-10-03 08:30:32.070625+00"
+      }
+    ],
+    "memory_before": 1,
+    "memory_after": 2,
+    "relation_before": 0,
+    "relation_after": 1
+  },
+  "connect_log": [
+    {
+      "t": 1791016226.734733,
+      "tid": 8928,
+      "backend_pid": 8788,
+      "autocommit": false,
+      "dsn_db": null
+    },
+    {
+      "t": 1791016229.640881,
+      "tid": 3532,
+      "backend_pid": 8980,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_parentconc_final"
+    },
+    {
+      "t": 1791016230.06275,
+      "tid": 5180,
+      "backend_pid": 888,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_parentconc_final"
+    },
+    {
+      "t": 1791016230.750217,
+      "tid": 7088,
+      "backend_pid": 4060,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_parentconc_final"
+    },
+    {
+      "t": 1791016231.047082,
+      "tid": 7088,
+      "backend_pid": 3100,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_parentconc_final"
+    },
+    {
+      "t": 1791016232.062674,
+      "tid": 7780,
+      "backend_pid": 6952,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_parentconc_final"
+    },
+    {
+      "t": 1791016232.234539,
+      "tid": 3568,
+      "backend_pid": 388,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_parentconc_final"
+    },
+    {
+      "t": 1791016232.422034,
+      "tid": 1476,
+      "backend_pid": 4316,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_parentconc_final"
+    },
+    {
+      "t": 1791016232.609528,
+      "tid": 7780,
+      "backend_pid": 2020,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_parentconc_final"
+    }
+  ],
+  "diag": [],
+  "connect_count": 9,
+  "sequential": {
+    "receipt": {
+      "_http": 200,
+      "_label": "same-a-to-b-after-concurrent",
+      "request": {
+        "action": "correct",
+        "memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+        "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_parentconc_final-B",
+        "correction_reason": "concurrent identical correction"
+      },
+      "_envelope": {
+        "ok": true,
+        "result": "{\"success\": true, \"action\": \"correct\", \"mode\": \"replace\", \"authority\": \"user_explicit\", \"old_memory_id\": \"m01m02e2e-conc-m01m02e2e_parentconc_final\", \"old_status\": \"archived\", \"deduplicated\": true, \"correction_source\": {\"provenance\": \"explicit_tool_request\", \"correction_source_id\": null, \"host\": null, \"session_id\": null, \"event_id\": null}, \"effective_at\": null, \"new_memory_id\": \"mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42\", \"new_status\": \"active\", \"current_memory_id\": \"mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42\", \"relation\": {\"relation_id\": \"rel_6db275b6a04a344637bc4b3562a62ccf2796cb0eac44cacbdb89d34816ace35a\", \"relation_type\": \"supersedes\", \"from_memory_id\": \"m01m02e2e-conc-m01m02e2e_parentconc_final\", \"to_memory_id\": \"mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42\", \"correction_id\": \"cor_01950dba62b07f2329da99e0508b8d7a8f56b45722f82430c9fcab5784b900a6\", \"authority\": \"user_explicit\", \"correction_reason\": \"concurrent identical correction\", \"correction_source_id\": null, \"provenance\": \"explicit_tool_request\", \"effective_at\": null, \"recorded_at\": \"2026-10-03T08:30:32.070625+00:00\", \"request\": {\"mode\": \"replace\", \"memory_id\": \"m01m02e2e-conc-m01m02e2e_parentconc_final\", \"effective_at\": null, \"replacement_tags\": null, \"correction_reason\": \"concurrent identical correction\", \"replacement_title\": null, \"replacement_content\": \"并发纠正替换内容。conc-closure-m01m02e2e_parentconc_final-B\", \"correction_source_id\": null}, \"correction_source\": {\"provenance\": \"explicit_tool_request\", \"correction_source_id\": null, \"host\": null, \"session_id\": null, \"event_id\": null}}, \"status\": \"CORRECTION_DEDUPLICATED\", \"durable\": true}"
+      },
+      "success": true,
+      "action": "correct",
+      "mode": "replace",
+      "authority": "user_explicit",
+      "old_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+      "old_status": "archived",
+      "deduplicated": true,
+      "correction_source": {
+        "provenance": "explicit_tool_request",
+        "correction_source_id": null,
+        "host": null,
+        "session_id": null,
+        "event_id": null
+      },
+      "effective_at": null,
+      "new_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+      "new_status": "active",
+      "current_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+      "relation": {
+        "relation_id": "rel_6db275b6a04a344637bc4b3562a62ccf2796cb0eac44cacbdb89d34816ace35a",
+        "relation_type": "supersedes",
+        "from_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+        "to_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "correction_id": "cor_01950dba62b07f2329da99e0508b8d7a8f56b45722f82430c9fcab5784b900a6",
+        "authority": "user_explicit",
+        "correction_reason": "concurrent identical correction",
+        "correction_source_id": null,
+        "provenance": "explicit_tool_request",
+        "effective_at": null,
+        "recorded_at": "2026-10-03T08:30:32.070625+00:00",
+        "request": {
+          "mode": "replace",
+          "memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+          "effective_at": null,
+          "replacement_tags": null,
+          "correction_reason": "concurrent identical correction",
+          "replacement_title": null,
+          "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_parentconc_final-B",
+          "correction_source_id": null
+        },
+        "correction_source": {
+          "provenance": "explicit_tool_request",
+          "correction_source_id": null,
+          "host": null,
+          "session_id": null,
+          "event_id": null
+        }
+      },
+      "status": "CORRECTION_DEDUPLICATED",
+      "durable": true
+    },
+    "a_after": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+      "content": "并发纠正基线内容。conc-closure-m01m02e2e_parentconc_final-A",
+      "status": "archived"
+    },
+    "b_rows": [
+      {
+        "memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "status": "active",
+        "content": "并发纠正替换内容。conc-closure-m01m02e2e_parentconc_final-B"
+      }
+    ],
+    "edges_from_a": [
+      {
+        "relation_id": "rel_6db275b6a04a344637bc4b3562a62ccf2796cb0eac44cacbdb89d34816ace35a",
+        "relation_type": "supersedes",
+        "from_memory_id": "m01m02e2e-conc-m01m02e2e_parentconc_final",
+        "to_memory_id": "mem_a909f0150942bf1ca881243887a7c9df688fbe313d10ecfa86d28f0d36236f42",
+        "correction_id": "cor_01950dba62b07f2329da99e0508b8d7a8f56b45722f82430c9fcab5784b900a6",
+        "recorded_at": "2026-10-03 08:30:32.070625+00"
+      }
+    ],
+    "memory_delta": 0,
+    "relation_delta": 0
+  }
+}

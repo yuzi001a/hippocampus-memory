@@ -1,0 +1,418 @@
+{
+  "label": "instrumented-prefix-5",
+  "checks": {
+    "module_resolves_under_expected_root": {
+      "ok": true,
+      "observed": "resolved='C:\\\\hp-testbed\\\\m01-m02-integration-20261003\\\\conc-closure-staging\\\\instr_prefix_pkg\\\\v3core\\\\__init__.py' expect_under='C:\\\\hp-testbed\\\\m01-m02-integration-20261003\\\\conc-closure-staging\\\\instr_prefix_pkg' rc=0"
+    },
+    "schema_bootstrapped": {
+      "ok": true,
+      "observed": "rc=0 applied=None"
+    },
+    "server_health_ok": {
+      "ok": true,
+      "observed": "health={'ok': True, 'pg': True, 'embed': False, 'core': 'initialized'} port=56616 pid=6720"
+    },
+    "fixture_a_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "canonical_reproduced": {
+      "ok": true,
+      "observed": "successes=3 mem_delta=1 rel_delta=1 a_status=archived b_rows=1"
+    },
+    "fixture_a2_committed": {
+      "ok": true,
+      "observed": "ok=True"
+    },
+    "sequential_idempotent": {
+      "ok": true,
+      "observed": "first=CORRECTION_COMMITTED second=CORRECTION_DEDUPLICATED dedup=True mem_delta=1 rel_delta=1 b2=1 edges=1"
+    }
+  },
+  "reasons": [],
+  "host": "DESKTOP-EQP3OBU",
+  "v3core_resolved": "C:\\hp-testbed\\m01-m02-integration-20261003\\conc-closure-staging\\instr_prefix_pkg\\v3core\\__init__.py",
+  "db": "m01m02e2e_concclosure_i5",
+  "server": {
+    "label": "conc",
+    "port": 56616,
+    "pid": 6720,
+    "argv_profile": "--profile",
+    "health": {
+      "ok": true,
+      "pg": true,
+      "embed": false,
+      "core": "initialized"
+    }
+  },
+  "concurrency": {
+    "successes": 3,
+    "per_thread": {
+      "t0": {
+        "http": 200,
+        "success": true,
+        "status": "CORRECTION_COMMITTED",
+        "error_code": null,
+        "error": null,
+        "durable": true,
+        "deduplicated": false,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+        "new_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+        "old_status": "archived",
+        "new_status": "active",
+        "current_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+        "relation": {
+          "relation_id": "rel_69047bb7d4a58b5e5695316ae3cbec6d716fab94ad6c7cd1feaf2c291f0a2ac2",
+          "relation_type": "supersedes",
+          "from_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+          "to_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+          "correction_id": "cor_119ee9c9c74ee92920ac89497bdb51282b016d73c9ef77ab417948812f2f169a",
+          "authority": "user_explicit",
+          "correction_reason": "concurrent identical correction",
+          "correction_source_id": null,
+          "provenance": "explicit_tool_request",
+          "effective_at": null,
+          "recorded_at": "2026-10-03T08:12:35.756606+00:00",
+          "request": {
+            "mode": "replace",
+            "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+            "effective_at": null,
+            "replacement_tags": null,
+            "correction_reason": "concurrent identical correction",
+            "replacement_title": null,
+            "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_concclosure_i5-B",
+            "correction_source_id": null
+          },
+          "correction_source": {
+            "provenance": "explicit_tool_request",
+            "correction_source_id": null,
+            "host": null,
+            "session_id": null,
+            "event_id": null
+          }
+        },
+        "warnings": null,
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.062
+        }
+      },
+      "t1": {
+        "http": 200,
+        "success": true,
+        "status": "CORRECTION_DEDUPLICATED",
+        "error_code": null,
+        "error": null,
+        "durable": true,
+        "deduplicated": true,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+        "new_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+        "old_status": "archived",
+        "new_status": "active",
+        "current_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+        "relation": {
+          "relation_id": "rel_69047bb7d4a58b5e5695316ae3cbec6d716fab94ad6c7cd1feaf2c291f0a2ac2",
+          "relation_type": "supersedes",
+          "from_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+          "to_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+          "correction_id": "cor_119ee9c9c74ee92920ac89497bdb51282b016d73c9ef77ab417948812f2f169a",
+          "authority": "user_explicit",
+          "correction_reason": "concurrent identical correction",
+          "correction_source_id": null,
+          "provenance": "explicit_tool_request",
+          "effective_at": null,
+          "recorded_at": "2026-10-03T08:12:35.756606+00:00",
+          "request": {
+            "mode": "replace",
+            "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+            "effective_at": null,
+            "replacement_tags": null,
+            "correction_reason": "concurrent identical correction",
+            "replacement_title": null,
+            "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_concclosure_i5-B",
+            "correction_source_id": null
+          },
+          "correction_source": {
+            "provenance": "explicit_tool_request",
+            "correction_source_id": null,
+            "host": null,
+            "session_id": null,
+            "event_id": null
+          }
+        },
+        "warnings": null,
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.062
+        }
+      },
+      "t2": {
+        "http": 200,
+        "success": true,
+        "status": "CORRECTION_DEDUPLICATED",
+        "error_code": null,
+        "error": null,
+        "durable": true,
+        "deduplicated": true,
+        "old_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+        "new_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+        "old_status": "archived",
+        "new_status": "active",
+        "current_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+        "relation": {
+          "relation_id": "rel_69047bb7d4a58b5e5695316ae3cbec6d716fab94ad6c7cd1feaf2c291f0a2ac2",
+          "relation_type": "supersedes",
+          "from_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+          "to_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+          "correction_id": "cor_119ee9c9c74ee92920ac89497bdb51282b016d73c9ef77ab417948812f2f169a",
+          "authority": "user_explicit",
+          "correction_reason": "concurrent identical correction",
+          "correction_source_id": null,
+          "provenance": "explicit_tool_request",
+          "effective_at": null,
+          "recorded_at": "2026-10-03T08:12:35.756606+00:00",
+          "request": {
+            "mode": "replace",
+            "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+            "effective_at": null,
+            "replacement_tags": null,
+            "correction_reason": "concurrent identical correction",
+            "replacement_title": null,
+            "replacement_content": "并发纠正替换内容。conc-closure-m01m02e2e_concclosure_i5-B",
+            "correction_source_id": null
+          },
+          "correction_source": {
+            "provenance": "explicit_tool_request",
+            "correction_source_id": null,
+            "host": null,
+            "session_id": null,
+            "event_id": null
+          }
+        },
+        "warnings": null,
+        "thread_error": null,
+        "timing": {
+          "start_offset": 0.015,
+          "end_offset": 0.062
+        }
+      }
+    },
+    "memory_delta": 1,
+    "relation_delta": 1,
+    "a_before": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5"
+    },
+    "a_after": {
+      "memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "content": "并发纠正基线内容。conc-closure-m01m02e2e_concclosure_i5-A",
+      "status": "archived"
+    },
+    "b_rows": [
+      {
+        "memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+        "status": "active",
+        "content": "并发纠正替换内容。conc-closure-m01m02e2e_concclosure_i5-B"
+      }
+    ],
+    "edges_from_a": [
+      {
+        "relation_id": "rel_69047bb7d4a58b5e5695316ae3cbec6d716fab94ad6c7cd1feaf2c291f0a2ac2",
+        "relation_type": "supersedes",
+        "from_memory_id": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+        "to_memory_id": "mem_a946c3c1af125a291ef7802d58e4ea4cf3fa6d81f46d00eb90cf4fb70a5a9562",
+        "correction_id": "cor_119ee9c9c74ee92920ac89497bdb51282b016d73c9ef77ab417948812f2f169a",
+        "recorded_at": "2026-10-03 08:12:35.756606+00"
+      }
+    ],
+    "memory_before": 1,
+    "memory_after": 2,
+    "relation_before": 0,
+    "relation_after": 1
+  },
+  "connect_log": [
+    {
+      "t": 1791015151.231217,
+      "tid": 7080,
+      "backend_pid": 8048,
+      "autocommit": false,
+      "dsn_db": null
+    },
+    {
+      "t": 1791015154.199861,
+      "tid": 3840,
+      "backend_pid": 600,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_i5"
+    },
+    {
+      "t": 1791015154.668596,
+      "tid": 8880,
+      "backend_pid": 2784,
+      "autocommit": false,
+      "dsn_db": "m01m02e2e_concclosure_i5"
+    }
+  ],
+  "diag": [
+    {
+      "t": 1791015154.981092,
+      "tid": 1752,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015155.746684,
+      "tid": 7780,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015155.746684,
+      "tid": 7780,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "mode": "replace",
+      "backend": 2784,
+      "autocommit": true,
+      "txn": 0
+    },
+    {
+      "t": 1791015155.746684,
+      "tid": 7580,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015155.746684,
+      "tid": 1272,
+      "event": "writer_init",
+      "pool_none": true,
+      "pg_type": "PgEmbedStore",
+      "pool_type": "NoneType"
+    },
+    {
+      "t": 1791015155.746684,
+      "tid": 7780,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "backend": 2784,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015155.746684,
+      "tid": 7580,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "mode": "replace",
+      "backend": 2784,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015155.746684,
+      "tid": 1272,
+      "event": "correct_lease",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "mode": "replace",
+      "backend": 2784,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015155.762309,
+      "tid": 7580,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "backend": 2784,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015155.762309,
+      "tid": 1272,
+      "event": "after_begin",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "backend": 2784,
+      "autocommit": false,
+      "txn": 2
+    },
+    {
+      "t": 1791015155.777934,
+      "tid": 7780,
+      "event": "commit_attempt",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "backend": 2784,
+      "txn": 2
+    },
+    {
+      "t": 1791015155.777934,
+      "tid": 7780,
+      "event": "committed",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "backend": 2784,
+      "txn": 0
+    },
+    {
+      "t": 1791015155.777934,
+      "tid": 7780,
+      "event": "verify_result",
+      "target": "m01m02e2e-conc-m01m02e2e_concclosure_i5",
+      "status": null,
+      "error_code": null,
+      "error": "None",
+      "old_status": "archived",
+      "new_status": "active"
+    }
+  ],
+  "connect_count": 3,
+  "sequential": {
+    "first": {
+      "success": true,
+      "status": "CORRECTION_COMMITTED",
+      "durable": true,
+      "deduplicated": false,
+      "new_memory_id": "mem_3dad2c9bd8e0f9e00de63eb7d0fefcd940d936373aaf40d3b77e95dbfd49b820",
+      "new_status": "active",
+      "current_memory_id": "mem_3dad2c9bd8e0f9e00de63eb7d0fefcd940d936373aaf40d3b77e95dbfd49b820",
+      "error": null
+    },
+    "second": {
+      "success": true,
+      "status": "CORRECTION_DEDUPLICATED",
+      "durable": true,
+      "deduplicated": true,
+      "new_memory_id": "mem_3dad2c9bd8e0f9e00de63eb7d0fefcd940d936373aaf40d3b77e95dbfd49b820",
+      "new_status": "active",
+      "current_memory_id": "mem_3dad2c9bd8e0f9e00de63eb7d0fefcd940d936373aaf40d3b77e95dbfd49b820",
+      "error": null
+    },
+    "a2_after": {
+      "memory_id": "m01m02e2e-conc-seq-m01m02e2e_concclosure_i5",
+      "content": "顺序纠正基线内容。conc-closure-m01m02e2e_concclosure_i5-SEQ-A",
+      "status": "archived"
+    },
+    "b2_rows": [
+      {
+        "memory_id": "mem_3dad2c9bd8e0f9e00de63eb7d0fefcd940d936373aaf40d3b77e95dbfd49b820",
+        "status": "active"
+      }
+    ],
+    "edges_from_a2": [
+      {
+        "relation_id": "rel_cb0d25f953a39d8f5b7e5ba0a5a6494898bb824f42a65a4dd88bceac53392108",
+        "to_memory_id": "mem_3dad2c9bd8e0f9e00de63eb7d0fefcd940d936373aaf40d3b77e95dbfd49b820"
+      }
+    ],
+    "memory_delta": 1,
+    "relation_delta": 1
+  }
+}

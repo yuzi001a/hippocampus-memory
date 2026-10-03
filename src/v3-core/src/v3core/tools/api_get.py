@@ -1,4 +1,4 @@
-"""v3_get — 统一查入口 (v3_status / v3_search / v3_moc_overview / v3_moc_get / v3_prefetch / v3_get_message_context / hm_handbook_get / hm_get)"""
+"""v3_get — 统一查入口 (v3_status / v3_search / v3_moc_overview / v3_moc_get / v3_prefetch / v3_get_message_context / hm_handbook_get / hm_get / memory)"""
 from __future__ import annotations
 import json
 import logging
@@ -22,14 +22,26 @@ logger = logging.getLogger("v3core.tools.api_get")
 
 V3_GET_SCHEMA = {
     "name": "v3_get",
-    "description": "状态/搜索/手帐总览/手帐条目/prefetch/消息原文/handbook条目/hm统一读",
+    "description": (
+        "状态/搜索/手帐总览/手帐条目/prefetch/消息原文/handbook条目/hm统一读/"
+        "memory按ID读当前版本或完整版本历史"
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "target": {
                 "type": "string",
-                "enum": ["status", "search", "overview", "hand帐", "prefetch", "message", "handbook", "hm"],
-                "description": "查询目标: status=系统状态, search=搜索卡库, overview=手帐总览, hand帐=手帐条目, prefetch=召回, message=消息原文, handbook=handbook单条(key必填), hm=hm统一读(source_id必填)",
+                "enum": [
+                    "status", "search", "overview", "hand帐", "prefetch",
+                    "message", "handbook", "hm", "memory",
+                ],
+                "description": (
+                    "查询目标: status=系统状态, search=搜索卡库, overview=手帐总览, "
+                    "hand帐=手帐条目, prefetch=召回, message=消息原文, "
+                    "handbook=handbook单条(key必填), hm=hm统一读(source_id必填), "
+                    "memory=按 memory_id 读显式记忆 (mode=current 默认跟随更正到当前版本; "
+                    "mode=history 返回原始版本+完整版本/关系历史)"
+                ),
             },
             "query": {"type": "string", "description": "搜索关键词 (search/prefetch mode)"},
             "key": {"type": "string", "description": "手帐键名 (hand帐/handbook mode)"},
@@ -40,6 +52,23 @@ V3_GET_SCHEMA = {
                 "type": "string",
                 "enum": ["json", "context", "ids"],
                 "description": "prefetch 输出格式 (prefetch mode)",
+            },
+            "memory_id": {
+                "type": "string",
+                "description": "memory mode 必填: 要读取的显式记忆 memory_id",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["current", "history"],
+                "description": (
+                    "memory mode 读法: current=跟随更正关系解析到当前有效版本 (默认); "
+                    "history=返回请求的原始版本 + 完整版本/关系历史 (archived/current/"
+                    "superseded 逐条标注)。没有 latest-text-wins 读法"
+                ),
+            },
+            "include_history": {
+                "type": "boolean",
+                "description": "memory mode: 是否附带完整版本历史 (默认 False)",
             },
         },
         "required": ["target"],
@@ -91,8 +120,25 @@ def handle_v3_get(args: dict, **kw) -> str:
             if not source_id:
                 return json.dumps({"success": False, "error": "source_id required for hm mode"}, ensure_ascii=False)
             from .get_tool import handle_hm_get
-            return handle_hm_get({"source_id": source_id}, **kw)
+            return handle_hm_get(_hm_forward(args, source_id), **kw)
+        elif target == "memory":
+            from .memory_correction import handle_memory_target
+            return handle_memory_target(args, **kw)
         else:
             return json.dumps({"success": False, "error": f"unknown target: {target}"}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": _safe_err(e)}, ensure_ascii=False)
+
+
+def _hm_forward(args: dict, source_id: str) -> dict:
+    """Build the hm forward payload.
+
+    History parameters are forwarded only when the caller actually
+    supplied them — a legacy plain ``hm`` read keeps its exact existing
+    behaviour instead of silently switching to the canonical reader.
+    """
+    out: dict = {"source_id": source_id}
+    for key in ("mode", "include_history"):
+        if key in args:
+            out[key] = args[key]
+    return out
