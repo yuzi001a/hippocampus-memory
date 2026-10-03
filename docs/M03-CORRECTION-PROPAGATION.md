@@ -475,3 +475,66 @@ Open items added by this stage:
    explicitly permits a stub and says a paid model is not a merge blocker).
 3. `observer_note` / `yin_paragraph` remain invalidate-and-suppress only, with
    rebuild recorded as pending/manual.
+
+## Stage 4 delivered (2026-10-04) — real-PostgreSQL revalidation
+
+Stage 3's open item 2 above said the rebuild had no live-PostgreSQL E2E. That gap
+is now closed, and closing it found three defects that no in-memory fake could
+see.
+
+The 136-check driver (`evidence/m03-derived-propagation-20261003/m03_e2e.py`)
+drives the real public HTTP tool surface (`v3_store` / `v3_update`
+correct|propagate|rebuild) against a disposable PostgreSQL
+(`127.0.0.1:55432`), an isolated profile, an isolated source root
+(`v3core` resolved from the source root, not site-packages) and a
+credential-free stub provider. Every connection is port-allowlisted; the
+production port/database are refused by the gate before any statement.
+
+First real-PG run (`63b8596`) — **FAIL**:
+
+```text
+136 checks / 134 pass / 2 fail
+```
+
+The two failures were the injected-`PgPool` recall-lane assertions, and the run
+exposed three defects:
+
+| # | Defect | Mechanism | Consequence |
+|---|---|---|---|
+| A | `derived_invalidation._discover`: `int8range @> %s` | psycopg2 adapts a Python int as `int4`; `int8range @> integer` does not exist | real PG `UndefinedFunction` — propagation never wrote a single invalidation row |
+| B | `_acquire_lease(None, pg)` in `derived_invalidation` ×2 and `derived_rebuild` ×1 | `_acquire_lease(pool, pg)` is pool-slot-first; a real `PgPool` in the `pg` slot takes `_PgStoreLeaseAdapter`, whose `.connection` is a `PgLease`, not a DBAPI connection | sidecar read/write fails — suppression degrades and **fails OPEN** |
+| C | invalidation `INSERT` listed 12 target columns but 15 VALUES expressions | `NOW(), NULL, NULL` were appended to 12 `%s` | real PG `INSERT has more expressions than target columns` — the shipped writer had never succeeded once |
+
+Fixed in `0430382` (`fix(m03): repair real-pg invalidation writes and lease
+routing`), with `tests/test_m03_sql_arity_and_lease_routing.py` pinning A and C
+in CI.
+
+The 14 driver assertions that had encoded those defects as *expectations* were
+rewritten to express this document's contract instead — check count stays 136 and
+no assertion was removed, skipped, xfailed or weakened. The per-assertion
+classification is
+`evidence/m03-derived-propagation-20261003/m03-assertion-contract-classification.md`;
+two of the 14 are recorded there as `DRIVER_EXPECTATION_BUG`.
+
+Final revalidation of `0430382` on the same host, same disposable-PG setup, same
+136-check driver — **PASS**:
+
+```text
+136 checks / 136 pass / 0 fail / exit 0 / production mutation = NONE
+```
+
+Product-gate evidence from that run: the stale topic is **physically preserved**
+(`d1_body_never_rewritten`, `d1_physically_present_after_correction`) and
+**excluded from current injection** (`real_suppression_fn_drops_only_d1` →
+`removed=['topic_t_m03e2ed1']`, `kept=['topic_t_m03e2edok']`), while the unrelated
+control topic keeps being recalled. Idempotency and the missing-sidecar negative
+control are unchanged (`DEDUPLICATED` + `inserted == 0`; `MIGRATION_REQUIRED`).
+
+Reports: `m03-report-20261004_001402.json` (pre-fix FAIL, preserved unchanged) and
+`m03-report-20261004_031923.json` (post-fix PASS).
+
+Still open after this stage: `POST /prefetch` on the real public surface remains
+**NOT VERIFIED** on the offline test host (the stub embedding model name resolves
+as a HuggingFace repo id and blocks on 5 network retries for `tokenizer.json`,
+`WinError 10060`) — the same limitation as the pre-fix run. `observer_note` /
+`yin_paragraph` rebuild stays pending/manual.
