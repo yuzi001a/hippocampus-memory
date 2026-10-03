@@ -88,12 +88,19 @@ The current tested versions and exact evidence boundaries live in [STATUS.md](do
 
 A memory system is much less useful if it only starts remembering the day you install it.
 
-Hippocampus already contains import support for:
+Hippocampus now includes **one-command history import** for:
 
-- **Hermes history** — `state.db`, JSONL and JSON exports;
+- **Hermes** — `state.db`, JSONL and JSON exports;
+- **DeepSeek Harness (DSH)** — local `session.v*.jsonl.zstd` history;
+- **pi** — local session JSONL history;
 - **curated memory files** — `MEMORY.md`, `USER.md`, `SOUL.md`, `AGENTS.md` and other Markdown notes.
 
-A broader **one-click history migration** flow — automatic discovery plus DSH/pi history import — is the next installation milestone.
+```bash
+hippocampus import auto --dry-run   # discover and preview
+hippocampus import auto             # import supported local history
+```
+
+The import is idempotent, keeps source provenance, requires no LLM or embedding provider for the base path, and makes deterministic QA pairs available to recall immediately. See [Import existing history](docs/IMPORT.md).
 
 ---
 
@@ -194,11 +201,11 @@ Read the longer story in [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md).
 
 ## Where the project is now
 
-**Done:** durable core · install/bootstrap · shared bridge · pi automatic memory · DSH automatic memory · source trace · reliability hardening.
+**Done:** durable core · install/bootstrap · shared bridge · pi automatic memory · DSH automatic memory · source trace · reliability hardening · one-click history import.
 
-**Now:** one-click import of existing history.
+**Now:** **memory correction** — representing “A used to be true, but the user explicitly changed it to B” without erasing the original history.
 
-**Next:** memory inspection and correction, then temporal memory — understanding that “true once” does not always mean “true now.”
+**Next:** propagate corrections into derived memory, then temporal recall — understanding that “true once” does not always mean “true now.”
 
 See [Current status](docs/STATUS.md) for the maintained technical snapshot.
 
