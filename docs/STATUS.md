@@ -18,7 +18,7 @@ The project has completed its first major host-adapter phase:
 - source-trace closure for recalled QA references;
 - one-click import of existing history (Hermes / DSH / pi / memory-md).
 
-The one-click history import milestone has landed — see [`docs/IMPORT.md`](IMPORT.md) and `evidence/i01-history-import-20261003/` (isolated integration, 42/42 checks PASS). The main line now returns to memory inspection, correction, changed facts and temporal reasoning.
+One-click history import, explicit-memory correction, and **M03 derived correction propagation are complete**. M03 preserves stale derived artifacts physically while suppressing them from current recall when they can be deterministically linked to a user correction. Final isolated Y400 acceptance: **136/136 checks PASS**, exact-head CI green, production mutation NONE. Evidence: `evidence/m03-derived-propagation-20261003/`.
 
 ## Supported host surface
 
@@ -108,15 +108,22 @@ The host-adapter milestone is complete enough to stop making integrations the de
 
 **One-click history import has landed**: `hippocampus import auto` automatically discovers supported local agent history, previews it safely (`--dry-run`), imports it idempotently, and makes imported history usable by recall — see [`docs/IMPORT.md`](IMPORT.md) and `evidence/i01-history-import-20261003/`.
 
-The next product work focuses on:
+The immediate main-line work is a **P0 source-to-derived lifecycle repair** found during real long-running use:
 
-- **memory inspection** — users should be able to see what the system believes it remembers;
-- **memory correction** — a later correction should not leave an obsolete fact silently dominant;
-- **temporal state** — distinguish “was true then” from “is true now”;
-- **management UX** — make memory status, provenance and updates understandable without reading database rows;
-- **real usage feedback** — let product use decide which deeper recall/reasoning work matters next.
+- a source user turn can be accepted and flushed;
+- the assistant completion can arrive later;
+- if derivation state is tied to the flush lifecycle, that late completion can be skipped permanently and no QA-derived memory is ever created.
 
-The correction path is deliberately narrow: explicit user corrections outrank model inference; newer text is not automatically “more true”; M01/M02 do not attempt full derived-memory propagation or generic knowledge-graph reasoning. Those belong to M03/M04.
+This is a data-continuity defect, so it temporarily outranks M04 temporal reasoning.
+
+Planned order:
+
+1. **P0-A:** separate source acceptance from derivation completion so late assistant completions remain derivable;
+2. **P0-C:** preserve standalone assistant task/delivery summaries as their own derived record instead of making survival depend on a paired question;
+3. **P0-B:** repair the delta-writer / cumulative-consumer mismatch in longer-lived derived state;
+4. return to **M04 temporal reasoning**.
+
+M03 remains deliberately narrow: only deterministic lineage is automatically invalidated; unmapped historical derived content is not guessed by similarity or rewritten semantically.
 
 ## Research signal
 
