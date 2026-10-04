@@ -1,0 +1,78 @@
+{
+ "orphan_total": 7459,
+ "misattr_total": 0,
+ "orphan_by_type": {
+  "BG_PROC_COMPLETE": 1584,
+  "REAL_USER": 32,
+  "ASYNC_BATCH_COMPLETE": 2803,
+  "CTRL_MAX_TOOLS": 10,
+  "SESSION_START": 5,
+  "CTX_COMPACTION": 919,
+  "CTX_TASKLIST": 12,
+  "TITLE_GEN": 12,
+  "SKILL_INVOKED": 1504,
+  "CRON_JOB": 198,
+  "SYS_TOOL_ISSUE": 37,
+  "BG_PROCS_COMPLETE": 148,
+  "SYS_MODEL_SWITCH": 103,
+  "BG_SUBAGENTS_COMPLETE": 2,
+  "ASYNC_OTHER": 15,
+  "SYS_REASONING_ONLY": 1,
+  "CTX_STILL_IN_PROGRESS": 2,
+  "SYS_CUT_OFF": 72
+ },
+ "misattr_by_type": {},
+ "orphan_sessions": {
+  "BG_PROC_COMPLETE": 45,
+  "REAL_USER": 6,
+  "ASYNC_BATCH_COMPLETE": 50,
+  "CTRL_MAX_TOOLS": 3,
+  "SESSION_START": 2,
+  "CTX_COMPACTION": 29,
+  "CTX_TASKLIST": 6,
+  "TITLE_GEN": 12,
+  "SKILL_INVOKED": 288,
+  "CRON_JOB": 97,
+  "SYS_TOOL_ISSUE": 5,
+  "BG_PROCS_COMPLETE": 15,
+  "SYS_MODEL_SWITCH": 3,
+  "BG_SUBAGENTS_COMPLETE": 2,
+  "ASYNC_OTHER": 6,
+  "SYS_REASONING_ONLY": 1,
+  "CTX_STILL_IN_PROGRESS": 2,
+  "SYS_CUT_OFF": 2
+ },
+ "misattr_sessions": {},
+ "buckets": {
+  "async_completion": 4552,
+  "unknown": 32,
+  "control": 235,
+  "new_root": 1707,
+  "continuation": 933
+ },
+ "derived": 40233,
+ "derived_structural_recovery": 2046,
+ "terminal_excluded": 847,
+ "oob_opened": 92,
+ "async_contamination": 0,
+ "ctx_orphan_reasons": {
+  "anchor_none": 15,
+  "boundary_shadowed": 918
+ },
+ "boundary_source": {
+  "ASYNC": 1767,
+  "NEW_ROOT": 428
+ },
+ "model": "AFTER (current-worktree host_events.py + new sync_turn §3/§4 semantics)",
+ "meta": {
+  "generated": "2026-10-04 23:39:15",
+  "rows": 688934,
+  "dedup": 358483,
+  "sessions": 3568,
+  "source": "C:/Users/servi/AppData/Local/hermes/cache/scratch/p0c_tax_rows.pkl"
+ },
+ "oob_skipped": 0,
+ "oob_misattr": 0,
+ "control_drift": 0,
+ "normal_dialogue_pairing_regression": 0
+}

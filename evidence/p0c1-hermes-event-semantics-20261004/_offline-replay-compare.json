@@ -1,0 +1,48 @@
+{
+ "generated": "2026-10-04 23:39:15",
+ "source": "C:/Users/servi/AppData/Local/hermes/cache/scratch/p0c_tax_rows.pkl",
+ "rows": 688934,
+ "dedup": 358483,
+ "sessions": 3568,
+ "before_total_orphan_misattr": 10747,
+ "after_total_orphan_misattr": 7459,
+ "normal_dialogue_pairing_regression": 0,
+ "normal_dialogue_assistants_checked": 37653,
+ "regression_samples": [],
+ "empty_question_turns_excluded": 2,
+ "reclassified_in_normal_turns": {
+  "TERMINAL": 760,
+  "CONTINUATION": 35
+ },
+ "oob_rows": 92,
+ "oob_steer_display_kind": 92,
+ "oob_skipped_before": 92,
+ "oob_opened_after": 92,
+ "control_rows_opening_qa_before": 473,
+ "control_rows_opening_qa_after": 0,
+ "control_drift_types": {
+  "SYS_MODEL_SWITCH": 291,
+  "CTRL_MAX_TOOLS": 52,
+  "SYS_CUT_OFF": 49,
+  "CTRL_REJECTED": 48,
+  "SYS_TOOL_ISSUE": 15,
+  "TITLE_GEN": 12,
+  "SYS_REASONING_ONLY": 3,
+  "SYS_OTHER": 3
+ },
+ "async_contamination_before": 1290,
+ "async_contamination_after": 0,
+ "ctx_orphan_before": 2412,
+ "ctx_orphan_after": 933,
+ "ctx_misattr_before": 1276,
+ "ctx_misattr_after": 0,
+ "ctx_orphan_after_reasons": {
+  "anchor_none": 15,
+  "boundary_shadowed": 918
+ },
+ "variant_continuation_clears_boundary": {
+  "orphan_total": 6522,
+  "misattr_total": 0,
+  "ctx_orphan": 15
+ }
+}

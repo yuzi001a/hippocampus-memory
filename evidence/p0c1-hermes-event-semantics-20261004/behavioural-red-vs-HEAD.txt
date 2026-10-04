@@ -1,0 +1,51 @@
+...FFF.FFFFF                                                             [100%]
+================================== FAILURES ===================================
+E   AssertionError: BLOCKER: the post-flush continuation assistant must be durably appended to the U1 QA (snapshot anchor recovery); answer='A1-pre-flush' receipt={'ok': True, 'host': 'dsh', 'accepted': ['a2'], 'duplicate': ['u1', 'a1'], 'rejected': [], 'incomplete': [], 'held': [], 'events': {'u1': 'duplicate', 'a1': 'duplicate', 'a2': 'accepted'}, 'source_ids': {}} rows=[{'q': 'Q1 flush-then-continue', 'a': 'A1-pre-flush', 'mev': ['a1']}]
+    assert 'A2-post-compaction-late' in 'A1-pre-flush'
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:671: AssertionError: BLOCKER: the post-flush continuation assistant must be durably appended to the U1 QA (snapshot anchor recovery); answer='A1-pre-flush' receipt={'ok': True, 'host': 'dsh', 'accepted': ['a2'], 'duplicate': ['u1', 'a1'], 'rejected': [], 'incomplete': [], 'held': [], 'events': {'u1': 'duplicate', 'a1': 'duplicate', 'a2': 'accepted'}, 'source_ids': {}} rows=[{'q': 'Q1 flush-then-continue', 'a': 'A1-pre-flush', 'mev': ['a1']}]
+E   AssertionError: tasklist is CONTINUATION: must not flush/open a QA (no second row, no orphan); rows=[{'q': 'Q1 ctx-mgmt', 'a': 'A1-before-ctx', 'mev': ['a1']}, {'q': '[Your active task list was preserved across cont', 'a': 'A2-after-ctx', 'mev': ['a2']}]
+    assert 2 == 1
+     +  where 2 = len([{'id': 1, 'source_id': 'qa_sync/dsh/sess-p0c1-t5-tasklist/u1', 'session_id': 'sess-p0c1-t5-tasklist', 'turn_id': '1',...: 2, 'source_id': 'qa_sync/dsh/sess-p0c1-t5-tasklist/ctx', 'session_id': 'sess-p0c1-t5-tasklist', 'turn_id': '2', ...}])
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:694: AssertionError: tasklist is CONTINUATION: must not flush/open a QA (no second row, no orphan); rows=[{'q': 'Q1 ctx-mgmt', 'a': 'A1-before-ctx', 'mev': ['a1']}, {'q': '[Your active task list was preserved across cont', 'a': 'A2-after-ctx', 'mev': ['a2']}]
+E   AssertionError: still_in_progress is CONTINUATION: must not flush/open a QA (no second row, no orphan); rows=[{'q': 'Q1 ctx-mgmt', 'a': 'A1-before-ctx', 'mev': ['a1']}, {'q': '[STILL IN PROGRESS — this is the active request,', 'a': 'A2-after-ctx', 'mev': ['a2']}]
+    assert 2 == 1
+     +  where 2 = len([{'id': 1, 'source_id': 'qa_sync/dsh/sess-p0c1-t5-still_in_progress/u1', 'session_id': 'sess-p0c1-t5-still_in_progress...'qa_sync/dsh/sess-p0c1-t5-still_in_progress/ctx', 'session_id': 'sess-p0c1-t5-still_in_progress', 'turn_id': '2', ...}])
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:694: AssertionError: still_in_progress is CONTINUATION: must not flush/open a QA (no second row, no orphan); rows=[{'q': 'Q1 ctx-mgmt', 'a': 'A1-before-ctx', 'mev': ['a1']}, {'q': '[STILL IN PROGRESS — this is the active request,', 'a': 'A2-after-ctx', 'mev': ['a2']}]
+E   AssertionError: the OOB steer is a REAL user message → it must open its own QA with the extracted payload as the question; rows=[{'q': 'Q1 original', 'a': 'A1-original-answer\nA2-answer-to-steer', 'mev': ['a1', 'a2']}]
+    assert None is not None
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:747: AssertionError: the OOB steer is a REAL user message → it must open its own QA with the extracted payload as the question; rows=[{'q': 'Q1 original', 'a': 'A1-original-answer\nA2-answer-to-steer', 'mev': ['a1', 'a2']}]
+E   AssertionError: an async-boundary output must NOT pollute any QA; rows=[{'q': 'Q1 async-boundary', 'a': 'A1-human-answer\nA_ASYNC-autonomous-report', 'mev': ['a1', 'a_async']}]
+    assert 'A_ASYNC-autonomous-report' not in 'A1-human-an...omous-report'
+      
+      'A_ASYNC-autonomous-report' is contained here:
+        A1-human-answer
+        A_ASYNC-autonomous-report
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:775: AssertionError: an async-boundary output must NOT pollute any QA; rows=[{'q': 'Q1 async-boundary', 'a': 'A1-human-answer\nA_ASYNC-autonomous-report', 'mev': ['a1', 'a_async']}]
+E   AssertionError: a background-completion output must NOT pollute any QA; rows=[{'q': 'Q1 bg-boundary', 'a': 'A1-human-answer-bg\nA_BG-autonomous-report', 'mev': ['a1', 'a_bg']}]
+    assert 'A_BG-autonomous-report' not in 'A1-human-an...omous-report'
+      
+      'A_BG-autonomous-report' is contained here:
+        A1-human-answer-bg
+        A_BG-autonomous-report
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:794: AssertionError: a background-completion output must NOT pollute any QA; rows=[{'q': 'Q1 bg-boundary', 'a': 'A1-human-answer-bg\nA_BG-autonomous-report', 'mev': ['a1', 'a_bg']}]
+E   AssertionError: TERMINAL display-only notice must never become an answer; rows=[{'q': 'Q1 failed-turn', 'a': 'Your request was not processed. Send it again to retry.', 'mev': ['failed']}]
+    assert 'Your reques...in to retry.' not in 'Your reques...in to retry.'
+      
+      'Your request was n... it again to retry.' is contained here:
+        Your request was not processed. Send it again to retry.
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:808: AssertionError: TERMINAL display-only notice must never become an answer; rows=[{'q': 'Q1 failed-turn', 'a': 'Your request was not processed. Send it again to retry.', 'mev': ['failed']}]
+E   AssertionError: replayed late event must be merged exactly once; answer='A1-replay' receipts=[None, None, None]
+    assert 0 == 1
+     +  where 0 = <built-in method count of str object at 0x0000027538B488B0>('A2-replay-late')
+     +    where <built-in method count of str object at 0x0000027538B488B0> = 'A1-replay'.count
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:840: AssertionError: replayed late event must be merged exactly once; answer='A1-replay' receipts=[None, None, None]
+=========================== short test summary info ===========================
+FAILED tests/test_p0c1_host_event_semantics.py::test_t4_compaction_after_flush_structural_continuation
+FAILED tests/test_p0c1_host_event_semantics.py::test_t5_tasklist_still_in_progress_continuation[tasklist-[Your active task list was preserved across context compression]\n1. [ ] finish the pending audit]
+FAILED tests/test_p0c1_host_event_semantics.py::test_t5_tasklist_still_in_progress_continuation[still_in_progress-[STILL IN PROGRESS \u2014 this is the active request, resume it]]
+FAILED tests/test_p0c1_host_event_semantics.py::test_t7_out_of_band_real_user_opens_new_qa
+FAILED tests/test_p0c1_host_event_semantics.py::test_t8_async_batch_complete_no_pollution
+FAILED tests/test_p0c1_host_event_semantics.py::test_t9_background_process_complete_no_pollution
+FAILED tests/test_p0c1_host_event_semantics.py::test_t10_failed_turn_never_an_answer
+FAILED tests/test_p0c1_host_event_semantics.py::test_t11_replay_idempotent_structural_continuation
+8 failed, 4 passed, 19 deselected in 22.02s

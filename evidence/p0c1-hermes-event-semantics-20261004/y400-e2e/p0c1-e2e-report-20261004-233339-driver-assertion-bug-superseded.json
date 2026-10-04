@@ -1,0 +1,838 @@
+{
+  "scope": "P0-C1 Hermes host-event semantics — real V3Core over a disposable PostgreSQL; task book §13 (10 scenarios)",
+  "design": "docs/P0C1-HOST-EVENT-SEMANTICS.md",
+  "when": "2026-10-04T15:33:39.999241+00:00",
+  "timestamp": "20261004-233339",
+  "host_machine": "DESKTOP-EQP3OBU",
+  "python": "3.11.16",
+  "repo": "C:\\hp-testbed\\p0c1-hermes-event-semantics-20261004",
+  "git_head": "",
+  "target": {
+    "pg_host": "127.0.0.1",
+    "pg_port": 55432,
+    "pg_db": "p0c1e2e_20261004",
+    "pg_user": "f2e2e",
+    "password_in_report": false
+  },
+  "checks": [
+    {
+      "name": "PRE.bootstrap_cli_ok",
+      "pass": true,
+      "detail": "rc=0 applied=True stderr=''"
+    },
+    {
+      "name": "PRE.schema_conversation_stream_present",
+      "pass": true,
+      "detail": "public tables=['conversation_stream', 'derived_memory_invalidations', 'embedding_failures', 'explicit_memories', 'memory_relations', 'observation_embedding_chunks', 'observation_notes', 'qa_embedding_chunks', 'qa_pairs', 'schema_versions', 'topic_entries', 'topics', 'yin_paragraphs']"
+    },
+    {
+      "name": "PRE.schema_qa_pairs_present",
+      "pass": true,
+      "detail": "public tables=['conversation_stream', 'derived_memory_invalidations', 'embedding_failures', 'explicit_memories', 'memory_relations', 'observation_embedding_chunks', 'observation_notes', 'qa_embedding_chunks', 'qa_pairs', 'schema_versions', 'topic_entries', 'topics', 'yin_paragraphs']"
+    },
+    {
+      "name": "PRE.schema_host_turn_id_present",
+      "pass": true,
+      "detail": "conversation_stream columns=['content', 'embedding', 'event_id', 'host', 'host_turn_id', 'id', 'role', 'session_id', 'source', 'timestamp', 'tool_calls', 'tool_results', 'trigger', 'turn_id']"
+    },
+    {
+      "name": "PRE.schema_merged_event_ids_present",
+      "pass": true,
+      "detail": "qa_pairs columns=['answer', 'chars', 'created_at', 'embed_model', 'embedding', 'id', 'merged_event_ids', 'question', 'session_id', 'source', 'source_id', 'timestamp', 'tool_calls', 'tool_results', 'turn_id']"
+    },
+    {
+      "name": "PRE.no_embedding_configured",
+      "pass": true,
+      "detail": "safe_embed_cfg(config)=None (must be None)"
+    },
+    {
+      "name": "PRE.no_llm_configured",
+      "pass": true,
+      "detail": "llm.provider='' llm.model=''"
+    },
+    {
+      "name": "PRE.real_core_pg_connected",
+      "pass": true,
+      "detail": "PgEmbedStore.is_connected()=True target=127.0.0.1:55432/p0c1e2e_20261004"
+    },
+    {
+      "name": "PRE.live_buffer_embed_disabled",
+      "pass": true,
+      "detail": "LiveBuffer._embed_cfg=None"
+    },
+    {
+      "name": "S1.qa_count_one",
+      "pass": true,
+      "detail": "qa_pairs rows=1"
+    },
+    {
+      "name": "S1.question_is_u1",
+      "pass": true,
+      "detail": "question='Q1 normal'"
+    },
+    {
+      "name": "S1.answer_contains_a1",
+      "pass": true,
+      "detail": "answer='A1-normal-answer'"
+    },
+    {
+      "name": "S1.source_u1_one_row",
+      "pass": true,
+      "detail": "conversation_stream u1=1"
+    },
+    {
+      "name": "S1.source_a1_one_row",
+      "pass": true,
+      "detail": "conversation_stream a1=1"
+    },
+    {
+      "name": "S1.source_u2_one_row",
+      "pass": true,
+      "detail": "conversation_stream u2=1"
+    },
+    {
+      "name": "S2.qa_count_one",
+      "pass": true,
+      "detail": "qa_pairs rows=1"
+    },
+    {
+      "name": "S2.replay_accepted_nothing",
+      "pass": true,
+      "detail": "replay accepted=[]"
+    },
+    {
+      "name": "S2.replay_reported_duplicate",
+      "pass": true,
+      "detail": "replay duplicate=['u1', 'a1', 'a2', 'a3']"
+    },
+    {
+      "name": "S2.seg1_appears_once",
+      "pass": true,
+      "detail": "count(A1-seg-one)=1 answer='A1-seg-one\\nA2-seg-two\\nA3-seg-three'"
+    },
+    {
+      "name": "S2.seg2_appears_once",
+      "pass": true,
+      "detail": "count(A2-seg-two)=1 answer='A1-seg-one\\nA2-seg-two\\nA3-seg-three'"
+    },
+    {
+      "name": "S2.seg3_appears_once",
+      "pass": true,
+      "detail": "count(A3-seg-three)=1 answer='A1-seg-one\\nA2-seg-two\\nA3-seg-three'"
+    },
+    {
+      "name": "S2.source_u1_one_row",
+      "pass": true,
+      "detail": "conversation_stream u1=1"
+    },
+    {
+      "name": "S2.source_a1_one_row",
+      "pass": true,
+      "detail": "conversation_stream a1=1"
+    },
+    {
+      "name": "S2.source_a2_one_row",
+      "pass": true,
+      "detail": "conversation_stream a2=1"
+    },
+    {
+      "name": "S2.source_a3_one_row",
+      "pass": true,
+      "detail": "conversation_stream a3=1"
+    },
+    {
+      "name": "S3.qa_count_one",
+      "pass": true,
+      "detail": "qa_pairs rows=1"
+    },
+    {
+      "name": "S3.question_is_u1",
+      "pass": true,
+      "detail": "question='Q1 compaction'"
+    },
+    {
+      "name": "S3.answer_has_A1-pre-compaction",
+      "pass": true,
+      "detail": "answer='A1-pre-compaction\\nA2-post-compaction\\nA3-post-compaction'"
+    },
+    {
+      "name": "S3.answer_has_A2-post-compaction",
+      "pass": true,
+      "detail": "answer='A1-pre-compaction\\nA2-post-compaction\\nA3-post-compaction'"
+    },
+    {
+      "name": "S3.answer_has_A3-post-compaction",
+      "pass": true,
+      "detail": "answer='A1-pre-compaction\\nA2-post-compaction\\nA3-post-compaction'"
+    },
+    {
+      "name": "S3.ctx_marker_excluded",
+      "pass": true,
+      "detail": "answer='A1-pre-compaction\\nA2-post-compaction\\nA3-post-compaction'"
+    },
+    {
+      "name": "S3.ctx_not_written_to_source",
+      "pass": true,
+      "detail": "conversation_stream ctx=0"
+    },
+    {
+      "name": "S4.precondition_one_qa_with_a1",
+      "pass": true,
+      "detail": "qa_row=(4, 'A1-pre-flush', ['a1'], 'Q1 flush-then-continue') count=1"
+    },
+    {
+      "name": "S4.qa_count_still_one",
+      "pass": true,
+      "detail": "qa_pairs rows=1"
+    },
+    {
+      "name": "S4.question_still_u1",
+      "pass": true,
+      "detail": "question='Q1 flush-then-continue'"
+    },
+    {
+      "name": "S4.existing_answer_survives",
+      "pass": true,
+      "detail": "answer='A1-pre-flush\\nA2-post-compaction-late'"
+    },
+    {
+      "name": "S4.late_continuation_appended",
+      "pass": true,
+      "detail": "BLOCKER: answer='A1-pre-flush\\nA2-post-compaction-late' derivation={'a2': 'completed_late'}"
+    },
+    {
+      "name": "S4.late_continuation_once",
+      "pass": true,
+      "detail": "count=1 answer='A1-pre-flush\\nA2-post-compaction-late'"
+    },
+    {
+      "name": "S4.late_source_one_row",
+      "pass": true,
+      "detail": "conversation_stream a2=1"
+    },
+    {
+      "name": "S4.receipt_reports_derivation",
+      "pass": true,
+      "detail": "receipt['derivation']={'a2': 'completed_late'}"
+    },
+    {
+      "name": "S5.pre_steer_qa_preserved",
+      "pass": true,
+      "detail": "qa_u1=(5, 'A1-original-answer', ['a1'], 'Q1 original')"
+    },
+    {
+      "name": "S5.pre_steer_answer_preserved",
+      "pass": true,
+      "detail": "qa_u1=(5, 'A1-original-answer', ['a1'], 'Q1 original')"
+    },
+    {
+      "name": "S5.oob_opens_new_qa",
+      "pass": true,
+      "detail": "qa(oob)=(6, 'A2-answer-to-steer', ['a2'], '改成 B') all=[(5, 'Q1 original', 'A1-original-answer', ['a1']), (6, '改成 B', 'A2-answer-to-steer', ['a2'])]"
+    },
+    {
+      "name": "S5.oob_question_is_payload",
+      "pass": true,
+      "detail": "question='改成 B'"
+    },
+    {
+      "name": "S5.oob_answer_pairs_to_steer",
+      "pass": true,
+      "detail": "qa(oob)=(6, 'A2-answer-to-steer', ['a2'], '改成 B')"
+    },
+    {
+      "name": "S5.steer_reply_not_folded_into_pre_steer",
+      "pass": true,
+      "detail": "qa_u1=(5, 'A1-original-answer', ['a1'], 'Q1 original')"
+    },
+    {
+      "name": "S5.wrapper_not_in_any_question",
+      "pass": true,
+      "detail": "questions='Q1 original || 改成 B'"
+    },
+    {
+      "name": "S5.raw_source_preserves_wrapper",
+      "pass": true,
+      "detail": "conversation_stream oob content='[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position]\\n改成 B\\n[/OUT-OF-BAND USER MESSAGE]'"
+    },
+    {
+      "name": "S5.oob_source_one_row",
+      "pass": true,
+      "detail": "conversation_stream oob=1"
+    },
+    {
+      "name": "S5.qa_count_two",
+      "pass": true,
+      "detail": "qa_pairs rows=2"
+    },
+    {
+      "name": "S6.qa_count_one",
+      "pass": true,
+      "detail": "qa_pairs rows=1"
+    },
+    {
+      "name": "S6.question_is_u1",
+      "pass": true,
+      "detail": "question='Q1 model-switch'"
+    },
+    {
+      "name": "S6.answer_has_both_segments",
+      "pass": true,
+      "detail": "answer='A1-before-switch\\nA2-after-switch'"
+    },
+    {
+      "name": "S6.control_body_excluded_from_qa",
+      "pass": true,
+      "detail": "answer='A1-before-switch\\nA2-after-switch' q='Q1 model-switch'"
+    },
+    {
+      "name": "S6.control_not_written_to_source",
+      "pass": true,
+      "detail": "conversation_stream sys=0"
+    },
+    {
+      "name": "S7.human_qa_exists",
+      "pass": true,
+      "detail": "qa_u1=(8, 'A1-human-answer', ['a1'], 'Q1 async-boundary')"
+    },
+    {
+      "name": "S7.human_answer_preserved",
+      "pass": true,
+      "detail": "qa_u1=(8, 'A1-human-answer', ['a1'], 'Q1 async-boundary')"
+    },
+    {
+      "name": "S7.async_output_not_in_any_qa",
+      "pass": true,
+      "detail": "all_qa=[(8, 'Q1 async-boundary', 'A1-human-answer', ['a1'])]"
+    },
+    {
+      "name": "S7.async_source_durable",
+      "pass": true,
+      "detail": "conversation_stream a_async=1"
+    },
+    {
+      "name": "S7.async_marker_not_written_to_source",
+      "pass": true,
+      "detail": "conversation_stream async=0"
+    },
+    {
+      "name": "S7.async_output_held_not_derived",
+      "pass": false,
+      "detail": "held=[] derivation={'a1': 'applied'}"
+    },
+    {
+      "name": "S8.qa_count_one",
+      "pass": true,
+      "detail": "qa_pairs rows=1"
+    },
+    {
+      "name": "S8.valid_answer_preserved",
+      "pass": true,
+      "detail": "answer='A1-valid-answer'"
+    },
+    {
+      "name": "S8.failed_notice_not_an_answer",
+      "pass": true,
+      "detail": "answers_blob='A1-valid-answer'"
+    },
+    {
+      "name": "S8.failed_notice_not_a_question",
+      "pass": true,
+      "detail": "questions='Q1 failed-turn'"
+    },
+    {
+      "name": "S8.failed_not_written_to_source",
+      "pass": true,
+      "detail": "conversation_stream failed=0"
+    },
+    {
+      "name": "S9.qa_count_one",
+      "pass": true,
+      "detail": "qa_pairs rows=1"
+    },
+    {
+      "name": "S9.a2_appears_once",
+      "pass": true,
+      "detail": "count=1 answer='A1-replay\\nA2-replay-late'"
+    },
+    {
+      "name": "S9.a1_appears_once",
+      "pass": true,
+      "detail": "count=1 answer='A1-replay\\nA2-replay-late'"
+    },
+    {
+      "name": "S9.merged_event_ids_no_dup",
+      "pass": true,
+      "detail": "merged_event_ids=['a1', 'a2']"
+    },
+    {
+      "name": "S9.merged_event_ids_has_a2",
+      "pass": true,
+      "detail": "merged_event_ids=['a1', 'a2']"
+    },
+    {
+      "name": "S9.source_u1_one_row",
+      "pass": true,
+      "detail": "conversation_stream u1=1"
+    },
+    {
+      "name": "S9.source_a1_one_row",
+      "pass": true,
+      "detail": "conversation_stream a1=1"
+    },
+    {
+      "name": "S9.source_a2_one_row",
+      "pass": true,
+      "detail": "conversation_stream a2=1"
+    },
+    {
+      "name": "S9.replay2_accepted_nothing",
+      "pass": true,
+      "detail": "replay#2 accepted=[]"
+    },
+    {
+      "name": "S9.replay2_reported_duplicate",
+      "pass": true,
+      "detail": "replay#2 duplicate=['u1', 'a1', 'ctx', 'a2']"
+    },
+    {
+      "name": "S9.replay3_accepted_nothing",
+      "pass": true,
+      "detail": "replay#3 accepted=[]"
+    },
+    {
+      "name": "S9.replay3_reported_duplicate",
+      "pass": true,
+      "detail": "replay#3 duplicate=['u1', 'a1', 'ctx', 'a2']"
+    },
+    {
+      "name": "S10.pre_restart_one_qa_with_a1",
+      "pass": true,
+      "detail": "qa_row=(11, 'A1-restart', ['a1'], 'Q1 restart-continuation') count=1"
+    },
+    {
+      "name": "S10.restart_core_connected",
+      "pass": true,
+      "detail": "new core PgEmbedStore.is_connected()=True"
+    },
+    {
+      "name": "S10.qa_count_still_one_after_restart",
+      "pass": true,
+      "detail": "qa_pairs rows=1"
+    },
+    {
+      "name": "S10.question_still_u1",
+      "pass": true,
+      "detail": "question='Q1 restart-continuation'"
+    },
+    {
+      "name": "S10.a1_once",
+      "pass": true,
+      "detail": "count(A1-restart)=1 answer='A1-restart\\nA2-restart-late'"
+    },
+    {
+      "name": "S10.a2_appended_once",
+      "pass": true,
+      "detail": "count(A2-restart-late)=1 answer='A1-restart\\nA2-restart-late'"
+    },
+    {
+      "name": "S10.merged_event_ids_no_dup",
+      "pass": true,
+      "detail": "merged_event_ids=['a1', 'a2']"
+    },
+    {
+      "name": "S10.source_u1_one_row",
+      "pass": true,
+      "detail": "conversation_stream u1=1"
+    },
+    {
+      "name": "S10.source_a1_one_row",
+      "pass": true,
+      "detail": "conversation_stream a1=1"
+    },
+    {
+      "name": "S10.source_a2_one_row",
+      "pass": true,
+      "detail": "conversation_stream a2=1"
+    }
+  ],
+  "failures": [
+    {
+      "check": "S7.async_output_held_not_derived",
+      "detail": "held=[] derivation={'a1': 'applied'}"
+    }
+  ],
+  "scenarios": {
+    "S1_normal_qa": {
+      "session": "p0c1e2e-S1",
+      "receipts": {
+        "sync_u1": {
+          "ok": true,
+          "accepted": [
+            "u1"
+          ],
+          "duplicate": [],
+          "held": []
+        },
+        "sync_a1": {
+          "ok": true,
+          "accepted": [
+            "a1"
+          ],
+          "duplicate": [
+            "u1"
+          ],
+          "held": []
+        },
+        "sync_u2": {
+          "ok": true,
+          "accepted": [
+            "u2"
+          ],
+          "duplicate": [
+            "u1",
+            "a1"
+          ],
+          "held": []
+        }
+      },
+      "qa_row": [
+        1,
+        "A1-normal-answer",
+        [
+          "a1"
+        ],
+        "Q1 normal"
+      ]
+    },
+    "S2_multi_assistant": {
+      "session": "p0c1e2e-S2",
+      "receipts": {
+        "replay": {
+          "ok": true,
+          "accepted": [],
+          "duplicate": [
+            "u1",
+            "a1",
+            "a2",
+            "a3"
+          ],
+          "held": []
+        }
+      },
+      "qa_row": [
+        2,
+        "A1-seg-one\nA2-seg-two\nA3-seg-three",
+        [
+          "a1",
+          "a2",
+          "a3"
+        ],
+        "Q1 multi"
+      ]
+    },
+    "S3_compaction_continuation": {
+      "session": "p0c1e2e-S3",
+      "receipts": {
+        "sync": {
+          "ok": true,
+          "accepted": [
+            "a1",
+            "a2",
+            "a3"
+          ],
+          "duplicate": [
+            "u1"
+          ],
+          "held": []
+        }
+      },
+      "qa_row": [
+        3,
+        "A1-pre-compaction\nA2-post-compaction\nA3-post-compaction",
+        [
+          "a1",
+          "a2",
+          "a3"
+        ],
+        "Q1 compaction"
+      ]
+    },
+    "S4_compaction_after_flush": {
+      "session": "p0c1e2e-S4",
+      "receipts": {
+        "sync_after_flush": {
+          "ok": true,
+          "accepted": [
+            "a2"
+          ],
+          "duplicate": [
+            "u1",
+            "a1"
+          ],
+          "held": [],
+          "derivation": {
+            "a2": "completed_late"
+          }
+        }
+      },
+      "pre_flush_qa": [
+        4,
+        "A1-pre-flush",
+        [
+          "a1"
+        ],
+        "Q1 flush-then-continue"
+      ],
+      "qa_row_after": [
+        4,
+        "A1-pre-flush\nA2-post-compaction-late",
+        [
+          "a1",
+          "a2"
+        ],
+        "Q1 flush-then-continue"
+      ]
+    },
+    "S5_oob_user": {
+      "session": "p0c1e2e-S5",
+      "receipts": {
+        "sync": {
+          "ok": true,
+          "accepted": [
+            "a1",
+            "oob",
+            "a2"
+          ],
+          "duplicate": [
+            "u1"
+          ],
+          "held": []
+        }
+      },
+      "qa_u1": [
+        5,
+        "A1-original-answer",
+        [
+          "a1"
+        ],
+        "Q1 original"
+      ],
+      "qa_oob": [
+        6,
+        "A2-answer-to-steer",
+        [
+          "a2"
+        ],
+        "改成 B"
+      ],
+      "raw_oob_content": "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position]\n改成 B\n[/OUT-OF-BAND USER MESSAGE]"
+    },
+    "S6_control_transparency": {
+      "session": "p0c1e2e-S6",
+      "receipts": {
+        "sync": {
+          "ok": true,
+          "accepted": [
+            "a1",
+            "a2"
+          ],
+          "duplicate": [
+            "u1"
+          ],
+          "held": []
+        }
+      },
+      "qa_row": [
+        7,
+        "A1-before-switch\nA2-after-switch",
+        [
+          "a1",
+          "a2"
+        ],
+        "Q1 model-switch"
+      ]
+    },
+    "S7_async_contamination": {
+      "session": "p0c1e2e-S7",
+      "receipts": {
+        "sync": {
+          "ok": true,
+          "accepted": [
+            "a1",
+            "a_async"
+          ],
+          "duplicate": [
+            "u1"
+          ],
+          "held": [],
+          "derivation": {
+            "a1": "applied"
+          }
+        }
+      },
+      "qa_u1": [
+        8,
+        "A1-human-answer",
+        [
+          "a1"
+        ],
+        "Q1 async-boundary"
+      ],
+      "all_qa": [
+        [
+          8,
+          "Q1 async-boundary",
+          "A1-human-answer",
+          [
+            "a1"
+          ]
+        ]
+      ]
+    },
+    "S8_failed_turn": {
+      "session": "p0c1e2e-S8",
+      "receipts": {
+        "sync": {
+          "ok": true,
+          "accepted": [],
+          "duplicate": [
+            "u1",
+            "a1"
+          ],
+          "held": []
+        }
+      },
+      "qa_row": [
+        9,
+        "A1-valid-answer",
+        [
+          "a1"
+        ],
+        "Q1 failed-turn"
+      ],
+      "all_qa": [
+        [
+          9,
+          "Q1 failed-turn",
+          "A1-valid-answer",
+          [
+            "a1"
+          ]
+        ]
+      ]
+    },
+    "S9_replay": {
+      "session": "p0c1e2e-S9",
+      "receipts": [
+        {
+          "ok": true,
+          "accepted": [
+            "a2"
+          ],
+          "duplicate": [
+            "u1",
+            "a1"
+          ],
+          "held": []
+        },
+        {
+          "ok": true,
+          "accepted": [],
+          "duplicate": [
+            "u1",
+            "a1",
+            "ctx",
+            "a2"
+          ],
+          "held": []
+        },
+        {
+          "ok": true,
+          "accepted": [],
+          "duplicate": [
+            "u1",
+            "a1",
+            "ctx",
+            "a2"
+          ],
+          "held": []
+        }
+      ],
+      "qa_row": [
+        10,
+        "A1-replay\nA2-replay-late",
+        [
+          "a1",
+          "a2"
+        ],
+        "Q1 replay-continuation"
+      ],
+      "merged_event_ids": [
+        "a1",
+        "a2"
+      ]
+    },
+    "S10_restart": {
+      "session": "p0c1e2e-S10",
+      "receipts": {
+        "post_restart_sync": {
+          "ok": true,
+          "accepted": [
+            "a2"
+          ],
+          "duplicate": [
+            "u1",
+            "a1"
+          ],
+          "held": [],
+          "derivation": {
+            "a1": "already_merged",
+            "a2": "completed_late"
+          }
+        }
+      },
+      "pre_restart_qa": [
+        11,
+        "A1-restart",
+        [
+          "a1"
+        ],
+        "Q1 restart-continuation"
+      ],
+      "post_restart_qa": [
+        11,
+        "A1-restart\nA2-restart-late",
+        [
+          "a1",
+          "a2"
+        ],
+        "Q1 restart-continuation"
+      ],
+      "merged_event_ids": [
+        "a1",
+        "a2"
+      ]
+    }
+  },
+  "run_root": "C:\\hp-testbed\\p0c1-hermes-event-semantics-20261004\\evidence\\p0c1-hermes-event-semantics-20261004\\e2e-runs\\20261004-233339",
+  "baseline": {
+    "llm_configured": false,
+    "embedding_configured": false,
+    "note": "no embed section -> safe_embed_cfg None -> no external API call"
+  },
+  "verdict": "FAIL",
+  "isolation": {
+    "home": "C:\\hp-testbed\\p0c1-hermes-event-semantics-20261004\\evidence\\p0c1-hermes-event-semantics-20261004\\e2e-runs\\20261004-233339\\home",
+    "data": "C:\\hp-testbed\\p0c1-hermes-event-semantics-20261004\\evidence\\p0c1-hermes-event-semantics-20261004\\e2e-runs\\20261004-233339\\data",
+    "profile_dir": "C:\\hp-testbed\\p0c1-hermes-event-semantics-20261004\\evidence\\p0c1-hermes-event-semantics-20261004\\e2e-runs\\20261004-233339\\home\\.v3-core\\profiles\\p0c1e2e",
+    "config_path": "C:\\hp-testbed\\p0c1-hermes-event-semantics-20261004\\evidence\\p0c1-hermes-event-semantics-20261004\\e2e-runs\\20261004-233339\\home\\.v3-core\\profiles\\p0c1e2e\\config.yaml",
+    "dotenv": "C:\\hp-testbed\\p0c1-hermes-event-semantics-20261004\\evidence\\p0c1-hermes-event-semantics-20261004\\e2e-runs\\20261004-233339\\home\\.v3-core\\.env"
+  },
+  "bootstrap": {
+    "ok": true,
+    "detail": "rc=0 applied=True stderr=''"
+  },
+  "check_count": 88,
+  "finished_at": "2026-10-04T15:34:26.561368+00:00"
+}
