@@ -122,7 +122,7 @@ class LiveBuffer:
 
     def enqueue(self, session_id: str, msg_id: str, content: str = '', role: str = '',
                 turn_id: str = '', timestamp=None, tool_calls=None, tool_results=None,
-                host: str = '') -> bool | None:
+                host: str = '', host_turn: str = '') -> bool | None:
         """Enqueue a live message.
 
         Return contract (2026-09-07 compression-aware durability, B + C):
@@ -152,8 +152,10 @@ class LiveBuffer:
             timestamp = _parse_msg_timestamp(timestamp)
         except (ImportError, AttributeError):
             pass
+        # P0-A: host_turn (the caller's host turn_id) is the 10th element — it
+        # rides the durable marker so a restart replays the same provenance.
         item = (session_id, msg_id, content, role, turn_id, timestamp, tool_calls,
-                tool_results, str(host or ''))
+                tool_results, str(host or ''), str(host_turn or ''))
         # Cross-process accepted/pending identity gate: do this before
         # computing or persisting a new content-sensitive job id.
         if self.has_durable_marker(session_id, msg_id, content, role, turn_id,
@@ -404,6 +406,12 @@ class LiveBuffer:
             _item_host = str(item[8]).strip() if len(item) > 8 and item[8] else ""
             if _item_host and _item_host != _LEGACY_HOST:
                 _payload["host"] = _item_host
+            # P0-A: only fold host_turn into the hash when it is present, so an
+            # item without provenance keeps the exact pre-P0-A job_id (old
+            # durable markers stay addressable).
+            _item_host_turn = str(item[9]).strip() if len(item) > 9 and item[9] else ""
+            if _item_host_turn:
+                _payload["ht"] = _item_host_turn
             payload = json.dumps(_payload, sort_keys=True, ensure_ascii=False, default=str)
             return hashlib.sha256(payload.encode("utf-8")).hexdigest()
         except Exception:
@@ -436,6 +444,11 @@ class LiveBuffer:
                 "tool_calls": item[6] if len(item)>6 else None,
                 "tool_results": item[7] if len(item)>7 else None,
             }
+            # P0-A: carry host-turn provenance across a restart. Written only
+            # when present so pre-existing markers (no key) stay unchanged.
+            _ht = str(item[9]).strip() if len(item) > 9 and item[9] else ""
+            if _ht:
+                payload["host_turn"] = _ht
             with self._durability_lock:
                 dirp.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -518,7 +531,12 @@ class LiveBuffer:
                     # 9-tuple slot 8).  Pre-F2 payloads have no host key and
                     # recover as "" (legacy namespace), as before.
                     host = str(data.get("host") or "")
-                    item = (session_id, msg_id, content, role, turn_id, ts, tc, tr, host)
+                    # P0-A: restore host-turn provenance (10th slot). Payloads
+                    # written before P0-A have no key and recover as "" (unknown),
+                    # exactly as before.
+                    host_turn = str(data.get("host_turn") or "")
+                    item = (session_id, msg_id, content, role, turn_id, ts, tc, tr,
+                            host, host_turn)
                     # 2026-09-07 (C): register the recovered job into the
                     # in-process pending set so the same LiveBuffer
                     # instance does not double-enqueue it.  The durable
@@ -889,6 +907,11 @@ class LiveBuffer:
             _flush_host = str(item[8]).strip() if len(item) > 8 and item[8] else ""
             if _flush_host:
                 metadata["host"] = _flush_host
+            # P0-A: carry the host turn to the source row so a late assistant
+            # event can resolve its QA identity deterministically.
+            _flush_host_turn = str(item[9]).strip() if len(item) > 9 and item[9] else ""
+            if _flush_host_turn:
+                metadata["host_turn_id"] = _flush_host_turn
             if msg_id:
                 metadata["event_id"] = msg_id
             # check fence before PG lease

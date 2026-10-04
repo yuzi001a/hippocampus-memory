@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS public.qa_pairs (
     source        TEXT         NOT NULL DEFAULT 'live_sync',
     tool_calls    JSONB        NOT NULL DEFAULT '[]'::jsonb,
     tool_results  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    merged_event_ids JSONB     NOT NULL DEFAULT '[]'::jsonb,
     embedding     VECTOR(1024),
     embed_model   TEXT         NOT NULL DEFAULT '',
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
@@ -148,6 +149,11 @@ ALTER TABLE public.qa_pairs
     ADD COLUMN IF NOT EXISTS embed_model TEXT NOT NULL DEFAULT '';
 ALTER TABLE public.qa_pairs
     ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW();
+-- P0-A: per-QA membership ledger of the assistant events already merged into
+-- the answer row. Idempotent late-derivation guard (data model §4); the
+-- DEFAULT keeps every historic row a valid empty ledger.
+ALTER TABLE public.qa_pairs
+    ADD COLUMN IF NOT EXISTS merged_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 -- Canonical idempotency: source_id is the retry-safe identifier.
 -- DO NOTHING (per __init__.py ON CONFLICT (source_id) DO NOTHING) makes a
@@ -196,7 +202,8 @@ CREATE TABLE IF NOT EXISTS public.conversation_stream (
     source        TEXT         DEFAULT 'live_buffer',
     embedding     VECTOR(1024),
     tool_calls    JSONB        NOT NULL DEFAULT '[]'::jsonb,
-    tool_results  JSONB        NOT NULL DEFAULT '[]'::jsonb
+    tool_results  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    host_turn_id  TEXT
 );
 
 -- WHERE-NOT-EXISTS dedupe predicate relies on (session_id, role, timestamp).
@@ -223,6 +230,17 @@ ALTER TABLE public.conversation_stream
 CREATE UNIQUE INDEX IF NOT EXISTS conversation_stream_host_session_event_uniq
     ON public.conversation_stream (host, session_id, event_id)
     WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL;
+
+-- P0-A source provenance (additive only, 2026-10-04): host_turn_id records
+-- which *host* turn (the caller's turn_id, not the sync batch turn_id) a
+-- source row belongs to, so a late assistant event can deterministically
+-- resolve its QA identity after flush/restart. Nullable with a partial index;
+-- historic rows (NULL) are untouched and unconstrained; no backfill.
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS host_turn_id TEXT;
+CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
+    ON public.conversation_stream (session_id, host_turn_id)
+    WHERE host_turn_id IS NOT NULL;
 
 -- -----------------------------------------------------------------------------
 -- topics — observer topic card (replaces the archived v3_cards). Evidence:

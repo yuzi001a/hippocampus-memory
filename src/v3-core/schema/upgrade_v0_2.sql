@@ -146,6 +146,11 @@ ALTER TABLE public.qa_pairs
     ADD COLUMN IF NOT EXISTS embed_model  TEXT NOT NULL DEFAULT '';
 ALTER TABLE public.qa_pairs
     ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW();
+-- P0-A: per-QA membership ledger of assistant events already merged into the
+-- answer row (same DDL as alpha_bootstrap.sql). Existing rows default to an
+-- empty ledger.
+ALTER TABLE public.qa_pairs
+    ADD COLUMN IF NOT EXISTS merged_event_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 ALTER TABLE public.topics
     ADD COLUMN IF NOT EXISTS note_ref         TEXT;
@@ -176,6 +181,15 @@ ALTER TABLE public.conversation_stream
 CREATE UNIQUE INDEX IF NOT EXISTS conversation_stream_host_session_event_uniq
     ON public.conversation_stream (host, session_id, event_id)
     WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL;
+
+-- P0-A source provenance (additive only, 2026-10-04): same DDL as
+-- alpha_bootstrap.sql so existing installs converge with fresh bootstrap.
+-- Nullable host_turn_id + partial index; historic NULL rows untouched.
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS host_turn_id TEXT;
+CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
+    ON public.conversation_stream (session_id, host_turn_id)
+    WHERE host_turn_id IS NOT NULL;
 
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
 
