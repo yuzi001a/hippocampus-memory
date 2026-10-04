@@ -201,11 +201,11 @@ Read the longer story in [Why Hippocampus](docs/WHY_HIPPOCAMPUS.md).
 
 ## Where the project is now
 
-**Done:** durable core · install/bootstrap · shared bridge · pi automatic memory · DSH automatic memory · source trace · reliability hardening · one-click history import · explicit correction · derived-memory correction propagation.
+**Done:** durable core · install/bootstrap · shared bridge · pi automatic memory · DSH automatic memory · source trace · reliability hardening · one-click history import · explicit correction · derived-memory correction propagation · late-assistant QA derivation recovery.
 
-**Now:** close a source-to-derived lifecycle gap where a late assistant completion can arrive after a flush boundary and never become a QA-derived memory.
+**Now:** preserve standalone assistant task/delivery summaries even when there is no paired user question.
 
-**Next:** preserve standalone assistant task summaries, then repair cumulative derived-state semantics before returning to temporal recall.
+**Next:** repair cumulative derived-state semantics before returning to temporal recall.
 
 See [Current status](docs/STATUS.md) for the maintained technical snapshot.
 
