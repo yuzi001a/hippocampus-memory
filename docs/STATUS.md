@@ -108,20 +108,15 @@ The host-adapter milestone is complete enough to stop making integrations the de
 
 **One-click history import has landed**: `hippocampus import auto` automatically discovers supported local agent history, previews it safely (`--dry-run`), imports it idempotently, and makes imported history usable by recall — see [`docs/IMPORT.md`](IMPORT.md) and `evidence/i01-history-import-20261003/`.
 
-The immediate main-line work is a **P0 source-to-derived lifecycle repair** found during real long-running use:
+**P0-A is complete.** Late assistant completions can now finish the correct QA derivation after flush, after a newer user turn, across interleaved sessions, and after restart, without duplicating raw source rows or QA rows. The final isolated Y400 real-PostgreSQL acceptance passed **36/36**; exact-head CI was green; temporary test rows were cleaned and production mutation closed at NONE.
 
-- a source user turn can be accepted and flushed;
-- the assistant completion can arrive later;
-- if derivation state is tied to the flush lifecycle, that late completion can be skipped permanently and no QA-derived memory is ever created.
+The immediate main-line task is now **P0-C**:
 
-This is a data-continuity defect, so it temporarily outranks M04 temporal reasoning.
+1. preserve standalone assistant task/delivery summaries as their own derived record instead of making survival depend on a paired question;
+2. then **P0-B:** repair the delta-writer / cumulative-consumer mismatch in longer-lived derived state;
+3. then return to **M04 temporal reasoning**.
 
-Planned order:
-
-1. **P0-A:** separate source acceptance from derivation completion so late assistant completions remain derivable;
-2. **P0-C:** preserve standalone assistant task/delivery summaries as their own derived record instead of making survival depend on a paired question;
-3. **P0-B:** repair the delta-writer / cumulative-consumer mismatch in longer-lived derived state;
-4. return to **M04 temporal reasoning**.
+P0-C must stay distinct from P0-A: a genuinely unpaired assistant message should not be fabricated into a QA pair merely to make it survive.
 
 M03 remains deliberately narrow: only deterministic lineage is automatically invalidated; unmapped historical derived content is not guessed by similarity or rewritten semantically.
 
