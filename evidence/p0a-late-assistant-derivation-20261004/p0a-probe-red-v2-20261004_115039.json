@@ -1,0 +1,147 @@
+{
+  "when": "2026-10-04T03:51:23.336574+00:00",
+  "scenarios": {
+    "S1 baseline Q->A": {
+      "verdict": "PASS",
+      "observed": {
+        "rows": 1,
+        "answer": "A1 immediate"
+      },
+      "expected_on_unfixed_main": "PASS"
+    },
+    "S2 Q->flush->late A": {
+      "verdict": "FAIL",
+      "observed": {
+        "rows": 1,
+        "answer": "A1-PROGRESS",
+        "late_receipt": {
+          "accepted": [
+            "a3"
+          ],
+          "duplicate": [
+            "u1",
+            "a1"
+          ],
+          "held": [
+            "a3"
+          ]
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S3 Q1->flush->Q2->late A1": {
+      "verdict": "FAIL",
+      "observed": {
+        "q1": "",
+        "q2": null,
+        "pending": {
+          "q": "Q2 second",
+          "a_len": 0,
+          "q_msg_id": "u2"
+        },
+        "late_receipt": {
+          "accepted": [
+            "a1"
+          ],
+          "duplicate": [
+            "u1",
+            "u2"
+          ],
+          "held": [
+            "a1"
+          ]
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S4 interleaved sessions": {
+      "verdict": "FAIL",
+      "observed": {
+        "Q_A": "A_A-PROGRESS",
+        "Q_B2_row": null,
+        "all_rows": [
+          [
+            "Q_A",
+            "A_A-PROGRESS"
+          ],
+          [
+            "Q_B",
+            ""
+          ]
+        ]
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S5 replay x3": {
+      "verdict": "FAIL",
+      "observed": {
+        "qa_rows": 0,
+        "marker_count": 0,
+        "answer": "",
+        "receipts": [
+          {
+            "accepted": [
+              "a1"
+            ],
+            "duplicate": [
+              "u1"
+            ],
+            "held": []
+          },
+          {
+            "accepted": [],
+            "duplicate": [
+              "u1",
+              "a1"
+            ],
+            "held": []
+          },
+          {
+            "accepted": [],
+            "duplicate": [
+              "u1",
+              "a1"
+            ],
+            "held": []
+          }
+        ]
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S6 restart recovery": {
+      "verdict": "FAIL",
+      "observed": {
+        "rows": 1,
+        "answer": "A1-PROG",
+        "late_receipt": {
+          "accepted": [
+            "a1",
+            "a9"
+          ],
+          "duplicate": [
+            "u1"
+          ],
+          "held": [
+            "a1",
+            "a9"
+          ]
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    }
+  },
+  "red_signature_as_expected": true,
+  "fs_sentinel": {
+    "added": 1,
+    "removed": 0,
+    "changed": 0,
+    "suspicious": [],
+    "diff_sample": {
+      "added": [
+        "j\\journal_20261004\\115112_1791085872.md"
+      ],
+      "removed": [],
+      "changed": []
+    }
+  }
+}

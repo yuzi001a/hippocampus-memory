@@ -83,6 +83,25 @@ def _lease_pg_store(pg: Any, timeout: float | None = 5, *, deadline=None):
         yield conn
 
 
+def _jsonb_str_list(value: Any) -> list[str]:
+    """Coerce a JSONB array column (list, or its JSON text form) to a str list.
+
+    psycopg2 decodes ``jsonb`` to a Python list, but fakes/legacy drivers may
+    hand back the raw text.  A malformed/absent value yields ``[]`` — never an
+    exception, because this feeds a correctness-critical membership test.
+    """
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed]
+        except Exception:
+            return []
+    return []
+
+
 def _resolve_base_path_for_lock(core: "V3Core") -> str:
     """P0-C (2026-08-26): 解析 core 的 basePath 供 advisory-lock 工厂用。
 
@@ -930,6 +949,9 @@ class V3Core:
                     pending = data.get("pending")
                     if not isinstance(pending, dict) or not pending.get("q"):
                         continue
+                    # P0-A: pre-fix durable markers have no a_event_ids; keep
+                    # them loadable (flush also reads it via .get()).
+                    pending.setdefault("a_event_ids", [])
                     job_id = str(data.get("job_id") or self._qa_job_id(session_id, pending))
                     attempts = int(data.get("embedding_attempts", 0) or 0)
                     if attempts >= 3 or data.get("retryable") is False or data.get("embedding_status") == "poisoned":
@@ -3477,6 +3499,15 @@ class V3Core:
         produced post-restart duplicate QA rows.
         """
         live = self.live_buffer
+        # P0-A: the canonical item carries the host turn at slot 9 (10-tuple).
+        # Forward it to LiveBuffer.enqueue so the source row can record
+        # host_turn_id; absent/legacy callers resolve to "".
+        _host_turn = ""
+        try:
+            if item is not None and len(item) > 9:
+                _host_turn = str(item[9] or "")
+        except Exception:
+            _host_turn = ""
         probe = getattr(live, "event_status", None)
         if callable(probe):
             try:
@@ -3514,6 +3545,7 @@ class V3Core:
                 tool_calls=tool_calls or [],
                 tool_results=tool_results or [],
                 host=host or "",
+                host_turn=_host_turn,
             )
         except TypeError:
             _ok = live.enqueue(
@@ -3718,7 +3750,8 @@ class V3Core:
             _msg_tool_results = msg.get("tool_results") or msg.get("tool_result") or []
             _msg_host = str(msg.get("host") or _call_host or "").strip()
             _msg_item = (session_id, msg_id, content, role, session_turn,
-                         _msg_ts, _msg_tools, _msg_tool_results, _msg_host)
+                         _msg_ts, _msg_tools, _msg_tool_results, _msg_host,
+                         str(msg.get("turn_id") or ""))
 
 
             # ── Phase v4: 就地 QA 配对 ──
@@ -3784,6 +3817,7 @@ class V3Core:
                     "q_ts": datetime.now(timezone.utc),
                     "tool_calls": [],
                     "tool_results": [],
+                    "a_event_ids": [],
                 }
                 try:
                     _receipt["source_ids"][msg_id] = self._qa_source_id(
@@ -3808,35 +3842,106 @@ class V3Core:
                     _receipt["rejected"].append(msg_id)
                     # Do not mutate pending QA until source ingest accepts.
                     continue
-                if _status == "duplicate":
-                    _receipt["duplicate"].append(msg_id)
+                _is_dup = (_status == "duplicate")
+                # ── P0-A (2026-10-04): source-accepted != QA-derived ──
+                # The late-derivation state machine is gated to a REAL host.
+                # With an empty/legacy host the historical behaviour is kept
+                # byte-for-byte: duplicate -> continue, hold_orphan -> held,
+                # pending None -> skip.  Only a namespaced host gets the
+                # durable re-derivation path (see _resolve_late_assistant_derivation).
+                _late_recovery_host = bool(_msg_host) and _msg_host != _BC_LEGACY_HOST
+                if not _late_recovery_host:
+                    if _is_dup:
+                        _receipt["duplicate"].append(msg_id)
+                        processed_this_call.add(cursor_key)
+                        continue
+                    _receipt["accepted"].append(msg_id)
+                    _pairing = _qa_pairing_decision(
+                        role="assistant",
+                        event_turn_id=msg.get("turn_id"),
+                        pending_turn_id=(pending or {}).get("q_event_turn") if isinstance(pending, dict) else None,
+                        pending_has_answer=bool((pending or {}).get("a")) if isinstance(pending, dict) else False,
+                    )
+                    if _pairing == "hold_orphan":
+                        # 乱序/跨 turn: 源层已收下, 但不猜配对 (宁可不派生)
+                        _receipt["held"].append(msg_id)
+                        processed_this_call.add(cursor_key)
+                        continue
+                    if pending is None:
+                        # 没有 pending q → 跳过 (避免孤儿 answer)
+                        processed_this_call.add(cursor_key)
+                        continue
+                    # 累加 a (可能有多个 assistant 段落, 用换行合并)
+                    if pending["a"]:
+                        pending["a"] += "\n" + content
+                    else:
+                        pending["a"] = content
+                    # 收集 assistant 自己的 tool_calls
+                    tc = msg.get("tool_calls") or []
+                    if isinstance(tc, list) and tc:
+                        pending["tool_calls"].extend(tc)
                     processed_this_call.add(cursor_key)
                     continue
-                _receipt["accepted"].append(msg_id)
+                # ── P0-A new path (real host) ──
+                # accepted/duplicate both continue into pairing; duplicate no
+                # longer early-exits, because "source accepted" does not mean
+                # "QA derived".
+                if _is_dup:
+                    _receipt["duplicate"].append(msg_id)
+                else:
+                    _receipt["accepted"].append(msg_id)
                 _pairing = _qa_pairing_decision(
                     role="assistant",
                     event_turn_id=msg.get("turn_id"),
                     pending_turn_id=(pending or {}).get("q_event_turn") if isinstance(pending, dict) else None,
                     pending_has_answer=bool((pending or {}).get("a")) if isinstance(pending, dict) else False,
                 )
+                if _pairing == "append" and pending is not None:
+                    _members = pending.get("a_event_ids")
+                    if not isinstance(_members, list):
+                        _members = []
+                        pending["a_event_ids"] = _members
+                    if _is_dup and msg_id in _members:
+                        # This very event is already merged into this pending:
+                        # nothing to append, no double content.
+                        _receipt.setdefault("derivation", {})[msg_id] = "already_merged"
+                        processed_this_call.add(cursor_key)
+                        continue
+                    if pending.get("a"):
+                        pending["a"] += "\n" + content
+                    else:
+                        pending["a"] = content
+                    tc = msg.get("tool_calls") or []
+                    if isinstance(tc, list) and tc:
+                        pending["tool_calls"].extend(tc)
+                    if msg_id not in _members:
+                        _members.append(msg_id)
+                    _receipt.setdefault("derivation", {})[msg_id] = "applied"
+                    processed_this_call.add(cursor_key)
+                    continue
+                # hold_orphan / pending None / duplicate not yet merged:
+                # resolve against durable truth.  On None keep the pre-existing
+                # held/skip semantics (never guess a pairing).
+                _late_status = None
+                if msg.get("turn_id"):
+                    try:
+                        _late_status = self._resolve_late_assistant_derivation(
+                            session_id=session_id, host=_msg_host, msg_id=msg_id,
+                            content=content, event_turn=msg.get("turn_id"),
+                            timestamp=_msg_ts,
+                        )
+                    except Exception as _e_late:
+                        logger.warning(
+                            "sync_turn late derivation 失败 (非阻塞): %s",
+                            _safe_err(_e_late)[:120],
+                        )
+                        _late_status = None
+                if _late_status:
+                    _receipt.setdefault("derivation", {})[msg_id] = _late_status
+                    processed_this_call.add(cursor_key)
+                    continue
                 if _pairing == "hold_orphan":
-                    # 乱序/跨 turn: 源层已收下, 但不猜配对 (宁可不派生)
                     _receipt["held"].append(msg_id)
-                    processed_this_call.add(cursor_key)
-                    continue
-                if pending is None:
-                    # 没有 pending q → 跳过 (避免孤儿 answer)
-                    processed_this_call.add(cursor_key)
-                    continue
-                # 累加 a (可能有多个 assistant 段落, 用换行合并)
-                if pending["a"]:
-                    pending["a"] += "\n" + content
-                else:
-                    pending["a"] = content
-                # 收集 assistant 自己的 tool_calls
-                tc = msg.get("tool_calls") or []
-                if isinstance(tc, list) and tc:
-                    pending["tool_calls"].extend(tc)
                 processed_this_call.add(cursor_key)
                 continue
             # 写 live_buffer (融合后: LiveBuffer 是唯一消息河写入路径 — conversation_stream)
@@ -4068,6 +4173,325 @@ class V3Core:
                 return f"qa_sync/{host_key}/{session_id}/{q_msg_id}"
             return f"qa_sync/{session_id}/{q_turn}/{q_msg_id[:16]}"
         return f"qa_sync/{session_id}/{q_turn}"
+
+    def _resolve_late_assistant_derivation(self, *, session_id: str, host: str,
+                                           msg_id: str, content: str,
+                                           event_turn, timestamp=None) -> str | None:
+        """P0-A: durably re-derive a late assistant event into its owning QA.
+
+        Called from ``sync_turn`` when an assistant event was already accepted
+        by the source layer but its QA derivation did not happen — pending was
+        flushed, replaced by a newer user turn, or lost to a restart.
+
+        Returns one of:
+
+        * ``"completed_late"`` — the owning QA row existed and this event was
+          atomically appended to its answer + merged_event_ids.
+        * ``"recovered_late"`` — the owning QA row did not exist yet; the pair
+          was rebuilt from the durable U1 and submitted through the normal
+          flush chain (NOT parked on ``context.pending_qa``).
+        * ``"already_merged"`` — durable truth proves this event is already in
+          the owning QA (replay / concurrent double-write).
+        * ``None`` — not resolvable (no host turn, no U1, no PG, any error):
+          the caller keeps its pre-existing held/skip semantics.  Never raises.
+
+        Correctness rests entirely on the durable queries + the SQL guard; the
+        per-session memo is only a replay accelerator (DESIGN-p0a §7).
+        """
+        try:
+            if not session_id or not msg_id or not event_turn:
+                return None
+            try:
+                from .bridge_contract import LEGACY_HOST as _LEGACY
+            except Exception:  # pragma: no cover
+                _LEGACY = "legacy"
+            host_key = str(host or "").strip()
+            if not host_key or host_key == _LEGACY:
+                return None
+            try:
+                _content_hash = hashlib.sha1(
+                    (content or "").encode("utf-8", errors="replace")
+                ).hexdigest()[:12]
+            except Exception:
+                _content_hash = ""
+            memo_key = f"{msg_id}|{_content_hash}"
+
+            context = None
+            try:
+                context = self.get_session_context(session_id, create=False)
+            except Exception:
+                context = None
+            if context is not None:
+                try:
+                    with self._qa_lock:
+                        if context.late_derivation_memo.get(memo_key) == "done":
+                            return "already_merged"
+                except Exception:
+                    pass
+
+            def _remember() -> None:
+                if context is None:
+                    return
+                try:
+                    with self._qa_lock:
+                        context.late_derivation_memo[memo_key] = "done"
+                except Exception:
+                    pass
+
+            pg = self._pg or self.pg
+            if pg is None:
+                return None
+
+            # ── step 1+2: locate U1 and the QA row it owns (durable) ──
+            u1 = None
+            qa_row = None
+            try:
+                with _lease_pg_store(pg) as conn:
+                    if not conn:
+                        return None
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT id, event_id, turn_id, content, timestamp, "
+                            "tool_calls, tool_results "
+                            "FROM conversation_stream "
+                            "WHERE session_id=%s AND role='user' AND host=%s "
+                            "AND host_turn_id=%s ORDER BY id DESC LIMIT 1",
+                            (session_id, host_key, str(event_turn)),
+                        )
+                        u1 = cur.fetchone()
+                        if u1 is None:
+                            return None
+                        qa_source_id = self._qa_source_id(
+                            session_id, str(u1[2]), u1[1], host=host_key)
+                        cur.execute(
+                            "SELECT id, answer, merged_event_ids, question "
+                            "FROM qa_pairs WHERE source_id=%s LIMIT 1",
+                            (qa_source_id,),
+                        )
+                        qa_row = cur.fetchone()
+            except Exception as e:
+                logger.warning(
+                    "_resolve_late_assistant_derivation 查询失败 (非阻塞): %s",
+                    _safe_err(e)[:120],
+                )
+                return None
+
+            if qa_row is not None:
+                return self._late_merge_into_qa(
+                    pg=pg, qa_row=qa_row, msg_id=msg_id, content=content,
+                    remember=_remember,
+                )
+
+            # ── step 5: Q not flushed yet → rebuild the pair and flush ──
+            u1_content = str(u1[3] or "")
+            if not u1_content.strip():
+                return None
+            pending = {
+                "q": u1_content,
+                "a": content,
+                "q_msg_id": u1[1],
+                "q_turn": str(u1[2]),
+                "q_event_turn": str(event_turn),
+                "host": host_key,
+                "q_ts": u1[4],
+                "tool_calls": u1[5] or [],
+                "tool_results": u1[6] or [],
+                "a_event_ids": [msg_id],
+            }
+            ok = False
+            try:
+                ok = bool(self._submit_flush(session_id, pending))
+            except Exception as e:
+                logger.warning(
+                    "_resolve_late_assistant_derivation submit 失败: %s",
+                    _safe_err(e)[:120],
+                )
+                ok = False
+            if not ok:
+                try:
+                    _p = self._persist_qa_pending(session_id, pending)
+                    ok = _p is not None and Path(_p).exists()
+                except Exception:
+                    ok = False
+            if ok:
+                _remember()
+                return "recovered_late"
+            return None
+        except Exception as e:
+            logger.warning(
+                "_resolve_late_assistant_derivation 失败 (非阻塞): %s",
+                _safe_err(e)[:120],
+            )
+            return None
+
+    def _late_merge_into_qa(self, *, pg, qa_row, msg_id: str, content: str,
+                            remember) -> str | None:
+        """Atomically append one late event to an existing QA row.
+
+        Returns ``"completed_late"`` / ``"already_merged"`` / ``None``.  The
+        UPDATE guard ``NOT (merged_event_ids @> [msg_id])`` makes concurrent
+        double-writes collapse to exactly one append.
+        """
+        try:
+            qa_id = qa_row[0]
+            old_answer = qa_row[1] or ""
+            members = _jsonb_str_list(qa_row[2])
+            question = qa_row[3] or ""
+            if msg_id in members:
+                remember()
+                return "already_merged"
+            new_answer = content if not old_answer else old_answer + "\n" + content
+            members_json = json.dumps([msg_id])
+
+            # Embedding recompute (mirrors _flush_pending_qa): short path =
+            # one vector; long path = rebuild qa_embedding_chunks + aggregate
+            # parent.  Any failure keeps the OLD vector and records a durable
+            # embedding_failure marker — the answer merge still lands.
+            embed_cfg = safe_embed_cfg(self._config) if self._config else None
+            emb_str = None
+            fp = ""
+            embedding_error: BaseException | None = None
+            pending_long_chunks: list[tuple] = []
+            if embed_cfg is not None:
+                try:
+                    from .embedding import embed_batch
+                    from .embed_chunks import (
+                        build_qa_embedding_representation,
+                        aggregate_parent_embedding,
+                    )
+                    from .pg_store import _resolve_embed_cfg
+                    fp, _ = _resolve_embed_cfg(embed_cfg)
+                    short_text_for_emb = (
+                        f"{question}\n{new_answer}" if new_answer else question)
+                    representation = build_qa_embedding_representation(
+                        question, new_answer, embed_cfg,
+                        short_text_for_emb=short_text_for_emb,
+                    )
+                    if representation.is_long:
+                        chunk_texts = [c.embed_text for c in representation.chunks]
+                        child_vecs = embed_batch(
+                            chunk_texts, embed_cfg, collision_safe_key=True)
+                        if len(child_vecs) != len(representation.chunks):
+                            raise RuntimeError(
+                                f"late-merge provider returned {len(child_vecs)} "
+                                f"vectors for {len(representation.chunks)} chunks")
+                        parent = aggregate_parent_embedding(child_vecs)
+                        emb_str = "[" + ",".join(str(x) for x in parent) + "]"
+                        pending_long_chunks = list(
+                            zip(representation.chunks, child_vecs))
+                    else:
+                        embeds = embed_batch([representation.embed_text], embed_cfg)
+                        if embeds and embeds[0] and any(x != 0.0 for x in embeds[0]):
+                            emb_str = "[" + ",".join(str(x) for x in embeds[0]) + "]"
+                        else:
+                            raise RuntimeError(
+                                "embedding API returned an empty vector")
+                except Exception as e:
+                    embedding_error = e
+                    emb_str = None
+                    fp = ""
+                    pending_long_chunks = []
+
+            rowcount = 0
+            with _lease_pg_store(pg) as conn:
+                if not conn:
+                    return None
+                try:
+                    with conn.cursor() as cur:
+                        if emb_str:
+                            cur.execute(
+                                "UPDATE qa_pairs "
+                                "SET answer = CASE WHEN COALESCE(answer,'') = '' "
+                                "THEN %s ELSE answer || E'\\n' || %s END, "
+                                "merged_event_ids = merged_event_ids || %s::jsonb, "
+                                "embedding = %s::vector, embed_model = %s "
+                                "WHERE id = %s AND NOT (merged_event_ids @> %s::jsonb)",
+                                (content, content, members_json,
+                                 emb_str, fp, qa_id, members_json),
+                            )
+                        else:
+                            cur.execute(
+                                "UPDATE qa_pairs "
+                                "SET answer = CASE WHEN COALESCE(answer,'') = '' "
+                                "THEN %s ELSE answer || E'\\n' || %s END, "
+                                "merged_event_ids = merged_event_ids || %s::jsonb "
+                                "WHERE id = %s AND NOT (merged_event_ids @> %s::jsonb)",
+                                (content, content, members_json,
+                                 qa_id, members_json),
+                            )
+                        try:
+                            rowcount = int(getattr(cur, "rowcount", 0) or 0)
+                        except Exception:
+                            rowcount = 0
+                        if rowcount > 0 and pending_long_chunks:
+                            self._replace_qa_embedding_chunks(
+                                cur, qa_id, pending_long_chunks, fp)
+                        if rowcount > 0 and embedding_error is not None:
+                            try:
+                                from .embed_failures import record_embedding_failure
+                                record_embedding_failure(
+                                    conn=conn, entity_table="qa_pairs",
+                                    entity_id=str(qa_id), phase="late_merge",
+                                    error=embedding_error, commit=False,
+                                )
+                            except Exception:
+                                pass
+                    conn.commit()
+                except Exception as e:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    logger.warning(
+                        "_late_merge_into_qa UPDATE 失败 (非阻塞): %s",
+                        _safe_err(e)[:120],
+                    )
+                    return None
+            if rowcount > 0:
+                remember()
+                return "completed_late"
+            # guard says a concurrent writer already merged this event
+            remember()
+            return "already_merged"
+        except Exception as e:
+            logger.warning(
+                "_late_merge_into_qa 失败 (非阻塞): %s", _safe_err(e)[:120],
+            )
+            return None
+
+    @staticmethod
+    def _replace_qa_embedding_chunks(cur, qa_id, chunks: list[tuple], fp: str) -> None:
+        """Rebuild qa_embedding_chunks for a late-merged long QA (flush parity)."""
+        cur.execute("DELETE FROM qa_embedding_chunks WHERE qa_id=%s", (qa_id,))
+        for chunk, child_vec in chunks:
+            child_str = "[" + ",".join(str(x) for x in child_vec) + "]"
+            cur.execute(
+                """
+                INSERT INTO qa_embedding_chunks
+                    (qa_id, chunk_index, source_field, source_start,
+                     source_end, source_sha256, token_count,
+                     representation_version, embedding, embed_model,
+                     content, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                        %s::vector, %s, %s, NOW())
+                ON CONFLICT (qa_id, chunk_index) DO UPDATE SET
+                    source_field=EXCLUDED.source_field,
+                    source_start=EXCLUDED.source_start,
+                    source_end=EXCLUDED.source_end,
+                    source_sha256=EXCLUDED.source_sha256,
+                    token_count=EXCLUDED.token_count,
+                    representation_version=EXCLUDED.representation_version,
+                    embedding=EXCLUDED.embedding,
+                    embed_model=EXCLUDED.embed_model,
+                    content=EXCLUDED.content
+                """,
+                (
+                    qa_id, chunk.chunk_index, chunk.source_field,
+                    chunk.source_start, chunk.source_end, chunk.source_sha256,
+                    chunk.token_count, chunk.representation_version,
+                    child_str, fp, chunk.text,
+                ),
+            )
 
     def _flush_pending_qa(self, session_id: str, pending: dict) -> None:
         """把 pending 的 (q, a) 配对算 embedding + 写 qa_pairs -- fence-aware, durable ack"""
@@ -4335,9 +4759,11 @@ class V3Core:
                             """
                             INSERT INTO qa_pairs
                                 (source_id, session_id, turn_id, question, answer,
-                                 tool_calls, tool_results, timestamp, source, embedding, embed_model, created_at)
+                                 tool_calls, tool_results, timestamp, source, embedding, embed_model,
+                                 merged_event_ids, created_at)
                             VALUES (%s, %s, %s, %s, %s,
-                                    %s::jsonb, %s::jsonb, %s, %s, %s::vector, %s, NOW())
+                                    %s::jsonb, %s::jsonb, %s, %s, %s::vector, %s,
+                                    %s::jsonb, NOW())
                             ON CONFLICT (source_id) DO NOTHING
                             """,
                             (
@@ -4346,6 +4772,7 @@ class V3Core:
                                 json.dumps(pending.get("tool_results") or [], ensure_ascii=False),
                                 timestamp, "live_sync",
                                 emb_str, fp,
+                                json.dumps(pending.get("a_event_ids") or [], ensure_ascii=False),
                             ),
                         )
                     else:
@@ -4353,9 +4780,11 @@ class V3Core:
                             """
                             INSERT INTO qa_pairs
                                 (source_id, session_id, turn_id, question, answer,
-                                 tool_calls, tool_results, timestamp, source, created_at)
+                                 tool_calls, tool_results, timestamp, source,
+                                 merged_event_ids, created_at)
                             VALUES (%s, %s, %s, %s, %s,
-                                    %s::jsonb, %s::jsonb, %s, %s, NOW())
+                                    %s::jsonb, %s::jsonb, %s, %s,
+                                    %s::jsonb, NOW())
                             ON CONFLICT (source_id) DO NOTHING
                             """,
                             (
@@ -4363,6 +4792,7 @@ class V3Core:
                                 json.dumps(pending.get("tool_calls") or [], ensure_ascii=False),
                                 json.dumps(pending.get("tool_results") or [], ensure_ascii=False),
                                 timestamp, "live_sync",
+                                json.dumps(pending.get("a_event_ids") or [], ensure_ascii=False),
                             ),
                         )
                     if pending_long_chunks:

@@ -67,6 +67,20 @@ class V3SessionContext:
     #      explicit discard by the caller).
     synced_message_ids: set[str] = field(default_factory=set)
 
+    # P0-A (2026-10-04): in-process memo for late assistant QA derivation.
+    #
+    # When an assistant event was already accepted by the source layer
+    # (conversation_stream) but its QA derivation did not happen — because the
+    # pending was flushed, replaced by a newer user turn, or lost to a process
+    # restart — sync_turn re-derives it durably.  This dict only short-circuits
+    # the repeated DB lookup for a replay of the same (msg_id, content) within
+    # one Core lifetime; it carries NO correctness.  A restart dropping the
+    # memo merely costs one extra durable query.  Keys written ("done"):
+    # completed_late / recovered_late / already_merged.  Unresolved (held)
+    # events are deliberately NOT memoized so a later replay can still heal
+    # them once their host turn becomes visible.
+    late_derivation_memo: dict = field(default_factory=dict)
+
 
 # Short name for callers that do not need the package prefix.
 SessionContext = V3SessionContext

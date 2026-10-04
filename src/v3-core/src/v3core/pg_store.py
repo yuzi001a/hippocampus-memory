@@ -379,11 +379,16 @@ class PgEmbedStore:
             # F2 identity normalisation (additive; legacy callers unaffected).
             _host = str(metadata.get("host") or "").strip() or "legacy"
             _event = str(metadata.get("event_id") or metadata.get("msg_id") or "").strip()
+            # P0-A provenance: the host turn this source row belongs to.
+            # Absent/empty for callers that do not carry it; the identity
+            # INSERT binds it as NULL in that case (see
+            # _insert_message_with_identity).
+            _host_turn = str(metadata.get("host_turn_id") or "").strip()
             if _host and session_id and _event:
                 _inserted = self._insert_message_with_identity(
                     cur, session_id, role, content, turn_id,
                     metadata.get("timestamp"), tc_json, tr_json,
-                    emb_str, _host, _event)
+                    emb_str, _host, _event, _host_turn)
                 conn.commit()
                 return _inserted
             # Normalize all supported input forms before binding to timestamptz.
@@ -498,11 +503,37 @@ class PgEmbedStore:
             return True
         return False
 
+    #: The provenance column added by the P0-A upgrade. A missing column here
+    #: means a partial upgrade window (code new, schema SQL not yet applied);
+    #: it justifies dropping ONLY this column, never the F2 identity.
+    _HOST_TURN_COLUMN = "host_turn_id"
+
+    def _is_missing_host_turn_column_error(self, err: Exception) -> bool:
+        """True only for SQLSTATE 42703 undefined_column on ``host_turn_id``.
+
+        Postgres reports undefined_column with SQLSTATE 42703 and the missing
+        name quoted in the message; both are required so an unrelated missing
+        column (or any other SQL error) is never mistaken for the partial
+        upgrade window. Mirrors :meth:`_is_f2_preschema_error`'s SQLSTATE-first
+        detection. Never logs the statement or its parameters.
+        """
+        sqlstate = getattr(err, "sqlstate", None) or ""
+        diag = getattr(err, "diag", None)
+        if not sqlstate and diag is not None:
+            sqlstate = getattr(diag, "sqlstate", None) or ""
+        if not sqlstate:
+            pgcode = getattr(type(err), "pgcode", None)
+            sqlstate = pgcode if isinstance(pgcode, str) else ""
+        if sqlstate != "42703":
+            return False
+        return f'"{self._HOST_TURN_COLUMN}"' in str(err)
+
     def _insert_message_with_identity(self, cur, session_id: str, role: str,
                                       content: str, turn_id,
                                       timestamp, tc_json: str, tr_json: str,
                                       emb_str: str | None,
-                                      host: str, event_id: str) -> bool:
+                                      host: str, event_id: str,
+                                      host_turn_id: str = "") -> bool:
         """Atomic insert-if-absent for one canonical (host, session, event).
 
         Returns True when the row was freshly inserted, False when the
@@ -528,8 +559,27 @@ class PgEmbedStore:
         else re-raises with the transaction left to the caller's lease.
         """
         ts_value = _normalize_timestamp(timestamp)
+        # P0-A: bind host_turn_id only when present; empty provenance is stored
+        # as NULL (the partial index ignores NULL rows).
+        _ht_value = host_turn_id or None
         if emb_str:
             _stmt = """
+                        INSERT INTO conversation_stream
+                            (session_id, role, content, trigger, turn_id, timestamp, source,
+                             embedding, tool_calls, tool_results, host, event_id, host_turn_id)
+                        VALUES (%s, %s, %s, 'live_buffer', %s,
+                                COALESCE(%s::timestamptz, NOW()), 'live_buffer',
+                                %s::vector, %s::jsonb, %s::jsonb, %s, %s, %s)
+                        ON CONFLICT (host, session_id, event_id)
+                        WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL
+                        DO NOTHING RETURNING id
+                    """
+            _params = (session_id, role, content, turn_id, ts_value,
+                       emb_str, tc_json, tr_json, host, event_id, _ht_value)
+            # The same identity INSERT WITHOUT the P0-A provenance column; used
+            # only by the partial-upgrade fallback below so the F2 atomic
+            # guarantee is retained when the schema SQL has not yet run.
+            _stmt_no_ht = """
                         INSERT INTO conversation_stream
                             (session_id, role, content, trigger, turn_id, timestamp, source,
                              embedding, tool_calls, tool_results, host, event_id)
@@ -540,10 +590,21 @@ class PgEmbedStore:
                         WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL
                         DO NOTHING RETURNING id
                     """
-            _params = (session_id, role, content, turn_id, ts_value,
-                       emb_str, tc_json, tr_json, host, event_id)
         else:
             _stmt = """
+                        INSERT INTO conversation_stream
+                            (session_id, role, content, trigger, turn_id, timestamp, source,
+                             tool_calls, tool_results, host, event_id, host_turn_id)
+                        VALUES (%s, %s, %s, 'live_buffer', %s,
+                                COALESCE(%s::timestamptz, NOW()), 'live_buffer',
+                                %s::jsonb, %s::jsonb, %s, %s, %s)
+                        ON CONFLICT (host, session_id, event_id)
+                        WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL
+                        DO NOTHING RETURNING id
+                    """
+            _params = (session_id, role, content, turn_id, ts_value,
+                       tc_json, tr_json, host, event_id, _ht_value)
+            _stmt_no_ht = """
                         INSERT INTO conversation_stream
                             (session_id, role, content, trigger, turn_id, timestamp, source,
                              tool_calls, tool_results, host, event_id)
@@ -554,11 +615,43 @@ class PgEmbedStore:
                         WHERE host IS NOT NULL AND session_id IS NOT NULL AND event_id IS NOT NULL
                         DO NOTHING RETURNING id
                     """
-            _params = (session_id, role, content, turn_id, ts_value,
-                       tc_json, tr_json, host, event_id)
+        _params_no_ht = _params[:-1]
         try:
             cur.execute(_stmt, _params)
         except Exception as _e:
+            # Partial-upgrade tolerance (P0-A host_turn_id): an install whose
+            # schema SQL has not yet added the provenance column rejects ONLY
+            # that column (42703 with the quoted name). Roll back and retry the
+            # SAME F2 identity INSERT without it — canonical idempotency is
+            # kept, only provenance is dropped. If that retry also fails, its
+            # error falls through to the existing pre-F2 / legacy handling
+            # below, whose trigger and order are unchanged.
+            if self._is_missing_host_turn_column_error(_e):
+                _conn = getattr(cur, "connection", None)
+                if _conn is None:
+                    raise
+                try:
+                    _conn.rollback()
+                except Exception as _rb:
+                    raise RuntimeError(
+                        "cannot roll back after the host_turn_id fallback was "
+                        f"required; the source row was NOT written: {_safe_err(_rb)}"
+                    ) from _e
+                logger.warning(
+                    "insert_message host_turn_id fallback (partial upgrade): %s "
+                    "— canonical identity retained, host-turn provenance "
+                    "UNAVAILABLE until the upgrade is applied",
+                    _safe_err(_e)[:160])
+                try:
+                    cur.execute(_stmt_no_ht, _params_no_ht)
+                except Exception as _e2:
+                    _e = _e2
+                else:
+                    try:
+                        _row = cur.fetchone()
+                    except Exception:
+                        _row = None
+                    return _row is not None
             # Old-schema tolerance (mirrors the embed_model fallback style):
             # an install that has not run the F2 upgrade has no host/event_id
             # columns or partial index.  Fall back to the legacy shape so the
