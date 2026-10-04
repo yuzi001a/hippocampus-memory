@@ -1,0 +1,72 @@
+{
+ "orphan_total": 7418,
+ "misattr_total": 3329,
+ "orphan_by_type": {
+  "BG_PROC_COMPLETE": 978,
+  "ASYNC_BATCH_COMPLETE": 2243,
+  "SESSION_START": 5,
+  "CTX_COMPACTION": 2370,
+  "SKILL_INVOKED": 1507,
+  "CRON_JOB": 200,
+  "BG_PROCS_COMPLETE": 60,
+  "BG_SUBAGENTS_COMPLETE": 1,
+  "CTX_STILL_IN_PROGRESS": 42,
+  "OUT_OF_BAND": 5,
+  "ASYNC_OTHER": 7
+ },
+ "misattr_by_type": {
+  "BG_PROC_COMPLETE": 614,
+  "ASYNC_BATCH_COMPLETE": 576,
+  "CTRL_EMPTY_RESPONSE": 12,
+  "CTX_COMPACTION": 1276,
+  "BG_PROCS_COMPLETE": 91,
+  "ASYNC_OTHER": 8,
+  "BG_SUBAGENTS_COMPLETE": 1,
+  "OUT_OF_BAND": 751
+ },
+ "orphan_sessions": {
+  "BG_PROC_COMPLETE": 30,
+  "ASYNC_BATCH_COMPLETE": 31,
+  "SESSION_START": 2,
+  "CTX_COMPACTION": 39,
+  "SKILL_INVOKED": 289,
+  "CRON_JOB": 99,
+  "BG_PROCS_COMPLETE": 10,
+  "BG_SUBAGENTS_COMPLETE": 1,
+  "CTX_STILL_IN_PROGRESS": 7,
+  "OUT_OF_BAND": 2,
+  "ASYNC_OTHER": 2
+ },
+ "misattr_sessions": {
+  "BG_PROC_COMPLETE": 40,
+  "ASYNC_BATCH_COMPLETE": 40,
+  "CTRL_EMPTY_RESPONSE": 2,
+  "CTX_COMPACTION": 49,
+  "BG_PROCS_COMPLETE": 12,
+  "ASYNC_OTHER": 4,
+  "BG_SUBAGENTS_COMPLETE": 1,
+  "OUT_OF_BAND": 63
+ },
+ "buckets": {
+  "async_completion": 4579,
+  "new_root": 1712,
+  "continuation": 3688,
+  "control": 768
+ },
+ "derived": 43211,
+ "dropped_no_pending": 1,
+ "skip_empty": 108021,
+ "model": "BEFORE (HEAD binary injection skip) — p0c_tax_e.py faithful replication",
+ "meta": {
+  "generated": "2026-10-04 23:39:15",
+  "rows": 688934,
+  "dedup": 358483,
+  "sessions": 3568,
+  "source": "C:/Users/servi/AppData/Local/hermes/cache/scratch/p0c_tax_rows.pkl"
+ },
+ "oob_skipped": 92,
+ "oob_misattr": 751,
+ "control_drift": 473,
+ "async_contamination": 1290,
+ "normal_dialogue_pairing_regression": 0
+}

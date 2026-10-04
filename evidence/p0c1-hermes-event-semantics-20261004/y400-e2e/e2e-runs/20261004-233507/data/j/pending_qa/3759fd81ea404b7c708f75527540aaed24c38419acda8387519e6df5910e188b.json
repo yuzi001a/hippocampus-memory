@@ -1,0 +1,1 @@
+{"job_id": "3759fd81ea404b7c708f75527540aaed24c38419acda8387519e6df5910e188b", "pending": {"a": "", "a_event_ids": [], "host": "p0c1e2e", "q": "Q2 next", "q_event_turn": "T2", "q_msg_id": "u2", "q_ts": "2026-10-04 15:35:18.693883+00:00", "q_turn": "4", "tool_calls": [], "tool_results": []}, "session_id": "p0c1e2e-S2", "version": 1}

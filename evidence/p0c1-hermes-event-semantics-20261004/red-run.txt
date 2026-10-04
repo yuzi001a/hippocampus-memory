@@ -1,0 +1,134 @@
+P0-C1 Hermes Host Event Semantics — RED run (recorded, no implementation)
+=======================================================================
+Branch      : fix/p0c1-hermes-event-semantics
+Base commit : 21d2bde15cd4bb1ea6858a48f9083290d72ff06a
+Test file   : src/v3-core/tests/test_p0c1_host_event_semantics.py
+Command     : (cd src/v3-core) python -m pytest tests/test_p0c1_host_event_semantics.py -rA -q --tb=line
+Env         : V3_HARNESS_ALLOW_LIVE_PROD_OUTBOX=1
+              (a live Hermes gateway on this host writes
+               ~/.v3-core/profiles/default/j concurrently, so conftest defence 3b
+               cannot distinguish its writes from the test's; the env var
+               downgrades that environment-specific tree comparison to a
+               warning. It does NOT relax any behavioural assertion.)
+Interpreter : C:/hp-testbed/.venv/Scripts/python.exe
+Recorded at : 2026-10-04, implementation mid-flight.
+
+WHY EVERY TEST IS RED RIGHT NOW
+-------------------------------
+The adapter rewrite in src/v3-core/src/v3core/__init__.py (working tree,
+uncommitted) already does, inside sync_turn:
+
+    from .host_events import (
+        HOST_EVENT_ASYNC_BOUNDARY, HOST_EVENT_CONTINUATION, HOST_EVENT_CONTROL,
+        classify_host_event, extract_oob_payload, ...)
+
+but src/v3-core/src/v3core/host_events.py (contract §2) does not exist yet.
+So every T1-T11 test aborts at __init__.py:3602 with
+
+    ModuleNotFoundError: No module named 'v3core.host_events'
+
+before reaching its own assertion, and every §2 classifier test hits the
+module-level fallback stub. This is the expected "implementation absent" RED.
+
+The behavioural RED (which cases the fix must actually change) is recorded
+separately in behavioural-red-vs-HEAD.txt, where the same T-matrix is run
+against the PRE-FIX HEAD __init__.py with a contract-correct classifier
+supplied out-of-tree. There: 8 failed / 4 passed.
+FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF                                          [100%]
+================================== FAILURES ===================================
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   ModuleNotFoundError: No module named 'v3core.host_events'
+C:\hp-testbed\src\v3-core\src\v3core\__init__.py:3602: ModuleNotFoundError: No module named 'v3core.host_events'
+E   AssertionError: v3core.host_events is missing (contract §2). import error: ModuleNotFoundError("No module named 'v3core.host_events'")
+    assert False
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:862: AssertionError: v3core.host_events is missing (contract §2). import error: ModuleNotFoundError("No module named 'v3core.host_events'")
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+E   AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+C:\hp-testbed\src\v3-core\tests\test_p0c1_host_event_semantics.py:101: AssertionError: v3core.host_events.classify_host_event is not implemented (import error: ModuleNotFoundError("No module named 'v3core.host_events'"))
+=========================== short test summary info ===========================
+FAILED tests/test_p0c1_host_event_semantics.py::test_t1_normal_u1_a1_single_qa
+FAILED tests/test_p0c1_host_event_semantics.py::test_t2_multi_assistant_single_qa_replay_no_dup
+FAILED tests/test_p0c1_host_event_semantics.py::test_t3_compaction_continuation_single_qa
+FAILED tests/test_p0c1_host_event_semantics.py::test_t4_compaction_after_flush_structural_continuation
+FAILED tests/test_p0c1_host_event_semantics.py::test_t5_tasklist_still_in_progress_continuation[tasklist-[Your active task list was preserved across context compression]\n1. [ ] finish the pending audit]
+FAILED tests/test_p0c1_host_event_semantics.py::test_t5_tasklist_still_in_progress_continuation[still_in_progress-[STILL IN PROGRESS \u2014 this is the active request, resume it]]
+FAILED tests/test_p0c1_host_event_semantics.py::test_t6_model_switch_transparent
+FAILED tests/test_p0c1_host_event_semantics.py::test_t7_out_of_band_real_user_opens_new_qa
+FAILED tests/test_p0c1_host_event_semantics.py::test_t8_async_batch_complete_no_pollution
+FAILED tests/test_p0c1_host_event_semantics.py::test_t9_background_process_complete_no_pollution
+FAILED tests/test_p0c1_host_event_semantics.py::test_t10_failed_turn_never_an_answer
+FAILED tests/test_p0c1_host_event_semantics.py::test_t11_replay_idempotent_structural_continuation
+FAILED tests/test_p0c1_host_event_semantics.py::test_c0_classifier_module_and_fixtures_available
+FAILED tests/test_p0c1_host_event_semantics.py::test_c1_continuation_prefixes[[CONTEXT COMPACTION \u2014 REFERENCE ONLY]\nEarlier turns were summarised to save space; continue the task.]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c1_continuation_prefixes[[Your active task list was preserved across context compression]\n1. [ ] finish the pending audit]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c1_continuation_prefixes[[STILL IN PROGRESS \u2014 this is the active request, resume it]]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c2_async_boundary_prefixes[[ASYNC DELEGATION BATCH COMPLETE \u2014 deleg_abc123]\nSubagent finished the delegated task.]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c2_async_boundary_prefixes[[IMPORTANT: Background process proc_abc123 completed]\nexit code 0; see output above.]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c3_new_root_prefixes[[IMPORTANT: You are running as a scheduled cron job]]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c3_new_root_prefixes[[IMPORTANT: The user has invoked the "demo" skill]]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c4_control_prefixes[### Task:\nSuggest 3-5 relevant follow-up questions]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c4_control_prefixes[You've reached the maximum number of tool-calling rounds]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c4_control_prefixes[Your previous final response was rejected by the operator]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c4_control_prefixes[[System: note]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c5_oob_is_real_user_and_payload_extracted
+FAILED tests/test_p0c1_host_event_semantics.py::test_c6_terminal_display_kinds[failed_turn-Your request was not processed. Send it again to retry.]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c6_terminal_display_kinds[hidden-[This response was interrupted by a user correction.]]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c7_ordinary_prose_stays_real_user[# \u516c\u6587\u6613 \u6587\u6863\u7406\u89e3 \u2014\u2014 \u8bed\u4e49\u8bc4\u5ba1\u5458\uff08LLM Judge\uff09]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c7_ordinary_prose_stays_real_user[@file:notes.md]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c7_ordinary_prose_stays_real_user[\u666e\u901a\u7528\u6237\u7684\u4e00\u53e5\u8bdd]
+FAILED tests/test_p0c1_host_event_semantics.py::test_c8_assistant_and_tool_roles
+31 failed in 25.68s

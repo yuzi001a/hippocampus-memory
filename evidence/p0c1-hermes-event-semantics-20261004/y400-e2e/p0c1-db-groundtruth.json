@@ -1,0 +1,407 @@
+{
+  "database": "p0c1e2e_20261004",
+  "host": "127.0.0.1",
+  "port": 55432,
+  "user": "f2e2e",
+  "password_in_report": false,
+  "databases_visible": [
+    "b03pi_20261002_a1",
+    "b03pi_20261002_b",
+    "b03pi_20261002_c",
+    "b03pi_20261002_d",
+    "f2e2e",
+    "f2src",
+    "f3bootstrap_20261002_green",
+    "f3bootstrap_20261002_parent_green",
+    "f3bootstrap_20261002_parent_red",
+    "f3bootstrap_20261002_parent_red_utf8",
+    "f3bootstrap_20261002_red",
+    "f3bootstrap_20261002_red2",
+    "i01e2e_20261003",
+    "i01e2e_20261003b",
+    "i01e2e_20261003c",
+    "m01m02_probe_p2",
+    "m01m02e2e_concclosure_c",
+    "m01m02e2e_concclosure_g",
+    "m01m02e2e_concclosure_i2",
+    "m01m02e2e_concclosure_i3",
+    "m01m02e2e_concclosure_i4",
+    "m01m02e2e_concclosure_i5",
+    "m01m02e2e_parentconc_final",
+    "m01m02e2e_run1",
+    "m01m02e2e_run1_nomig",
+    "m01m02e2e_run1_upgrade",
+    "m01m02e2e_run2",
+    "m01m02e2e_run2_nomig",
+    "m01m02e2e_run2_upgrade",
+    "m01m02e2e_run3",
+    "m01m02e2e_run3_nomig",
+    "m01m02e2e_run3_upgrade",
+    "m01m02e2e_run4",
+    "m01m02e2e_run4_nomig",
+    "m01m02e2e_run4_upgrade",
+    "m01m02e2e_run5",
+    "m01m02e2e_run5_nomig",
+    "m01m02e2e_run5_upgrade",
+    "m01m02e2e_run6",
+    "m01m02e2e_run6_nomig",
+    "m01m02e2e_run6_upgrade",
+    "m01m02e2e_run6_upgrademin",
+    "m01m02e2e_run7",
+    "m01m02e2e_run7_nomig",
+    "m01m02e2e_run7_upgrade",
+    "m01m02e2e_run7_upgrademin",
+    "m01m02e2e_run8",
+    "m01m02e2e_run8_nomig",
+    "m01m02e2e_run8_upgrade",
+    "m01m02e2e_run8_upgrademin",
+    "m03e2e_20261003_230228",
+    "m03e2e_20261003_230228_nomig",
+    "m03e2e_20261003_230527",
+    "m03e2e_20261003_230527_nomig",
+    "m03e2e_20261003_232114",
+    "m03e2e_20261003_232114_nomig",
+    "m03e2e_20261003_233227",
+    "m03e2e_20261003_233227_nomig",
+    "m03e2e_20261003_234121",
+    "m03e2e_20261003_234121_nomig",
+    "m03e2e_20261003_235557",
+    "m03e2e_20261003_235557_nomig",
+    "m03e2e_20261004_000739",
+    "m03e2e_20261004_000739_nomig",
+    "m03e2e_20261004_000935",
+    "m03e2e_20261004_000935_nomig",
+    "m03e2e_20261004_001402",
+    "m03e2e_20261004_001402_nomig",
+    "m03e2e_20261004_023330",
+    "m03e2e_20261004_023330_nomig",
+    "m03e2e_20261004_024250",
+    "m03e2e_20261004_024250_nomig",
+    "m03e2e_20261004_031923",
+    "m03e2e_20261004_031923_nomig",
+    "p0ae2e_20261004",
+    "p0c1e2e_20261004",
+    "postgres",
+    "template0",
+    "template1"
+  ],
+  "qa_pairs_total": 11,
+  "conversation_stream_total": 33,
+  "qa_pairs": [
+    {
+      "session_id": "p0c1e2e-S1",
+      "id": 1,
+      "question": "Q1 normal",
+      "answer": "A1-normal-answer",
+      "merged_event_ids": [
+        "a1"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S10",
+      "id": 11,
+      "question": "Q1 restart-continuation",
+      "answer": "A1-restart\nA2-restart-late",
+      "merged_event_ids": [
+        "a1",
+        "a2"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S2",
+      "id": 2,
+      "question": "Q1 multi",
+      "answer": "A1-seg-one\nA2-seg-two\nA3-seg-three",
+      "merged_event_ids": [
+        "a1",
+        "a2",
+        "a3"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S3",
+      "id": 3,
+      "question": "Q1 compaction",
+      "answer": "A1-pre-compaction\nA2-post-compaction\nA3-post-compaction",
+      "merged_event_ids": [
+        "a1",
+        "a2",
+        "a3"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S4",
+      "id": 4,
+      "question": "Q1 flush-then-continue",
+      "answer": "A1-pre-flush\nA2-post-compaction-late",
+      "merged_event_ids": [
+        "a1",
+        "a2"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S5",
+      "id": 5,
+      "question": "Q1 original",
+      "answer": "A1-original-answer",
+      "merged_event_ids": [
+        "a1"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S5",
+      "id": 6,
+      "question": "改成 B",
+      "answer": "A2-answer-to-steer",
+      "merged_event_ids": [
+        "a2"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S6",
+      "id": 7,
+      "question": "Q1 model-switch",
+      "answer": "A1-before-switch\nA2-after-switch",
+      "merged_event_ids": [
+        "a1",
+        "a2"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S7",
+      "id": 8,
+      "question": "Q1 async-boundary",
+      "answer": "A1-human-answer",
+      "merged_event_ids": [
+        "a1"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S8",
+      "id": 9,
+      "question": "Q1 failed-turn",
+      "answer": "A1-valid-answer",
+      "merged_event_ids": [
+        "a1"
+      ]
+    },
+    {
+      "session_id": "p0c1e2e-S9",
+      "id": 10,
+      "question": "Q1 replay-continuation",
+      "answer": "A1-replay\nA2-replay-late",
+      "merged_event_ids": [
+        "a1",
+        "a2"
+      ]
+    }
+  ],
+  "conversation_stream_counts": [
+    {
+      "session_id": "p0c1e2e-S1",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S1",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S1",
+      "role": "user",
+      "event_id": "u2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S10",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S10",
+      "role": "assistant",
+      "event_id": "a2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S10",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S2",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S2",
+      "role": "assistant",
+      "event_id": "a2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S2",
+      "role": "assistant",
+      "event_id": "a3",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S2",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S2",
+      "role": "user",
+      "event_id": "u2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S3",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S3",
+      "role": "assistant",
+      "event_id": "a2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S3",
+      "role": "assistant",
+      "event_id": "a3",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S3",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S4",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S4",
+      "role": "assistant",
+      "event_id": "a2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S4",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S5",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S5",
+      "role": "assistant",
+      "event_id": "a2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S5",
+      "role": "user",
+      "event_id": "oob",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S5",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S6",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S6",
+      "role": "assistant",
+      "event_id": "a2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S6",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S7",
+      "role": "assistant",
+      "event_id": "a_async",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S7",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S7",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S8",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S8",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S9",
+      "role": "assistant",
+      "event_id": "a1",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S9",
+      "role": "assistant",
+      "event_id": "a2",
+      "count": 1
+    },
+    {
+      "session_id": "p0c1e2e-S9",
+      "role": "user",
+      "event_id": "u1",
+      "count": 1
+    }
+  ],
+  "excluded_event_source_rows": [
+    {
+      "session_id": "p0c1e2e-S5",
+      "role": "user",
+      "event_id": "oob",
+      "content_head": "[OUT-OF-BAND USER MESSAGE — a direct message from the user, "
+    }
+  ]
+}

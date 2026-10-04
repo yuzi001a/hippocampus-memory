@@ -1,0 +1,23 @@
+basePath: "C:\\hp-testbed\\p0c1-hermes-event-semantics-20261004\\evidence\\p0c1-hermes-event-semantics-20261004\\e2e-runs\\20261004-233507\\data"
+mode: cloud
+storage:
+  pg:
+    host: 127.0.0.1
+    port: 55432
+    database: p0c1e2e_20261004
+    user: f2e2e
+e1:
+  enabled: false
+observer:
+  enabled: false
+tkg:
+  enabled: false
+llm:
+  provider: ''
+  model: ''
+  api_key: ''
+  base_url: ''
+ingest:
+  live_buffer:
+    batch: 8
+    flush_sec: 0.2

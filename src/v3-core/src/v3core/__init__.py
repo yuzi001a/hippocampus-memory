@@ -3599,6 +3599,17 @@ class V3Core:
         """
         from .bridge_contract import LEGACY_HOST as _BC_LEGACY_HOST
         from .bridge_contract import qa_pairing_decision as _qa_pairing_decision
+        from .host_events import (
+            HOST_EVENT_ASYNC_BOUNDARY,
+            HOST_EVENT_CONTINUATION,
+            HOST_EVENT_CONTROL,
+            HOST_EVENT_NEW_ROOT,
+            HOST_EVENT_NORMAL_TOOL,
+            HOST_EVENT_REAL_USER,
+            HOST_EVENT_TERMINAL,
+            classify_host_event,
+            extract_oob_payload,
+        )
 
         _call_host = str(host or "").strip()
         _receipt: dict = {
@@ -3658,6 +3669,14 @@ class V3Core:
         prior_seen = set(context.synced_message_ids)
         processed_this_call: set[str] = set()
         source_ingest_failed = False
+        # P0-C1 (2026-10-04) §4: snapshot-local task structure.
+        # ``_struct_anchor`` is the most recent REAL_USER row seen anywhere in
+        # THIS snapshot (already-seen or new); ``_struct_boundary`` records that
+        # an autonomous boundary (async completion / cron / skill root) has
+        # shadowed that anchor.  Structure is truth for pairing; the delta
+        # cursor is only source-idempotency.
+        _struct_anchor: dict | None = None
+        _struct_boundary = False
         for msg in messages:
             role = str(msg.get("role", ""))
             key, _reliable = _stable_message_key(msg)
@@ -3672,6 +3691,34 @@ class V3Core:
                 # No stable id and no fallback — skip silently to avoid
                 # silent acceptance of unknown deltas (I4).
                 continue
+            # ── P0-C1: Hermes host-event semantics ──
+            # Classification runs for EVERY row of the snapshot, including rows
+            # already accepted in a prior sync: an already-seen CTX / OOB row is
+            # still part of this snapshot's task structure.  The old binary
+            # "is this an injection → skip" test threw the structure away
+            # together with the body.
+            _content = str(msg.get("content", ""))
+            _kind = classify_host_event(
+                role=role,
+                content=_content,
+                display_kind=msg.get("display_kind"),
+                session_source=msg.get("session_source") or msg.get("source"),
+            )
+            if _kind == HOST_EVENT_REAL_USER:
+                # Anchor = the owning real user turn for structural continuation
+                # recovery (§4) and the boundary autonomous output must not cross.
+                # NB: an empty-content user row classifies as REAL_USER but is
+                # dropped by the empty-content delta filter below, so it must not
+                # become the anchor either — a later assistant would then try to
+                # durably attach to a row that was never written to source.
+                if _content.strip():
+                    _struct_anchor = {
+                        "msg_id": key,
+                        "turn": str(msg.get("turn_id") or ""),
+                    }
+                    _struct_boundary = False
+            elif _kind in (HOST_EVENT_ASYNC_BOUNDARY, HOST_EVENT_NEW_ROOT):
+                _struct_boundary = True
             if cursor_key in prior_seen or cursor_key in processed_this_call:
                 # Already accepted in a prior sync or earlier in this snapshot — historical replay
                 # within the same session must NOT re-enqueue (I3, I6).
@@ -3693,7 +3740,7 @@ class V3Core:
                 processed_this_call.add(cursor_key)
                 continue
             # 跳过 tool 消息，只写 user/assistant
-            if role in ("tool", "tool_call", "tool_result", "function"):
+            if _kind == HOST_EVENT_NORMAL_TOOL or role in ("tool", "tool_call", "tool_result", "function"):
                 # 收集 tool 上下文到 pending (下个 user 配对时一起入 qa_pairs)
                 if pending is not None:
                     tc = msg.get("tool_calls") or []
@@ -3707,36 +3754,42 @@ class V3Core:
                 # processed so re-sync is idempotent.
                 processed_this_call.add(cursor_key)
                 continue
-            content = str(msg.get("content", ""))
+            content = _content
             if not content:
                 # empty content — accept as processed (NON-LIVE-SYNC-BY-DESIGN)
                 processed_this_call.add(cursor_key)
                 continue
-            # v4 fix: 真实注入前缀带前导时间戳+空格 (例如 "Sat 2026-04-11 01:15 GMT+8] [Subagent Context]"),
-            # startswith 元组匹配会失败, 改用正则兼容多种前导格式 (ISO 日期 / GMT+8 / 时分秒 / 中文方括号)。
-            # 2026-08-01 扩展: 覆盖系统消息格式 — [cron:...]/[System]/[AGENT_RULES]/[Retry after...]/
-            # "You just executed tool calls..." (Hermes tool-use 强制提示, 正常用户不会以这些格式说话)
-            # 2026-08-05 扩展: Hermes v0.20 滚动压缩 summary 消息前缀 [CONTEXT COMPACTION — REFERENCE ONLY]
-            # (压缩产物 role 可能是 user/assistant, 不能当真实对话入消息河/配对)
-            _injection_pattern = re.compile(
-                r'^\s*\[?(?:'
-                r'(?:\d{1,2}\s+\w{3}\s+\d{4}(?:\s+\d{1,2}:\d{2})?(?:\s+GMT[+-]\d+)?'
-                r'|\w{3}\s+\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2})?(?:\s+GMT[+-]\d+)?'
-                r'|\w{3}\s+\d{1,2}(?:\s+\d{1,2}:\d{2})?'
-                r'|\d{1,2}:\d{2}'
-                r'|\d{4}-\d{2}-\d{2})?'
-                r'\s*\]?\s*\[(?:IMPORTANT|ASYNC DELEGATION|Subagent Context|OUT-OF-BAND|【IMPORTANT|【ASYNC|'
-                r'cron:|System|AGENT_RULES|Retry after|CONTEXT COMPACTION)'
-                r'|^\s*You just executed tool calls'
-                r'|^\s*\[System\]'
-                r')'
-            )
-            if _injection_pattern.match(content):
+            # ── P0-C1: per-kind behaviour replaces the binary injection skip ──
+            # IGNORE CONTENT ≠ IGNORE STRUCTURE: continuation and control rows
+            # are transparent to pairing state, terminal rows are display-only,
+            # and an autonomous boundary cuts the chain instead of being folded
+            # into the previous human QA (task-book §3/§6/§7/§8).
+            if _kind in (HOST_EVENT_CONTINUATION, HOST_EVENT_CONTROL):
                 processed_this_call.add(cursor_key)
                 continue
-            # 兼容: 元组直接前缀也能匹配 (纯前缀无时间戳)
-            _injection_prefixes_fallback = ("[IMPORTANT:", "[ASYNC DELEGATION", "[Subagent Context]", "[OUT-OF-BAND", "[CONTEXT COMPACTION")
-            if content.startswith(_injection_prefixes_fallback):
+            if _kind == HOST_EVENT_TERMINAL:
+                # transcript boundary / display-only row — never an answer
+                processed_this_call.add(cursor_key)
+                continue
+            if _kind in (HOST_EVENT_ASYNC_BOUNDARY, HOST_EVENT_NEW_ROOT):
+                # Cut the boundary: close the previous human QA (flush it when it
+                # has an answer) and clear pending, so the autonomous output that
+                # follows can never be folded into it.  Durable delivery of these
+                # outputs is P0-C2, not this round.
+                if pending is not None and pending.get("q"):
+                    if not pending.get("a"):
+                        _receipt["incomplete"].append(pending.get("q_msg_id") or "")
+                    else:
+                        try:
+                            self._submit_flush(session_id, pending)
+                        except Exception as _e_boundary:
+                            logger.warning(
+                                "sync_turn autonomous-boundary flush 失败 (不阻塞): %s",
+                                _safe_err(_e_boundary),
+                            )
+                    pending = None
+                    with self._qa_lock:
+                        context.pending_qa = None
                 processed_this_call.add(cursor_key)
                 continue
             # Source acceptance is complete for normal user/assistant messages.
@@ -3756,6 +3809,10 @@ class V3Core:
 
             # ── Phase v4: 就地 QA 配对 ──
             if role == "user":
+                # P0-C1 §5: an OUT-OF-BAND row is a REAL user message.  The raw
+                # source keeps the full wrapper (trace preserved); the derived QA
+                # question uses the extracted payload, never the wrapper prefix.
+                _q_text = extract_oob_payload(content) or content
                 _status = self._enqueue_live_message_status(
                     session_id, msg_id, content, role, session_turn,
                     timestamp=_msg_ts, tool_calls=_msg_tools,
@@ -3808,7 +3865,7 @@ class V3Core:
                             pass  # 兜底也失败就算了, 不阻塞
                 # 启动新 pending
                 pending = {
-                    "q": content,
+                    "q": _q_text,
                     "a": "",
                     "q_msg_id": msg_id,
                     "q_turn": session_turn,
@@ -3934,6 +3991,26 @@ class V3Core:
                         logger.warning(
                             "sync_turn late derivation 失败 (非阻塞): %s",
                             _safe_err(_e_late)[:120],
+                        )
+                        _late_status = None
+                # ── P0-C1 §4: structural continuation ──
+                # pending is gone (watchdog flush / replaced), but this
+                # snapshot's structure still says which real user turn this
+                # assistant continues — unless an autonomous boundary shadowed
+                # the anchor.  The anchor comes from the snapshot, NOT from
+                # turn_id: context compaction changes turn identity.
+                if not _late_status and _struct_anchor and not _struct_boundary:
+                    try:
+                        _late_status = self._resolve_late_assistant_derivation(
+                            session_id=session_id, host=_msg_host, msg_id=msg_id,
+                            content=content, event_turn=msg.get("turn_id"),
+                            timestamp=_msg_ts,
+                            anchor_event_id=_struct_anchor.get("msg_id") or "",
+                        )
+                    except Exception as _e_struct:
+                        logger.warning(
+                            "sync_turn structural continuation 失败 (非阻塞): %s",
+                            _safe_err(_e_struct)[:120],
                         )
                         _late_status = None
                 if _late_status:
@@ -4176,7 +4253,8 @@ class V3Core:
 
     def _resolve_late_assistant_derivation(self, *, session_id: str, host: str,
                                            msg_id: str, content: str,
-                                           event_turn, timestamp=None) -> str | None:
+                                           event_turn, timestamp=None,
+                                           anchor_event_id: str | None = None) -> str | None:
         """P0-A: durably re-derive a late assistant event into its owning QA.
 
         Called from ``sync_turn`` when an assistant event was already accepted
@@ -4199,7 +4277,7 @@ class V3Core:
         per-session memo is only a replay accelerator (DESIGN-p0a §7).
         """
         try:
-            if not session_id or not msg_id or not event_turn:
+            if not session_id or not msg_id or not (event_turn or anchor_event_id):
                 return None
             try:
                 from .bridge_contract import LEGACY_HOST as _LEGACY
@@ -4250,14 +4328,27 @@ class V3Core:
                     if not conn:
                         return None
                     with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT id, event_id, turn_id, content, timestamp, "
-                            "tool_calls, tool_results "
-                            "FROM conversation_stream "
-                            "WHERE session_id=%s AND role='user' AND host=%s "
-                            "AND host_turn_id=%s ORDER BY id DESC LIMIT 1",
-                            (session_id, host_key, str(event_turn)),
-                        )
+                        if anchor_event_id:
+                            # P0-C1 §4: the owning user turn is located by the
+                            # snapshot's structural anchor (event identity), not
+                            # by turn identity — compaction rewrites turns.
+                            cur.execute(
+                                "SELECT id, event_id, turn_id, content, timestamp, "
+                                "tool_calls, tool_results "
+                                "FROM conversation_stream "
+                                "WHERE session_id=%s AND role='user' AND host=%s "
+                                "AND event_id=%s ORDER BY id DESC LIMIT 1",
+                                (session_id, host_key, str(anchor_event_id)),
+                            )
+                        else:
+                            cur.execute(
+                                "SELECT id, event_id, turn_id, content, timestamp, "
+                                "tool_calls, tool_results "
+                                "FROM conversation_stream "
+                                "WHERE session_id=%s AND role='user' AND host=%s "
+                                "AND host_turn_id=%s ORDER BY id DESC LIMIT 1",
+                                (session_id, host_key, str(event_turn)),
+                            )
                         u1 = cur.fetchone()
                         if u1 is None:
                             return None
@@ -4291,7 +4382,7 @@ class V3Core:
                 "a": content,
                 "q_msg_id": u1[1],
                 "q_turn": str(u1[2]),
-                "q_event_turn": str(event_turn),
+                "q_event_turn": str(event_turn or u1[2] or ""),
                 "host": host_key,
                 "q_ts": u1[4],
                 "tool_calls": u1[5] or [],
