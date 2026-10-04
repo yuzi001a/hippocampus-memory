@@ -325,6 +325,7 @@ def _doctor(args: argparse.Namespace) -> int:
                  "embedding_failures.sql",
                  "qa_embedding_chunks.sql", "observation_embedding_chunks.sql",
                  "memory_relations.sql",
+                 "derived_memory_invalidations.sql",
                  "upgrade_v0_2.sql"):
         try:
             text = _package_sql(name)
@@ -606,7 +607,8 @@ def _doctor_probe_database(explicit_dsn: str | None) -> dict[str, Any]:
             for table in ("explicit_memories", "qa_pairs", "topics",
                           "topic_entries", "observation_notes",
                           "conversation_stream", "yin_paragraphs",
-                          "embedding_failures", "memory_relations"):
+                          "embedding_failures", "memory_relations",
+                          "derived_memory_invalidations"):
                 try:
                     cur.execute(
                         "SELECT 1 FROM information_schema.tables "

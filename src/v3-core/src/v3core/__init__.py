@@ -3237,7 +3237,22 @@ class V3Core:
                 # 上游 embedding 已失败 — 不再尝试, 避免 P95 被放大
                 logger.debug("_recall_yin_segments: 上游 q_emb=None, 跳过")
                 return ""
+            # ── M03 (derived correction propagation): suppress invalidated yin
+            # paragraphs. Injection-layer only, id-level (the SELECT now carries
+            # the paragraph ``id``); a sidecar read failure fails OPEN but is
+            # surfaced via the warning marker.
+            from .derived_suppression import (
+                DERIVED_KIND_YIN_PARAGRAPH as _M03_KIND_YIN,
+                log_degraded as _m03_log_degraded,
+                read_suppression as _m03_read_suppression,
+                suppress_yin_hits as _m03_suppress_yin_hits,
+            )
+            _yin_suppression = _m03_read_suppression(self.pg, _M03_KIND_YIN)
+            _m03_log_degraded(_yin_suppression, "yin paragraph recall")
             hits = pg.search_effective(q_emb, pool_role="yin_segment", limit=limit)
+            if not hits:
+                return ""
+            hits = _m03_suppress_yin_hits(hits, _yin_suppression)
             if not hits:
                 return ""
             lines = ["[印段落] "]

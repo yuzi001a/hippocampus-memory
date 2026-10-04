@@ -5283,6 +5283,18 @@ def recall_for_new_session(
     tail_section: list[dict[str, Any]] = []
     topics_section: list[dict[str, Any]] = []
     qa_section: list[dict[str, Any]] = []
+    # M03: True when the derived-invalidation sidecar could not be read. Recall
+    # still FAILS OPEN (nothing is dropped), but the degradation is surfaced in
+    # the returned dict instead of being silently reported as "nothing stale".
+    note_suppression_degraded = False
+
+    from .derived_suppression import (
+        DERIVED_KIND_OBSERVER_NOTE as _M03_KIND_OBSERVER_NOTE,
+        log_degraded as _m03_log_degraded,
+        read_suppression as _m03_read_suppression,
+        read_suppression_cursor as _m03_read_suppression_cursor,
+        select_note_head as _m03_select_note_head,
+    )
 
     cfg = _load_observer_config()
 
@@ -5299,21 +5311,27 @@ def recall_for_new_session(
         if pool is not None:
             # ── 1) & 2) 最新印与动态尾巴 (Pool 模式: 独立 bounded lease 1) ──
             try:
+                # ── M03: read the invalidation sidecar BEFORE lease 1 ──
+                # (a second lease taken while lease 1 is held could deadlock a
+                # single-connection pool). Failure fails OPEN and is visible.
+                _note_suppression = _m03_read_suppression(
+                    pool, _M03_KIND_OBSERVER_NOTE)
+                if _m03_log_degraded(_note_suppression,
+                                     "observer note chain head (pool)"):
+                    note_suppression_degraded = True
                 _lease1 = pool.lease(timeout=5)
                 try:
                     conn1 = _lease1.connection
                     with conn1.cursor() as cur:
                         # 1) 最新印
                         try:
-                            cur.execute(
-                                "SELECT id, version, content, source_qa_range, links "
-                                "FROM observation_notes "
-                                "WHERE version LIKE 'v%' "
-                                "ORDER BY id DESC LIMIT 1"
-                            )
-                            row = cur.fetchone()
+                            # M03: chain-head selection walks prev_id past an
+                            # invalidated head; a fully-invalidated chain yields
+                            # no candidate (the stale note is never injected).
+                            row = _m03_select_note_head(cur, _note_suppression)
                             if row is not None:
-                                note_id, version, full_content, qa_range, links = row
+                                note_id, version, full_content, qa_range, links = (
+                                    row[0], row[1], row[2], row[3], row[4])
                                 seed = _extract_prev_seed(links)
                                 note_content = seed if seed else (full_content or "")
                                 range_end = 0
@@ -5393,16 +5411,20 @@ def recall_for_new_session(
                     # 排除 session_summary_* 行; 同时按 compressed 优先级排, 优先选
                     # 已 accepted 的压缩版 — 与 observer 1.5 / e1.compress_observer_note
                     # 共用同一选择器语义, 保证全链路读路径一致.
+                    # M03: the sidecar is read on this same cursor (single read;
+                    # a failure is visible and fails OPEN — never a silent drop).
+                    _note_suppression = _m03_read_suppression_cursor(
+                        cur, _M03_KIND_OBSERVER_NOTE)
+                    if _m03_log_degraded(_note_suppression,
+                                         "observer note chain head (direct)"):
+                        note_suppression_degraded = True
                     try:
-                        cur.execute(
-                            "SELECT id, version, content, source_qa_range, links "
-                            "FROM observation_notes "
-                            "WHERE version LIKE 'v%' "
-                            "ORDER BY id DESC LIMIT 1"
-                        )
-                        row = cur.fetchone()
+                        # M03: walk prev_id past an invalidated chain head; a
+                        # fully-invalidated chain yields no candidate.
+                        row = _m03_select_note_head(cur, _note_suppression)
                         if row is not None:
-                            note_id, version, full_content, qa_range, links = row
+                            note_id, version, full_content, qa_range, links = (
+                                row[0], row[1], row[2], row[3], row[4])
                             # 优先抽种子印 (phase7 _write_observation_note 写入约定)
                             seed = _extract_prev_seed(links)
                             note_content = seed if seed else (full_content or "")
@@ -5597,6 +5619,10 @@ def recall_for_new_session(
             "qa_hits": qa_section,  # 2026-08-09: 原文 QA 关键词匹配结果
             "fence": _FENCE_MARKER,
             "elapsed_ms": float(elapsed_ms),
+            # M03: explicit degradation marker — the note lane kept injecting
+            # (fail-open) because the invalidation sidecar could not be read.
+            # "cannot determine" is never reported as "nothing invalidated".
+            "suppression_degraded": bool(note_suppression_degraded),
         }
     except PrefetchDeadlineExceeded:
         raise

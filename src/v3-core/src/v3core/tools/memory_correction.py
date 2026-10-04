@@ -407,6 +407,11 @@ _RECEIPT_KEYS = (
     "effective_at",
     "relation",
     "warnings",
+    # M03: the derived-layer propagation verdict + receipt. A committed
+    # correction whose propagation failed reports ``derived_propagation =
+    # 'pending'`` here — the correction is never rolled back.
+    "derived_propagation",
+    "derived_receipt",
 )
 
 
@@ -503,6 +508,12 @@ def handle_correct_action(args: dict, **kw) -> str:
         reason = _optional_text(args, "correction_reason")
         source_id = _source_id_text(args, "correction_source_id")
         effective_at = _optional_timestamp(args, "effective_at")
+        # M03: the replacement may declare its conversation source through the
+        # two frozen keys. They are validated by the canonical writer through
+        # the ONE resolver; an unresolvable/conflicting reference is refused
+        # there, never dropped. An explicit empty string is a caller error.
+        src_stream = _optional_text(args, "source_conversation_stream_id")
+        src_qa = _optional_text(args, "source_qa_id")
 
         # ``source_id`` is a legacy alias on v3_update. On the correct
         # path it may only repeat the target identity — a differing pair
@@ -576,6 +587,13 @@ def handle_correct_action(args: dict, **kw) -> str:
             call["mode"] = mode
         if mode != "withdraw":
             call["replacement_content"] = replacement
+        # Only forward the M03 source keys when the caller actually supplied
+        # them: an omitted key must not reach a canonical writer as a keyword
+        # the caller never sent.
+        if src_stream is not None:
+            call["source_conversation_stream_id"] = src_stream
+        if src_qa is not None:
+            call["source_qa_id"] = src_qa
         raw = correct(memory_id, **call)
         result = _as_result(raw)
     except Exception as exc:  # noqa: BLE001
@@ -623,7 +641,8 @@ def handle_correct_action(args: dict, **kw) -> str:
         "effective_at": result.get("effective_at", effective_at),
     }
     for key in ("new_memory_id", "new_status", "current_memory_id",
-                "relation", "status", "durable", "error_code"):
+                "relation", "status", "durable", "error_code",
+                "derived_propagation", "derived_receipt"):
         if key in result:
             payload[key] = result[key]
     if result.get("warnings"):

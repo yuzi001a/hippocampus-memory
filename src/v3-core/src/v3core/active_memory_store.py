@@ -117,7 +117,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from ._deadline import PrefetchDeadlineExceeded
-from .pg_pool import DEFAULT_LEASE_TIMEOUT
+from .pg_pool import DEFAULT_LEASE_TIMEOUT, PgPool
 
 logger = logging.getLogger("v3core.active_memory_store")
 
@@ -170,6 +170,27 @@ CORRECTION_MODE_RELATION_TYPE = {
 }
 
 EXPLICIT_TOOL_REQUEST_PROVENANCE = "explicit_tool_request"
+
+# ── M03 source-reference contract (frozen) ────────────────────────────────
+#
+# An explicit memory may declare the conversation source it was derived from
+# through exactly TWO accepted input forms, normalised to ONE canonical
+# identity (``qa_pairs.id``). The resolver is NOT duplicated here: every
+# validation goes through ``derived_invalidation.resolve_source_qa_ids`` so the
+# write side and the propagation side can never disagree. A reference that is
+# present but unresolvable is REFUSED (fail closed) — never stripped,
+# normalised into a real row, or downgraded to "no source".
+SOURCE_PROV_KEY_CONVERSATION_STREAM_ID = "source_conversation_stream_id"
+SOURCE_PROV_KEY_QA_ID = "source_qa_id"
+SOURCE_PROV_KEYS = (
+    SOURCE_PROV_KEY_CONVERSATION_STREAM_ID,
+    SOURCE_PROV_KEY_QA_ID,
+)
+
+#: Audit keys written into ``provenance`` after a successful resolution.
+PROV_KEY_CANONICAL_QA_ID = "canonical_qa_id"
+PROV_KEY_INPUT_SOURCE_KIND = "input_source_kind"
+PROV_KEY_INPUT_SOURCE_ID = "input_source_id"
 
 _TABLE = "public.explicit_memories"
 _RELATION_TABLE = "public.memory_relations"
@@ -393,6 +414,27 @@ def _acquire_lease(pool: Any, pg: Any, *, deadline: Any = None):
             return _OwnedConnectionLease(owned)
         return _PgStoreLeaseAdapter(pg.lease(timeout=timeout))
     raise _PoolUnavailable("ActiveMemory requires an injected pool or pg.")
+
+
+def _lease_slots(target: Any) -> tuple:
+    """``(pool, pg)`` for ``_acquire_lease`` from ONE injected target.
+
+    Callers that receive a single injected store/pool (the M03 derived
+    invalidation/rebuild plumbing does) must route it into the slot
+    ``_acquire_lease`` expects. A real ``PgPool`` belongs in the ``pool`` slot
+    (its ``lease()`` yields a ``PgLease``, NOT a DBAPI connection); anything
+    else — ``PgEmbedStore``, a store-shaped fake — belongs in the ``pg`` slot
+    so the ``open_side_connection`` seam / ``_PgStoreLeaseAdapter`` is used.
+
+    Putting a ``PgPool`` in the ``pg`` slot silently takes the adapter path,
+    where ``PgLease.__enter__()`` returns the lease itself, so
+    ``lease.connection`` is a ``PgLease`` and every ``.cursor()`` raises.
+    """
+    if target is None:
+        return None, None
+    if isinstance(target, PgPool):
+        return target, None
+    return None, target
 
 
 def _emb_str(vec: Iterable[float]) -> str:
@@ -721,6 +763,79 @@ def _correction_error(code: str, message: str) -> dict[str, Any]:
     return {"success": False, "error_code": code, "error": message}
 
 
+def _source_prov_declared(prov: Any) -> bool:
+    """True when either frozen source key carries a value (``None`` = absent)."""
+    if not isinstance(prov, dict):
+        return False
+    return any(prov.get(key) is not None for key in SOURCE_PROV_KEYS)
+
+
+def _resolve_source_provenance(
+    pg: Any, prov: Any
+) -> tuple[dict[str, Any], Optional[str], Optional[str]]:
+    """Validate the two frozen M03 source keys, fail closed.
+
+    Returns ``(resolved_prov, error_code, error_message)``. No declared source
+    key → ``(prov, None, None)`` unchanged, so every pre-existing caller keeps
+    its exact behaviour. A declared reference is resolved through the ONE
+    canonical resolver (``derived_invalidation.resolve_source_qa_ids``): the
+    caller's literal input keys are preserved verbatim and the single canonical
+    identity plus its audit fields are added. A reference that cannot be
+    resolved — missing, malformed, ambiguous, or two keys disagreeing — is
+    REFUSED with the frozen code, never fabricated or dropped.
+    """
+    if not _source_prov_declared(prov):
+        return (prov if isinstance(prov, dict) else {}), None, None
+
+    from . import derived_invalidation as _di
+
+    try:
+        qa_ids, status = _di.resolve_source_qa_ids(pg, prov)
+    except Exception as exc:  # noqa: BLE001 - a resolver fault is a refusal
+        return (
+            dict(prov),
+            _di.PROPAGATION_FAILED,
+            f"source reference 解析失败（fail closed）: {exc!r}",
+        )
+
+    if status == _di.NO_SOURCE:
+        # Keys were declared, so absence is impossible here; treating it as
+        # "no source" would silently drop a declared reference.
+        return (
+            dict(prov),
+            _di.SOURCE_NOT_MAPPED,
+            "source reference 已声明但未解析到任何 qa_pairs 行",
+        )
+    if status != _di.RESOLVE_OK:
+        return (
+            dict(prov),
+            status,
+            f"source reference 解析失败（fail closed）: {status}",
+        )
+
+    out = dict(prov)
+    kind, input_id = _di.source_input_identity(prov)
+    out[PROV_KEY_CANONICAL_QA_ID] = qa_ids[0] if len(qa_ids) == 1 else None
+    out[PROV_KEY_INPUT_SOURCE_KIND] = kind
+    out[PROV_KEY_INPUT_SOURCE_ID] = input_id
+    return out, None, None
+
+
+def _source_ref_failure(
+    memory_id: str, code: str, message: str
+) -> MemoryWriteResult:
+    """A fail-closed refusal carrying the frozen source code verbatim."""
+    return MemoryWriteResult(
+        memory_id=memory_id,
+        source_id=memory_id,
+        durable=False,
+        status=code,
+        warnings=[message],
+        error=message,
+        record=None,
+    )
+
+
 def _is_missing_relation_table(exc: BaseException) -> bool:
     """True when the driver says ``memory_relations`` (or a relation) is absent.
 
@@ -895,6 +1010,17 @@ class ActiveMemoryWriter:
             mid = alias
         else:
             mid = derive_memory_id(category, title, content, tag_list)
+
+        # M03: a declared source reference is validated BEFORE any write, through
+        # the one canonical resolver. Unresolvable / ambiguous / conflicting →
+        # refused with the frozen code, nothing is inserted, and the caller's
+        # reference is never silently dropped or turned into "no source".
+        resolved_prov, prov_code, prov_err = _resolve_source_provenance(
+            self._pg if self._pg is not None else self._pool, prov
+        )
+        if prov_code is not None:
+            return _source_ref_failure(mid, prov_code, prov_err or prov_code)
+        prov = resolved_prov
 
         # INSERT ... ON CONFLICT DO NOTHING + commit
         try:
@@ -1124,6 +1250,8 @@ class ActiveMemoryWriter:
         correction_source_id: Optional[str] = None,
         effective_at: Optional[str] = None,
         authority: Optional[str] = None,
+        source_conversation_stream_id: Optional[str] = None,
+        source_qa_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Correct one canonical memory: replace it, or withdraw it (M01).
 
@@ -1176,6 +1304,33 @@ class ActiveMemoryWriter:
         target = str(request["memory_id"])
         withdrawing = request["mode"] == CORRECTION_MODE_WITHDRAW
         relation_type = CORRECTION_MODE_RELATION_TYPE[request["mode"]]
+
+        # M03 source-reference reinforcement on the replacement path: a caller
+        # may declare the replacement's conversation source through the same two
+        # frozen keys. Validated through the ONE canonical resolver BEFORE any
+        # write; a present-but-unresolvable reference is refused (fail closed),
+        # never dropped or downgraded into "no source".
+        declared_source = {
+            key: value
+            for key, value in (
+                (SOURCE_PROV_KEY_CONVERSATION_STREAM_ID,
+                 source_conversation_stream_id),
+                (SOURCE_PROV_KEY_QA_ID, source_qa_id),
+            )
+            if value is not None
+        }
+        resolved_source: dict[str, Any] = {}
+        if declared_source:
+            resolved_source, src_code, src_err = _resolve_source_provenance(
+                self._pg if self._pg is not None else self._pool,
+                declared_source,
+            )
+            if src_code is not None:
+                return _correction_failure(
+                    src_code, target, None, request["mode"],
+                    src_err or src_code,
+                )
+
         correction_id = derive_correction_id(target, request)
         relation_id = derive_relation_id(correction_id)
         request_json = _canonical_json(request)
@@ -1324,6 +1479,7 @@ class ActiveMemoryWriter:
                             "authority": REQUIRED_CORRECTION_AUTHORITY,
                             "correction_source_id": source_id,
                             "provenance": EXPLICIT_TOOL_REQUEST_PROVENANCE,
+                            **resolved_source,
                         })
 
                         # deterministic, target-bound replacement id
@@ -1558,6 +1714,25 @@ class ActiveMemoryWriter:
         status = (
             CORRECTION_DERIVED_WARNING if embed_error else CORRECTION_COMMITTED
         )
+
+        # M03: after the correction is COMMITTED and verified, propagate it into
+        # the derived layer once — bounded, no LLM. This is strictly AFTER the
+        # point of no return: a propagation failure can never undo A -> B, and
+        # is reported honestly as ``derived_propagation='pending'`` alongside the
+        # propagation receipt so the caller sees "correction committed, derived
+        # layer not caught up yet".
+        #
+        # The trigger is scoped to the M03 precondition: A must declare a
+        # canonical source reference. Without one the resolver can only report
+        # ``NO_SOURCE`` (nothing is mappable), so the verdict is the truthful
+        # no-op ``none`` — reached without touching the correction transaction's
+        # lease/readback discipline.
+        derived_propagation, derived_receipt = (
+            self._maybe_propagate_after_correction(
+                correction_id, expected_old.get("provenance"),
+            )
+        )
+
         return {
             "success": True,
             "status": status,
@@ -1578,7 +1753,65 @@ class ActiveMemoryWriter:
             ),
             "warnings": embed_warnings,
             "error": embed_error,
+            "derived_propagation": derived_propagation,
+            "derived_receipt": derived_receipt,
         }
+
+    def _maybe_propagate_after_correction(
+        self, correction_id: str, source_provenance: Any
+    ) -> tuple[str, dict]:
+        """Run M03 deterministic invalidation for a COMMITTED correction.
+
+        Never raises and never rolls back the correction. When the corrected
+        memory declares no M03 source reference there is provably nothing to map
+        (the resolver would return ``NO_SOURCE``), so the honest no-op verdict
+        ``none`` is reported without a round-trip. Otherwise a failure is turned
+        into ``derived_propagation='pending'`` plus a truthful receipt.
+        """
+        from . import derived_invalidation as _di
+
+        prov = source_provenance
+        if isinstance(prov, str):
+            try:
+                prov = json.loads(prov)
+            except ValueError:
+                prov = {}
+        if not _source_prov_declared(prov):
+            return _di.DERIVED_PROPAGATION_NONE, {
+                "status": _di.PROPAGATION_NO_LINEAGE,
+                "success": True,
+                "correction_id": correction_id,
+                "resolution_status": _di.NO_SOURCE,
+                "derived_propagation": _di.DERIVED_PROPAGATION_NONE,
+                "error": None,
+            }
+
+        pg = self._pool if self._pool is not None else self._pg
+        try:
+            receipt = _di.propagate_correction(pg, correction_id=correction_id)
+        except Exception as exc:  # noqa: BLE001 - derived fault, correction stays
+            logger.warning(
+                "M03 derived propagation failed for %s (correction stays durable): %r",
+                correction_id, exc,
+            )
+            return _di.DERIVED_PROPAGATION_PENDING, {
+                "status": _di.PROPAGATION_FAILED,
+                "success": False,
+                "correction_id": correction_id,
+                "derived_propagation": _di.DERIVED_PROPAGATION_PENDING,
+                "error": f"derived propagation raised: {exc!r}",
+            }
+        if not isinstance(receipt, dict):
+            return _di.DERIVED_PROPAGATION_PENDING, {
+                "status": _di.PROPAGATION_FAILED,
+                "success": False,
+                "correction_id": correction_id,
+                "derived_propagation": _di.DERIVED_PROPAGATION_PENDING,
+                "error": "derived propagation returned an unusable receipt",
+            }
+        value = receipt.get("derived_propagation") or _di.DERIVED_PROPAGATION_PENDING
+        return value, receipt
+
 
     # ── M01 internals ────────────────────────────────────────────────
 

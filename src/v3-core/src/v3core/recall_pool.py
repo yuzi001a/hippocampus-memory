@@ -22,6 +22,12 @@ from ._deadline import (
 from ._expand_query import _maybe_expand_query
 from .config import _resolve_data_dir
 from .pg_pool import PgPool
+from .derived_suppression import (
+    DERIVED_KIND_TOPIC as _M03_KIND_TOPIC,
+    log_degraded as _m03_log_degraded,
+    read_suppression as _m03_read_suppression,
+    suppress_topic_hits as _m03_suppress_topic_hits,
+)
 
 
 try:
@@ -3590,6 +3596,17 @@ def recall_pool(
         paths.append((yin_rank, VEC_RRF_WEIGHT))
     if notes_rank:
         paths.append((notes_rank, VEC_RRF_WEIGHT))
+
+    # ── M03 (derived correction propagation): suppress invalidated topics ──
+    # The single convergence point, BEFORE RRF / rerank. Only the injection
+    # layer is touched: non-invalidated candidates and every rank map / score
+    # computation below are unchanged, and Recall V2 is not rewritten. A sidecar
+    # read failure fails OPEN (keeps injecting) but is made visible.
+    _m03_sup = _m03_read_suppression(pg, _M03_KIND_TOPIC)
+    if _m03_log_degraded(_m03_sup, "recall_pool topic lane", logger):
+        _probe(trace, 'warn', 'M03 suppression_degraded=True (recall_pool topic lane)')
+    for _m03_sid in _m03_suppress_topic_hits(hits, _m03_sup):
+        _probe(trace, 'drop', _m03_sid, 'M03_INVALIDATED', stage='suppression')
 
     scored = []
     for sid, hit in hits.items():
