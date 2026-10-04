@@ -1,0 +1,352 @@
+{
+  "scope": "P0-A late-assistant QA derivation — real V3Core over a disposable PostgreSQL; task book §19/§20",
+  "design": "DESIGN-p0a.md §9.2",
+  "when": "2026-10-04T04:48:35.600673+00:00",
+  "timestamp": "20261004-124835",
+  "host_machine": "DESKTOP-EQP3OBU",
+  "python": "3.11.16",
+  "repo": "C:\\hp-testbed\\p0a-late-assistant-derivation-20261004",
+  "git_head": "",
+  "target": {
+    "pg_host": "127.0.0.1",
+    "pg_port": 55432,
+    "pg_db": "p0ae2e_20261004",
+    "pg_user": "f2e2e",
+    "password_in_report": false
+  },
+  "checks": [
+    {
+      "name": "PRE.bootstrap_cli_ok",
+      "pass": true,
+      "detail": "rc=0 applied=True stderr=''"
+    },
+    {
+      "name": "PRE.schema_conversation_stream_present",
+      "pass": true,
+      "detail": "public tables=['conversation_stream', 'derived_memory_invalidations', 'embedding_failures', 'explicit_memories', 'memory_relations', 'observation_embedding_chunks', 'observation_notes', 'qa_embedding_chunks', 'qa_pairs', 'schema_versions', 'topic_entries', 'topics', 'yin_paragraphs']"
+    },
+    {
+      "name": "PRE.schema_qa_pairs_present",
+      "pass": true,
+      "detail": "public tables=['conversation_stream', 'derived_memory_invalidations', 'embedding_failures', 'explicit_memories', 'memory_relations', 'observation_embedding_chunks', 'observation_notes', 'qa_embedding_chunks', 'qa_pairs', 'schema_versions', 'topic_entries', 'topics', 'yin_paragraphs']"
+    },
+    {
+      "name": "PRE.schema_host_turn_id_present",
+      "pass": true,
+      "detail": "conversation_stream columns=['content', 'embedding', 'event_id', 'host', 'host_turn_id', 'id', 'role', 'session_id', 'source', 'timestamp', 'tool_calls', 'tool_results', 'trigger', 'turn_id']"
+    },
+    {
+      "name": "PRE.schema_merged_event_ids_present",
+      "pass": true,
+      "detail": "qa_pairs columns=['answer', 'chars', 'created_at', 'embed_model', 'embedding', 'id', 'merged_event_ids', 'question', 'session_id', 'source', 'source_id', 'timestamp', 'tool_calls', 'tool_results', 'turn_id']"
+    },
+    {
+      "name": "PRE.no_embedding_configured",
+      "pass": true,
+      "detail": "safe_embed_cfg(config)=None (must be None)"
+    },
+    {
+      "name": "PRE.no_llm_configured",
+      "pass": true,
+      "detail": "llm.provider='' llm.model=''"
+    },
+    {
+      "name": "PRE.real_core_pg_connected",
+      "pass": true,
+      "detail": "PgEmbedStore.is_connected()=True target=127.0.0.1:55432/p0ae2e_20261004"
+    },
+    {
+      "name": "PRE.live_buffer_embed_disabled",
+      "pass": true,
+      "detail": "LiveBuffer._embed_cfg=None"
+    },
+    {
+      "name": "A.conversation_stream_u1_one_row",
+      "pass": true,
+      "detail": "conversation_stream rows for u1=1"
+    },
+    {
+      "name": "A.u1_row_carries_host_turn_provenance",
+      "pass": true,
+      "detail": "u1 row host_turn_id='T1' (expected 'T1')"
+    },
+    {
+      "name": "A.progress_appended_to_pending",
+      "pass": true,
+      "detail": "pending={'q': '请完成 P0-A 验收并给最终报告', 'a': 'P0-A PROGRESS: 正在核验（中间态）', 'q_msg_id': 'u1', 'q_event_turn': 'T1', 'a_event_ids': ['aprog']}"
+    },
+    {
+      "name": "A.progress_source_row_present",
+      "pass": true,
+      "detail": "conversation_stream rows for aprog=1"
+    },
+    {
+      "name": "A.pending_cleared_after_flush",
+      "pass": true,
+      "detail": "pending after _flush_all_pending_qa = None"
+    },
+    {
+      "name": "A.qa_row_created_by_flush",
+      "pass": true,
+      "detail": "qa_pairs(U1) row=(1, 'P0-A PROGRESS: 正在核验（中间态）', ['aprog'], '请完成 P0-A 验收并给最终报告')"
+    },
+    {
+      "name": "A.qa_row_single_before_late",
+      "pass": true,
+      "detail": "qa_pairs rows for session=1"
+    },
+    {
+      "name": "A.late_a1_source_one_row",
+      "pass": true,
+      "detail": "conversation_stream rows for a1=1"
+    },
+    {
+      "name": "A.qa_row_still_single_after_late",
+      "pass": true,
+      "detail": "qa_pairs rows for session=1"
+    },
+    {
+      "name": "A.qa_answer_contains_late_marker",
+      "pass": true,
+      "detail": "marker_count=1 answer='P0-A PROGRESS: 正在核验（中间态）\\nP0-A FINAL REPORT: 验收通过。UNIQUE-LATE-DELIVERY-MARKER'"
+    },
+    {
+      "name": "A.qa_answer_keeps_progress_and_late",
+      "pass": true,
+      "detail": "progress_present=True late_present=True"
+    },
+    {
+      "name": "A.merged_event_ids_records_a1",
+      "pass": true,
+      "detail": "merged_event_ids=['aprog', 'a1']"
+    },
+    {
+      "name": "A.late_receipt_reports_derivation",
+      "pass": true,
+      "detail": "receipt['derivation']={'a1': 'completed_late'}"
+    },
+    {
+      "name": "A.resend_a1_source_still_one_row",
+      "pass": true,
+      "detail": "conversation_stream rows for a1=1"
+    },
+    {
+      "name": "A.resend_qa_still_single",
+      "pass": true,
+      "detail": "qa_pairs rows for session=1"
+    },
+    {
+      "name": "A.resend_marker_count_one",
+      "pass": true,
+      "detail": "marker_count=1 answer='P0-A PROGRESS: 正在核验（中间态）\\nP0-A FINAL REPORT: 验收通过。UNIQUE-LATE-DELIVERY-MARKER'"
+    },
+    {
+      "name": "A.resend_reports_already_merged",
+      "pass": false,
+      "detail": "receipt['derivation']=None"
+    },
+    {
+      "name": "B.u1_source_one_row",
+      "pass": true,
+      "detail": "conversation_stream rows for u1=1"
+    },
+    {
+      "name": "B.u2_source_one_row",
+      "pass": true,
+      "detail": "conversation_stream rows for u2=1"
+    },
+    {
+      "name": "B.u2_is_current_pending",
+      "pass": true,
+      "detail": "pending={'q': 'P0-A 场景B：第二项，新的当前问题', 'a': '', 'q_msg_id': 'u2', 'q_event_turn': 'T2', 'a_event_ids': []}"
+    },
+    {
+      "name": "B.qa_u1_row_exists_after_flush",
+      "pass": true,
+      "detail": "qa_pairs(U1) row=(2, '', [], 'P0-A 场景B：请处理第一项')"
+    },
+    {
+      "name": "B.late_a1_source_one_row",
+      "pass": true,
+      "detail": "conversation_stream rows for a1=1"
+    },
+    {
+      "name": "B.qa_u1_answer_contains_late_a1",
+      "pass": true,
+      "detail": "marker_count=1 answer='P0-A 场景B 迟到回答（归属 T1）。UNIQUE-LATE-DELIVERY-MARKER'"
+    },
+    {
+      "name": "B.qa_u2_does_not_contain_late_a1",
+      "pass": true,
+      "detail": "qa_u2=absent"
+    },
+    {
+      "name": "B.u2_pending_intact_after_late",
+      "pass": true,
+      "detail": "pending_after_late={'q': 'P0-A 场景B：第二项，新的当前问题', 'a': '', 'q_msg_id': 'u2', 'q_event_turn': 'T2', 'a_event_ids': []}"
+    },
+    {
+      "name": "B.u2_derivation_not_polluted",
+      "pass": true,
+      "detail": "qa_pairs(U2) row=None"
+    },
+    {
+      "name": "B.late_receipt_reports_derivation",
+      "pass": true,
+      "detail": "receipt['derivation']={'a1': 'completed_late'}"
+    }
+  ],
+  "failures": [
+    {
+      "check": "A.resend_reports_already_merged",
+      "detail": "receipt['derivation']=None"
+    }
+  ],
+  "scenarios": {
+    "A": {
+      "session": "p0ae2e-A-20261004-124835",
+      "receipts": {
+        "sync_u1": {
+          "ok": true,
+          "accepted": [
+            "u1"
+          ],
+          "duplicate": [],
+          "rejected": [],
+          "held": []
+        },
+        "sync_progress": {
+          "ok": true,
+          "accepted": [
+            "aprog"
+          ],
+          "duplicate": [
+            "u1"
+          ],
+          "rejected": [],
+          "held": []
+        },
+        "sync_late_a1": {
+          "ok": true,
+          "accepted": [
+            "a1"
+          ],
+          "duplicate": [
+            "u1",
+            "aprog"
+          ],
+          "rejected": [],
+          "held": [],
+          "derivation": {
+            "a1": "completed_late"
+          }
+        },
+        "resend_a1": {
+          "ok": true,
+          "accepted": [],
+          "duplicate": [
+            "u1",
+            "aprog",
+            "a1"
+          ],
+          "rejected": [],
+          "held": [],
+          "derivation": null
+        }
+      },
+      "late": {
+        "qa_row": [
+          1,
+          "P0-A PROGRESS: 正在核验（中间态）\nP0-A FINAL REPORT: 验收通过。UNIQUE-LATE-DELIVERY-MARKER",
+          [
+            "aprog",
+            "a1"
+          ],
+          "请完成 P0-A 验收并给最终报告"
+        ],
+        "answer": "P0-A PROGRESS: 正在核验（中间态）\nP0-A FINAL REPORT: 验收通过。UNIQUE-LATE-DELIVERY-MARKER",
+        "merged_event_ids": [
+          "aprog",
+          "a1"
+        ]
+      }
+    },
+    "B": {
+      "session": "p0ae2e-B-20261004-124835",
+      "receipts": {
+        "sync_u1": {
+          "ok": true,
+          "accepted": [
+            "u1"
+          ],
+          "duplicate": [],
+          "rejected": [],
+          "held": []
+        },
+        "sync_u2": {
+          "ok": true,
+          "accepted": [
+            "u2"
+          ],
+          "duplicate": [
+            "u1"
+          ],
+          "rejected": [],
+          "held": []
+        },
+        "sync_late_a1": {
+          "ok": true,
+          "accepted": [
+            "a1"
+          ],
+          "duplicate": [
+            "u1",
+            "u2"
+          ],
+          "rejected": [],
+          "held": [],
+          "derivation": {
+            "a1": "completed_late"
+          }
+        }
+      },
+      "qa_u1": {
+        "answer": "P0-A 场景B 迟到回答（归属 T1）。UNIQUE-LATE-DELIVERY-MARKER",
+        "merged_event_ids": [
+          "a1"
+        ]
+      },
+      "qa_u2": {
+        "row": null,
+        "answer": ""
+      },
+      "pending_after_late": {
+        "q": "P0-A 场景B：第二项，新的当前问题",
+        "a": "",
+        "q_msg_id": "u2",
+        "q_event_turn": "T2",
+        "a_event_ids": []
+      }
+    }
+  },
+  "run_root": "C:\\hp-testbed\\p0a-late-assistant-derivation-20261004\\evidence\\p0a-late-assistant-derivation-20261004\\e2e-runs\\20261004-124835",
+  "baseline": {
+    "llm_configured": false,
+    "embedding_configured": false,
+    "note": "no embed section -> safe_embed_cfg None -> no external API call"
+  },
+  "verdict": "FAIL",
+  "isolation": {
+    "home": "C:\\hp-testbed\\p0a-late-assistant-derivation-20261004\\evidence\\p0a-late-assistant-derivation-20261004\\e2e-runs\\20261004-124835\\home",
+    "data": "C:\\hp-testbed\\p0a-late-assistant-derivation-20261004\\evidence\\p0a-late-assistant-derivation-20261004\\e2e-runs\\20261004-124835\\data",
+    "profile_dir": "C:\\hp-testbed\\p0a-late-assistant-derivation-20261004\\evidence\\p0a-late-assistant-derivation-20261004\\e2e-runs\\20261004-124835\\home\\.v3-core\\profiles\\p0ae2e",
+    "config_path": "C:\\hp-testbed\\p0a-late-assistant-derivation-20261004\\evidence\\p0a-late-assistant-derivation-20261004\\e2e-runs\\20261004-124835\\home\\.v3-core\\profiles\\p0ae2e\\config.yaml",
+    "dotenv": "C:\\hp-testbed\\p0a-late-assistant-derivation-20261004\\evidence\\p0a-late-assistant-derivation-20261004\\e2e-runs\\20261004-124835\\home\\.v3-core\\.env"
+  },
+  "bootstrap": {
+    "ok": true,
+    "detail": "rc=0 applied=True stderr=''"
+  },
+  "check_count": 36,
+  "finished_at": "2026-10-04T04:48:52.307895+00:00"
+}

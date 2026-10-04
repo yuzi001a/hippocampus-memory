@@ -1,0 +1,125 @@
+{
+  "when": "2026-10-04T04:27:38.854746+00:00",
+  "expect": "green",
+  "scenarios": {
+    "S1 baseline Q->A": {
+      "verdict": "PASS",
+      "observed": {
+        "rows": 1,
+        "answer": "A1 immediate"
+      },
+      "expected_on_unfixed_main": "PASS"
+    },
+    "S2 Q->flush->late A": {
+      "verdict": "PASS",
+      "observed": {
+        "rows": 1,
+        "answer": "A1-PROGRESS\nA3-FINAL-LATE",
+        "derivation": {
+          "a3": "completed_late"
+        },
+        "events": {
+          "u1": "duplicate",
+          "a1": "duplicate",
+          "a3": "accepted"
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S3 Q1->flush->Q2->late A1": {
+      "verdict": "PASS",
+      "observed": {
+        "q1": "A1-LATE-FOR-T1",
+        "q2": null,
+        "pending": {
+          "q": "Q2 second",
+          "a_len": 0,
+          "q_msg_id": "u2"
+        },
+        "derivation": {
+          "a1": "completed_late"
+        },
+        "events": {
+          "u1": "duplicate",
+          "u2": "duplicate",
+          "a1": "accepted"
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S4 interleaved sessions": {
+      "verdict": "FAIL",
+      "observed": {
+        "error": "TypeError: Object of type datetime is not JSON serializable",
+        "trace": "3.11-windows-x86_64-none\\Lib\\json\\__init__.py\", line 231, in dumps\n    return _default_encoder.encode(obj)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\servi\\AppData\\Roaming\\uv\\python\\cpython-3.11-windows-x86_64-none\\Lib\\json\\encoder.py\", line 200, in encode\n    chunks = self.iterencode(o, _one_shot=True)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\servi\\AppData\\Roaming\\uv\\python\\cpython-3.11-windows-x86_64-none\\Lib\\json\\encoder.py\", line 258, in iterencode\n    return _iterencode(o, 0)\n           ^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\servi\\AppData\\Roaming\\uv\\python\\cpython-3.11-windows-x86_64-none\\Lib\\json\\encoder.py\", line 180, in default\n    raise TypeError(f'Object of type {o.__class__.__name__} '\nTypeError: Object of type datetime is not JSON serializable\n"
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S5 replay x3": {
+      "verdict": "PASS",
+      "observed": {
+        "qa_rows": 1,
+        "marker_count": 1,
+        "answer": "A1-PROG\nA2-LATE-MARKER",
+        "receipts": [
+          {
+            "derivation": {
+              "a2": "completed_late"
+            },
+            "events": {
+              "u1": "duplicate",
+              "a1": "duplicate",
+              "a2": "accepted"
+            }
+          },
+          {
+            "derivation": {},
+            "events": {
+              "u1": "duplicate",
+              "a1": "duplicate",
+              "a2": "duplicate"
+            }
+          },
+          {
+            "derivation": {},
+            "events": {
+              "u1": "duplicate",
+              "a1": "duplicate",
+              "a2": "duplicate"
+            }
+          }
+        ]
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S6 restart recovery": {
+      "verdict": "PASS",
+      "observed": {
+        "rows": 1,
+        "answer": "A1-PROG\nA1-PROG\nA9-FINAL-AFTER-RESTART",
+        "derivation": {
+          "a1": "completed_late",
+          "a9": "completed_late"
+        },
+        "events": {
+          "u1": "duplicate",
+          "a1": "accepted",
+          "a9": "accepted"
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    }
+  },
+  "signature_ok": false,
+  "fs_sentinel": {
+    "added": 0,
+    "removed": 0,
+    "changed": 0,
+    "suspicious": [],
+    "diff_sample": {
+      "added": [],
+      "removed": [],
+      "changed": []
+    }
+  }
+}

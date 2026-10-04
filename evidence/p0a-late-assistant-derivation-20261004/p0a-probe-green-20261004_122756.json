@@ -1,0 +1,138 @@
+{
+  "when": "2026-10-04T04:28:12.107804+00:00",
+  "expect": "green",
+  "scenarios": {
+    "S1 baseline Q->A": {
+      "verdict": "PASS",
+      "observed": {
+        "rows": 1,
+        "answer": "A1 immediate"
+      },
+      "expected_on_unfixed_main": "PASS"
+    },
+    "S2 Q->flush->late A": {
+      "verdict": "PASS",
+      "observed": {
+        "rows": 1,
+        "answer": "A1-PROGRESS\nA3-FINAL-LATE",
+        "derivation": {
+          "a3": "completed_late"
+        },
+        "events": {
+          "u1": "duplicate",
+          "a1": "duplicate",
+          "a3": "accepted"
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S3 Q1->flush->Q2->late A1": {
+      "verdict": "PASS",
+      "observed": {
+        "q1": "A1-LATE-FOR-T1",
+        "q2": null,
+        "pending": {
+          "q": "Q2 second",
+          "a_len": 0,
+          "q_msg_id": "u2"
+        },
+        "derivation": {
+          "a1": "completed_late"
+        },
+        "events": {
+          "u1": "duplicate",
+          "u2": "duplicate",
+          "a1": "accepted"
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S4 interleaved sessions": {
+      "verdict": "FAIL",
+      "observed": {
+        "Q_A": "A_A-PROGRESS\nA_A-LATE",
+        "Q_B2_row": null,
+        "derivation": {
+          "aa9": "completed_late"
+        },
+        "all_rows": [
+          [
+            "Q_A",
+            "A_A-PROGRESS\nA_A-LATE"
+          ],
+          [
+            "Q_B",
+            ""
+          ]
+        ]
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S5 replay x3": {
+      "verdict": "PASS",
+      "observed": {
+        "qa_rows": 1,
+        "marker_count": 1,
+        "answer": "A1-PROG\nA2-LATE-MARKER",
+        "receipts": [
+          {
+            "derivation": {
+              "a2": "completed_late"
+            },
+            "events": {
+              "u1": "duplicate",
+              "a1": "duplicate",
+              "a2": "accepted"
+            }
+          },
+          {
+            "derivation": {},
+            "events": {
+              "u1": "duplicate",
+              "a1": "duplicate",
+              "a2": "duplicate"
+            }
+          },
+          {
+            "derivation": {},
+            "events": {
+              "u1": "duplicate",
+              "a1": "duplicate",
+              "a2": "duplicate"
+            }
+          }
+        ]
+      },
+      "expected_on_unfixed_main": "FAIL"
+    },
+    "S6 restart recovery": {
+      "verdict": "PASS",
+      "observed": {
+        "rows": 1,
+        "answer": "A1-PROG\nA1-PROG\nA9-FINAL-AFTER-RESTART",
+        "derivation": {
+          "a1": "completed_late",
+          "a9": "completed_late"
+        },
+        "events": {
+          "u1": "duplicate",
+          "a1": "accepted",
+          "a9": "accepted"
+        }
+      },
+      "expected_on_unfixed_main": "FAIL"
+    }
+  },
+  "signature_ok": false,
+  "fs_sentinel": {
+    "added": 0,
+    "removed": 0,
+    "changed": 0,
+    "suspicious": [],
+    "diff_sample": {
+      "added": [],
+      "removed": [],
+      "changed": []
+    }
+  }
+}
