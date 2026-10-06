@@ -543,7 +543,16 @@ class MemoryInjector:
 
         note = recall.get("note") or {}
         if isinstance(note, dict) and note.get("content"):
-            note_unit = f"[记忆印 {note.get('version', '')}] {note['content']}"
+            version = note.get("version", "")
+            if (note.get("snapshot_semantics") == "delta"
+                    and note.get("complete_state") is False):
+                note_unit = (
+                    f"[记忆增量快照 {version}｜非全量当前状态] "
+                    "未提及事项不代表不存在、完成或被取代；回答当前状态前应检索相关历史证据。\n"
+                    f"{note['content']}"
+                )
+            else:
+                note_unit = f"[记忆印 {version}] {note['content']}"
             units.append(note_unit)
 
         tail = recall.get("tail") or []

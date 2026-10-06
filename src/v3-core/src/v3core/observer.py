@@ -2877,7 +2877,36 @@ def _extract_prev_seed(links_jsonb: Any) -> str | None:
     return None
 
 
-# v4 (2026-08-16): 人格层 + 7 天快照印读取器 — 失败兜底空字符串, 不阻塞观察者主流程。
+def _build_note_section(row: Any) -> dict[str, Any]:
+    """Build one observer-note record without implying it is cumulative state.
+
+    The observer writer persists per-run deltas.  A later ``v*`` row therefore
+    cannot prove that earlier project/task state was completed or superseded.
+    Preserve the existing seed/content and range behavior, but carry explicit
+    semantics for consumers that render the note into a prompt.
+    """
+    note_id, version, full_content, qa_range, links = row[:5]
+    seed = _extract_prev_seed(links)
+    note_content = seed if seed else (full_content or "")
+    range_end = 0
+    try:
+        if qa_range is not None:
+            upper_val = qa_range.upper
+            if upper_val is not None:
+                range_end = int(upper_val)
+    except Exception:
+        range_end = 0
+    return {
+        "note_id": int(note_id) if note_id is not None else 0,
+        "version": str(version or ""),
+        "content": str(note_content),
+        "range_end": range_end,
+        "snapshot_semantics": "delta",
+        "complete_state": False,
+    }
+
+
+# v4 (2026-08-16): 人格层 + 7 天快照印读取器 — 失败兜底空字符串, 不阻塞观察者主流程.
 
 _THINK_BLOCK_RE_OBS = re.compile(r"<think>[\s\S]*?</think>")
 
@@ -5259,9 +5288,10 @@ def recall_for_new_session(
         None — PG 不可达, 或三个段 (note/tail/topics) 全空。
 
         dict={
-            "note": {"note_id", "version", "content", "range_end"},
-                    缺种子印时 content 用全量 note.content 兜底。
-                    range_end 是 int — 该印覆盖的 QA 上界, 用于拼 tail。
+            "note": {"note_id", "version", "content", "range_end",
+                     "snapshot_semantics": "delta", "complete_state": False},
+                    缺种子印时 content 用全量 note.content 兜底；无论 seed 或全文，
+                    当前行都是单次增量，不能代表完整当前状态。range_end 是 int — 该印覆盖的 QA 上界，用于拼 tail.
             "tail": [{"qa_id","session_id","timestamp","question","answer"}, ...]
                     时间升序 (id ASC), 默认 5-10 条。
             "topics": [{"topic_id","title","sim"}, ...]
@@ -5330,24 +5360,7 @@ def recall_for_new_session(
                             # no candidate (the stale note is never injected).
                             row = _m03_select_note_head(cur, _note_suppression)
                             if row is not None:
-                                note_id, version, full_content, qa_range, links = (
-                                    row[0], row[1], row[2], row[3], row[4])
-                                seed = _extract_prev_seed(links)
-                                note_content = seed if seed else (full_content or "")
-                                range_end = 0
-                                try:
-                                    if qa_range is not None:
-                                        upper_val = qa_range.upper
-                                        if upper_val is not None:
-                                            range_end = int(upper_val)
-                                except Exception:
-                                    range_end = 0
-                                note_section = {
-                                    "note_id": int(note_id) if note_id is not None else 0,
-                                    "version": str(version or ""),
-                                    "content": str(note_content),
-                                    "range_end": range_end,
-                                }
+                                note_section = _build_note_section(row)
                         except PrefetchDeadlineExceeded:
                             raise
                         except Exception as e:
@@ -5423,26 +5436,7 @@ def recall_for_new_session(
                         # fully-invalidated chain yields no candidate.
                         row = _m03_select_note_head(cur, _note_suppression)
                         if row is not None:
-                            note_id, version, full_content, qa_range, links = (
-                                row[0], row[1], row[2], row[3], row[4])
-                            # 优先抽种子印 (phase7 _write_observation_note 写入约定)
-                            seed = _extract_prev_seed(links)
-                            note_content = seed if seed else (full_content or "")
-                            # range_end = int8range upper; 失败兜底 0
-                            range_end = 0
-                            try:
-                                if qa_range is not None:
-                                    upper_val = qa_range.upper
-                                    if upper_val is not None:
-                                        range_end = int(upper_val)
-                            except Exception:
-                                range_end = 0
-                            note_section = {
-                                "note_id": int(note_id) if note_id is not None else 0,
-                                "version": str(version or ""),
-                                "content": str(note_content),
-                                "range_end": range_end,
-                            }
+                            note_section = _build_note_section(row)
                     except PrefetchDeadlineExceeded:
                         raise
                     except Exception as e:
