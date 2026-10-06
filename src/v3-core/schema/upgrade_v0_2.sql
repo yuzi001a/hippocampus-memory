@@ -193,6 +193,17 @@ CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
 
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
 
+-- -----------------------------------------------------------------------------
+-- assistant_deliveries — P0-C2 autonomous/async assistant delivery (derived).
+--
+-- Same single-source-of-truth pattern as the other sidecars: the marker below
+-- is replaced with the body of assistant_deliveries.sql at apply time.
+-- Additive and idempotent by construction (CREATE TABLE / CREATE INDEX
+-- IF NOT EXISTS only).  Historic source rows pre-date the delivery container
+-- and are left untouched — no backfill, no data rewrite.
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/assistant_deliveries.sql <<<
+
 COMMIT;
 
 -- =============================================================================

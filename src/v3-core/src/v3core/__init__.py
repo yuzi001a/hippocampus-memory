@@ -3604,12 +3604,14 @@ class V3Core:
             HOST_EVENT_CONTINUATION,
             HOST_EVENT_CONTROL,
             HOST_EVENT_NEW_ROOT,
+            HOST_EVENT_NORMAL_ASSISTANT,
             HOST_EVENT_NORMAL_TOOL,
             HOST_EVENT_REAL_USER,
             HOST_EVENT_TERMINAL,
             classify_host_event,
             extract_oob_payload,
         )
+        from . import assistant_delivery as _assistant_delivery
 
         _call_host = str(host or "").strip()
         _receipt: dict = {
@@ -3677,6 +3679,13 @@ class V3Core:
         # cursor is only source-idempotency.
         _struct_anchor: dict | None = None
         _struct_boundary = False
+        # ── P0-C2: derived autonomous-delivery structure ──
+        # Rebuilt from the FULL snapshot on every sync (seen or not), so a
+        # replay/restart re-derives the same groups and the idempotent write
+        # collapses them to exactly one delivery row.  Structure only here;
+        # the durable write happens after the loop.
+        _delivery_groups: list = []
+        _open_delivery = None
         for msg in messages:
             role = str(msg.get("role", ""))
             key, _reliable = _stable_message_key(msg)
@@ -3719,6 +3728,34 @@ class V3Core:
                     _struct_boundary = False
             elif _kind in (HOST_EVENT_ASYNC_BOUNDARY, HOST_EVENT_NEW_ROOT):
                 _struct_boundary = True
+            # ── P0-C2: autonomous delivery structure ──
+            # Runs for EVERY row of the snapshot (already-seen included): the
+            # delta cursor gates source idempotency only, so grouping is
+            # rebuilt from structure on every sync and a replay/restart yields
+            # the identical groups (C2.3/C2.4).
+            _row_host = str(msg.get("host") or _call_host or _BC_LEGACY_HOST).strip()
+            if _kind in (HOST_EVENT_ASYNC_BOUNDARY, HOST_EVENT_NEW_ROOT):
+                if _open_delivery is not None and _open_delivery.event_ids:
+                    _delivery_groups.append(_open_delivery)
+                _open_delivery = _assistant_delivery.DeliveryGroup(
+                    trigger_event_id=key,
+                    trigger_kind=_kind,
+                    host=_row_host,
+                    session_id=session_id,
+                    started_at=_parse_msg_timestamp(msg.get("timestamp")),
+                )
+            elif _kind == HOST_EVENT_REAL_USER:
+                if _open_delivery is not None and _open_delivery.event_ids:
+                    _delivery_groups.append(_open_delivery)
+                _open_delivery = None
+            elif _kind == HOST_EVENT_NORMAL_ASSISTANT and _open_delivery is not None:
+                if _content.strip():
+                    _open_delivery.event_ids.append(key)
+                    _open_delivery.segments.append((key, _content))
+                    _open_delivery.content = (
+                        f"{_open_delivery.content}\n{_content}"
+                        if _open_delivery.content else _content
+                    )
             if cursor_key in prior_seen or cursor_key in processed_this_call:
                 # Already accepted in a prior sync or earlier in this snapshot — historical replay
                 # within the same session must NOT re-enqueue (I3, I6).
@@ -3774,8 +3811,7 @@ class V3Core:
             if _kind in (HOST_EVENT_ASYNC_BOUNDARY, HOST_EVENT_NEW_ROOT):
                 # Cut the boundary: close the previous human QA (flush it when it
                 # has an answer) and clear pending, so the autonomous output that
-                # follows can never be folded into it.  Durable delivery of these
-                # outputs is P0-C2, not this round.
+                # follows can never be folded into it.
                 if pending is not None and pending.get("q"):
                     if not pending.get("a"):
                         _receipt["incomplete"].append(pending.get("q_msg_id") or "")
@@ -3790,6 +3826,38 @@ class V3Core:
                     pending = None
                     with self._qa_lock:
                         context.pending_qa = None
+                # ── P0-C2: the boundary row is durable source truth ──
+                # The delivery trigger must be traceable to a conversation_stream
+                # row, so the boundary is enqueued with a distinct host_event
+                # role.  It is never user/assistant, so it can never open a QA.
+                _b_ts = _parse_msg_timestamp(msg.get("timestamp"))
+                _b_role = _assistant_delivery.host_event_role(_kind)
+                _b_item = (session_id, key, _content, _b_role, session_turn,
+                           _b_ts, [], [], _row_host,
+                           str(msg.get("turn_id") or ""))
+                try:
+                    _b_status = self._enqueue_live_message_status(
+                        session_id, key, _content, _b_role, session_turn,
+                        timestamp=_b_ts, tool_calls=[], tool_results=[],
+                        host=_row_host, item=_b_item,
+                    )
+                except Exception as _e_b_src:
+                    logger.warning(
+                        "sync_turn boundary source enqueue 失败 (不阻塞): %s",
+                        _safe_err(_e_b_src)[:120],
+                    )
+                    _b_status = "rejected"
+                _receipt["events"][key] = _b_status
+                if _b_status == "rejected":
+                    source_ingest_failed = True
+                    _receipt["ok"] = False
+                    _receipt["rejected"].append(key)
+                    # Not durable → do not advance the cursor; retry next sync.
+                    continue
+                if _b_status == "duplicate":
+                    _receipt["duplicate"].append(key)
+                else:
+                    _receipt["accepted"].append(key)
                 processed_this_call.add(cursor_key)
                 continue
             # Source acceptance is complete for normal user/assistant messages.
@@ -4045,6 +4113,31 @@ class V3Core:
         # authoritative delta cursor.  Until this point, ``prior_seen``
         # is what the algorithm consults for "already accepted".
         context.synced_message_ids.update(processed_this_call)
+        # ── P0-C2: persist derived autonomous deliveries (idempotent) ──
+        # Only derive when every source enqueue in this snapshot succeeded or
+        # was already durable.  Otherwise retry the whole snapshot later; a
+        # sidecar must never claim source events that were rejected.
+        try:
+            if _open_delivery is not None and _open_delivery.event_ids:
+                _delivery_groups.append(_open_delivery)
+            if _delivery_groups and not source_ingest_failed:
+                _delivery_pg = self._pg or self.pg
+                for _dg in _delivery_groups:
+                    try:
+                        _assistant_delivery.write_delivery(
+                            _delivery_pg, _dg, strict=True
+                        )
+                    except Exception as _e_del:
+                        logger.warning(
+                            "sync_turn delivery write 失败 (非阻塞): %s",
+                            _safe_err(_e_del)[:120],
+                        )
+        except Exception as _e_delivery:
+            logger.warning(
+                "sync_turn delivery derivation failed (non-blocking): %s",
+                _safe_err(_e_delivery)[:120],
+            )
+
         # unconditional sync_count update — even on no-op replays (I3, I6).
         # We retain it for backward compatibility and as an observable
         # signal of the most recent snapshot length.  The per-session

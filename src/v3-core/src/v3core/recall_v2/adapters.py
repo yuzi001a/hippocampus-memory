@@ -61,6 +61,12 @@ _KIND_TO_LANE: dict[str, str] = {
     # documented fallback-only semantics above.
     "active_memory": "explicit",
     "yin": "vector",
+    # P0-C2: a derived autonomous assistant delivery is a first-class
+    # assistant result.  It maps onto the existing ``qa`` lane — no sixth
+    # lane, no new lane constant — preserving the five-lane QueryPlan
+    # invariant while keeping the delivery in the same fusion/rerank path
+    # as human QA.
+    "assistant_delivery": "qa",
 }
 _UNKNOWN_LANE_FALLBACK = "vector"
 

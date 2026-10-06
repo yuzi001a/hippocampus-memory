@@ -76,6 +76,75 @@ def test_check_ids_match_frozen_contract():
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def test_schema_version_probe_checks_assistant_deliveries(monkeypatch):
+    """The legacy full doctor must not green-light a missing P0-C2 table."""
+    import sys
+    from types import SimpleNamespace
+
+    class FakeCursor:
+        def __init__(self):
+            self.one = None
+            self.all = []
+            self.column_tables = []
+            self.required_table_names = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params=None):
+            text = " ".join(str(sql).split()).lower()
+            self.one = None
+            self.all = []
+            if "from schema_versions" in text:
+                self.one = ("0.2.1", "test-time")
+            elif "information_schema.columns" in text:
+                self.column_tables.append(params[0])
+            elif "information_schema.tables" in text and "any(" in text:
+                self.required_table_names = list(params[0])
+            elif "information_schema.tables" in text:
+                pass
+            else:
+                raise AssertionError(f"unexpected doctor SQL: {text}")
+
+        def fetchone(self):
+            return self.one
+
+        def fetchall(self):
+            return self.all
+
+    class FakeConnection:
+        def __init__(self):
+            self.cur = FakeCursor()
+
+        def cursor(self):
+            return self.cur
+
+        def rollback(self):
+            pass
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    conn = FakeConnection()
+    fake_pg = SimpleNamespace(connect=lambda *a, **k: conn)
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_pg)
+    result = doctor_full._check_schema_version(
+        {"host": "127.0.0.1", "port": 55432, "database": "doctor-contract",
+         "user": "test-user", "password": ""},
+        timeout=2.0,
+    )
+    assert result["status"] == "fail", result
+    assert "assistant_deliveries" in conn.cur.column_tables
+    assert "assistant_deliveries" in conn.cur.required_table_names
+    assert "assistant_deliveries" in result["evidence"]["missing_tables"]
+
+
 def test_run_full_checks_no_dsn_never_raises(monkeypatch, tmp_path):
     """With profile_dir=tmp_path and dsn=None, the runner returns a
     valid report and never raises — even though many checks have no

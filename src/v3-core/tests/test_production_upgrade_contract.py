@@ -159,6 +159,7 @@ def _full_shape():
         "schema_versions",
         "qa_embedding_chunks",
         "observation_embedding_chunks",
+        "assistant_deliveries",
     }
     cols = {
         ("qa_pairs", "source_id"),
@@ -175,6 +176,15 @@ def _full_shape():
         ("topic_entries", "embed_model"),
         ("observation_notes", "embed_model"),
         ("yin_paragraphs", "embed_model"),
+        ("assistant_deliveries", "source_id"),
+        ("assistant_deliveries", "host"),
+        ("assistant_deliveries", "session_id"),
+        ("assistant_deliveries", "trigger_event_id"),
+        ("assistant_deliveries", "trigger_kind"),
+        ("assistant_deliveries", "content"),
+        ("assistant_deliveries", "event_ids"),
+        ("assistant_deliveries", "started_at"),
+        ("assistant_deliveries", "created_at"),
     }
     return tables, cols
 
@@ -359,6 +369,8 @@ def test_sql_artifact_change_changes_plan_sha(monkeypatch):
     _install_fake_pg(monkeypatch, pg)
 
     plan_a, _meta_a, _sql_a = dc._upgrade_build_plan(dc._parse_dsn(NONPROD_DSN))
+    delivery_artifact_sha = plan_a["artifacts"].get("assistant_deliveries.sql", "")
+    assert re.fullmatch(r"[0-9a-f]{64}", delivery_artifact_sha), plan_a["artifacts"]
     sha_a = plan_a["plan_sha256"]
     combined_a = plan_a["combined_sql"]["sha256"]
 

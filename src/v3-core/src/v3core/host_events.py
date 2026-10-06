@@ -75,6 +75,15 @@ _ASYNC_PREFIXES = (
 _ASYNC_NUMBERED_RE = re.compile(
     r"^\[IMPORTANT:\s+\d+\s+background\s+(?:processes|subagent\s+delegations)\b"
 )
+# P0-C2: Hermes host *metadata* display kinds for autonomous completions.
+# These are the real enum values observed on user rows in state.db
+# (taxonomy §1.3: ``async_delegation_complete`` / ``process_complete``).  A
+# row may carry the metadata without a textual prefix, so the content-only
+# classifier would otherwise resolve it to REAL_USER and open a fake human QA.
+_ASYNC_DISPLAY_KINDS = frozenset({
+    "async_delegation_complete",
+    "process_complete",
+})
 
 # ── §2.1 step 6 — NEW_ROOT ──────────────────────────────────────────────────
 _NEW_ROOT_PREFIXES = (
@@ -191,6 +200,13 @@ def classify_host_event(
 
     # 5. ASYNC boundary → ASYNC_BOUNDARY
     if head.startswith(_ASYNC_PREFIXES) or _ASYNC_NUMBERED_RE.match(head):
+        return HOST_EVENT_ASYNC_BOUNDARY
+
+    # 5a. P0-C2 metadata-only async completion → ASYNC_BOUNDARY
+    # Hermes stamps ``display_kind`` on the host row; for metadata-only
+    # completions there is no textual prefix to match, so the content-only
+    # path would fall through to REAL_USER and open a fake human QA.
+    if dk in _ASYNC_DISPLAY_KINDS:
         return HOST_EVENT_ASYNC_BOUNDARY
 
     # 5b. legacy coverage: 【IMPORTANT / 【ASYNC content-dispatch

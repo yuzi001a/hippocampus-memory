@@ -412,6 +412,20 @@ CREATE INDEX IF NOT EXISTS yin_paragraphs_embedding_ivfflat
 -- -----------------------------------------------------------------------------
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/embedding_failures.sql <<<
 
+-- -----------------------------------------------------------------------------
+-- assistant_deliveries — P0-C2 autonomous/async assistant delivery (derived).
+--
+-- Body is NOT inlined: schema/assistant_deliveries.sql is the canonical
+-- artifact and is spliced here through the same ALPHA_BOOTSTRAP_INCLUDE
+-- mechanism as the other sidecars, so the repo DDL stays single-sourced and
+-- the packaged copy ships inside the installed wheel.
+--
+-- Placed last: the delivery container has no foreign keys and nothing
+-- references it, so appending it keeps every pre-existing table's relative
+-- order (and the F2 / P0-A DDL) byte-for-byte where it was.
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/assistant_deliveries.sql <<<
+
 COMMIT;
 
 -- =============================================================================

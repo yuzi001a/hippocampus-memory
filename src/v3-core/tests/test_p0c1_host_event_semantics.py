@@ -61,6 +61,7 @@ if str(V3CORE_SRC) not in sys.path:
 
 from v3core import V3Core  # noqa: E402
 from v3core.ingest import LiveBuffer  # noqa: E402
+from v3core import assistant_delivery as AD  # noqa: E402
 
 
 # ────────────────────────────────────────────────────────────────
@@ -229,8 +230,10 @@ class FakeQaDb:
     def __init__(self) -> None:
         self.rows: list[dict] = []        # qa_pairs
         self.cs_rows: list[dict] = []     # conversation_stream
+        self.delivery_rows: list[dict] = []  # assistant_deliveries
         self._next = 1
         self._next_cs = 1
+        self._next_delivery = 1
 
     # -- qa_pairs -------------------------------------------------
     def find_by_source(self, source_id: str):
@@ -307,12 +310,53 @@ class FakeQaDb:
                 and (not host or r["host"] == host)]
         return hits[-1] if hits else None
 
+    # -- assistant_deliveries (P0-C2) -----------------------------
+    def find_delivery_by_source(self, source_id):
+        for d in self.delivery_rows:
+            if d["source_id"] == str(source_id):
+                return d
+        return None
+
+    def insert_delivery(self, *, source_id, host, session_id, trigger_event_id,
+                        trigger_kind, content, event_ids, started_at):
+        if self.find_delivery_by_source(source_id):
+            return False
+        self.delivery_rows.append({
+            "id": self._next_delivery,
+            "source_id": str(source_id),
+            "host": host,
+            "session_id": session_id,
+            "trigger_event_id": trigger_event_id,
+            "trigger_kind": trigger_kind,
+            "content": content,
+            "event_ids": _coerce_mev(event_ids),
+            "started_at": started_at,
+        })
+        self._next_delivery += 1
+        return True
+
+    def update_delivery(self, *, source_id, content, event_ids,
+                        trigger_kind=None, started_at=None):
+        existing = self.find_delivery_by_source(source_id)
+        if not existing:
+            return False
+        existing.update({
+            "content": content,
+            "event_ids": _coerce_mev(event_ids),
+        })
+        if trigger_kind is not None:
+            existing["trigger_kind"] = trigger_kind
+        if started_at is not None:
+            existing["started_at"] = started_at
+        return True
+
 
 class FakeCursor:
     def __init__(self, conn: "FakeConn") -> None:
         self.conn = conn
         self.db: FakeQaDb = conn.db
         self._one = None
+        self._all: list = []
         self.rowcount = 0
 
     def __enter__(self):
@@ -324,14 +368,28 @@ class FakeCursor:
     def fetchone(self):
         return self._one
 
+    def fetchall(self):
+        return self._all
+
     def execute(self, sql, params=None):
         s = " ".join(str(sql).split())
         u = s.upper()
         p = params or ()
         self._one = None
+        self._all = []
         self.rowcount = 0
 
         if "FROM CONVERSATION_STREAM" in u:
+            # P0-C2 rebuild read: full ordered source rows for one session.
+            if "EVENT_ID, ROLE, CONTENT" in u:
+                rows = [r for r in self.db.cs_rows if r["session_id"] == p[0]]
+                if "HOST=" in u:
+                    rows = [r for r in rows if r["host"] == p[1]]
+                else:
+                    rows = sorted(rows, key=lambda r: r.get("host") or "")
+                self._all = [(r["event_id"], r["role"], r["content"],
+                              r["timestamp"], r.get("host") or "") for r in rows]
+                return
             # Two anchor shapes must both work:
             #   P0-A      : ... WHERE session_id=%s AND role='user' AND host=%s
             #                     AND host_turn_id=%s
@@ -396,6 +454,53 @@ class FakeCursor:
                 content, _c2, members_json, qa_id, _mj2 = p[:5]
             mid = (json.loads(members_json) or [""])[0]
             self.rowcount = self.db.update_late_merge(qa_id, content, mid)
+        elif u.startswith("SELECT SOURCE_ID, QUESTION, ANSWER, MERGED_EVENT_IDS FROM QA_PAIRS"):
+            # P0-C2 historical repair plan: per-session QA ledger read.
+            self._all = [
+                (r["source_id"], r["question"], r["answer"],
+                 list(r.get("merged_event_ids") or []))
+                for r in self.db.rows if r["session_id"] == p[0]
+            ]
+        elif u.startswith("INSERT INTO ASSISTANT_DELIVERIES"):
+            (source_id, host, session_id, trigger_event_id, trigger_kind,
+             content, event_ids_json, started_at) = p[:8]
+            ok = self.db.insert_delivery(
+                source_id=source_id, host=host, session_id=session_id,
+                trigger_event_id=trigger_event_id, trigger_kind=trigger_kind,
+                content=content, event_ids=event_ids_json,
+                started_at=started_at)
+            self.rowcount = 1 if ok else 0
+        elif u.startswith("SELECT HOST, SESSION_ID, TRIGGER_EVENT_ID, TRIGGER_KIND, CONTENT, EVENT_IDS"):
+            existing = self.db.find_delivery_by_source(p[0])
+            if existing:
+                self._one = (
+                    existing["host"], existing["session_id"],
+                    existing["trigger_event_id"], existing["trigger_kind"],
+                    existing["content"], list(existing.get("event_ids") or []),
+                    existing["started_at"],
+                )
+        elif u.startswith("UPDATE ASSISTANT_DELIVERIES SET"):
+            if "TRIGGER_KIND=" in u:
+                trigger_kind, content, event_ids_json, started_at, source_id = p[:5]
+            else:
+                trigger_kind = started_at = None
+                content, event_ids_json, source_id = p[:3]
+            ok = self.db.update_delivery(
+                source_id=source_id, content=content, event_ids=event_ids_json,
+                trigger_kind=trigger_kind, started_at=started_at,
+            )
+            self.rowcount = 1 if ok else 0
+        elif u.startswith("SELECT SOURCE_ID, HOST, SESSION_ID, TRIGGER_EVENT_ID"):
+            # P0-C2 delivery recall candidates.
+            rows = list(self.db.delivery_rows)
+            if "WHERE SESSION_ID" in u:
+                rows = [d for d in rows if d["session_id"] == p[0]]
+            self._all = [
+                (d["source_id"], d["host"], d["session_id"],
+                 d["trigger_event_id"], d["trigger_kind"], d["content"],
+                 list(d.get("event_ids") or []), d["started_at"])
+                for d in rows
+            ]
         else:
             raise RuntimeError(f"fake PG: unmodelled SQL: {s}")
 
@@ -481,16 +586,19 @@ def ctx(tmp_path, monkeypatch):
 HOST = "dsh"
 
 
-def _m(mid, role, content, ts, turn="T1", display_kind=None):
+def _m(mid, role, content, ts, turn="T1", display_kind=None, session_source=None):
     m = {"id": mid, "role": role, "content": content,
          "timestamp": ts, "turn_id": turn, "host": HOST}
     if display_kind is not None:
         m["display_kind"] = display_kind
+    if session_source is not None:
+        m["session_source"] = session_source
     return m
 
 
-def U(mid, content, ts, turn="T1", display_kind=None):
-    return _m(mid, "user", content, ts, turn=turn, display_kind=display_kind)
+def U(mid, content, ts, turn="T1", display_kind=None, session_source=None):
+    return _m(mid, "user", content, ts, turn=turn, display_kind=display_kind,
+              session_source=session_source)
 
 
 def A(mid, content, ts, turn="T1", display_kind=None):
@@ -932,3 +1040,516 @@ def test_c8_assistant_and_tool_roles():
                                content="a normal model answer") == HOST_EVENT_NORMAL_ASSISTANT
     assert classify_host_event(role="tool",
                                content="tool output") == HOST_EVENT_NORMAL_TOOL
+
+
+# ════════════════════════════════════════════════════════════════
+# P0-C2 — autonomous / async delivery durability
+# ════════════════════════════════════════════════════════════════
+
+# Grounded metadata-only async display kinds: taxonomy §1.3 enumerates exactly
+# two user-row display_kind values for autonomous completions.  (CRON_JOB /
+# SKILL_INVOKED are real *content* shapes, not display_kind values, and are
+# covered below as such.)
+@pytest.mark.parametrize("display_kind", [
+    "async_delegation_complete",
+    "process_complete",
+])
+def test_c2_metadata_async_display_kinds_are_async_boundary(display_kind):
+    """Metadata-only async completion → ASYNC_BOUNDARY (never REAL_USER)."""
+    actual = classify_host_event(
+        role="user", content="host metadata without a textual marker",
+        display_kind=display_kind,
+    )
+    assert actual == HOST_EVENT_ASYNC_BOUNDARY, (
+        f"P0-C2: metadata-only {display_kind} must be a structural host "
+        f"boundary, not {actual!r} (which could create a fake human QA)")
+
+
+@pytest.mark.parametrize("content,session_source,expected", [
+    (CRON_JOB, "cron", HOST_EVENT_NEW_ROOT),
+    (SKILL_INVOKED, None, HOST_EVENT_NEW_ROOT),
+])
+def test_c2_real_content_boundary_shapes(content, session_source, expected):
+    """Real taxonomy content shapes (taxonomy §1.2) → NEW_ROOT."""
+    actual = classify_host_event(role="user", content=content,
+                                 session_source=session_source)
+    assert actual == expected, (
+        f"P0-C2: real content shape must be NEW_ROOT, got {actual!r}")
+
+
+def test_c2_metadata_async_kind_never_opens_qa(ctx):
+    """A metadata-only async completion must not become a human question."""
+    s = "sess-p0c2-meta-async"
+    sync(ctx, s, [U("u1", "Q1 real", TS[0])])
+    sync(ctx, s, [U("u1", "Q1 real", TS[0]),
+                  A("a1", "A1 real", TS[1]),
+                  U("meta", "host metadata only", TS[2],
+                    display_kind="async_delegation_complete"),
+                  A("a2", "A2 autonomous", TS[3], turn="")])
+    flush(ctx)
+    questions = [r["question"] for r in qa_rows(ctx.db, s)]
+    assert "host metadata only" not in questions, (
+        f"metadata-only async row must not be a question; questions={questions}")
+    assert "A2 autonomous" not in answers_blob(ctx.db, s)
+
+
+def _deliveries(ctx, session=None):
+    rows = list(ctx.db.delivery_rows)
+    if session is not None:
+        rows = [r for r in rows if r["session_id"] == session]
+    return rows
+
+
+def _outbox_records(ctx):
+    outbox = ctx.tmp / "j" / "pending_live_buffer"
+    if not outbox.exists():
+        return []
+    return [json.loads(p.read_text(encoding="utf-8"))
+            for p in outbox.rglob("*.json")]
+
+
+def test_c2_boundary_and_result_reach_durable_source_and_delivery(ctx):
+    """Boundary + autonomous output are durable source; one derived delivery."""
+    session = "sess-p0c2-durable-source"
+    snapshot_messages = [
+        U("c2-u1", "Q1: previous human work", TS[0]),
+        A("c2-a1", "A1: previous human answer", TS[1]),
+        U("c2-async", ASYNC_BATCH_COMPLETE, TS[2],
+          display_kind="async_delegation_complete"),
+        A("c2-a-async", "A_async_final: autonomous result", TS[3], turn=""),
+    ]
+    for _ in range(3):
+        sync(ctx, session, snapshot_messages)
+    flush(ctx)
+
+    records = _outbox_records(ctx)
+    boundary = [r for r in records if r.get("msg_id") == "c2-async"]
+    assert len(boundary) == 1, (
+        "P0-C2: ASYNC boundary was consumed as control flow but never entered "
+        "the durable conversation_stream source outbox")
+    assert boundary[0].get("role") == "host_event:ASYNC_BOUNDARY", boundary[0]
+    assert any(r.get("msg_id") == "c2-a-async" and r.get("role") == "assistant"
+               for r in records), "autonomous assistant source event was not durable"
+
+    q1 = qa_by_question(ctx.db, "Q1: previous human work", session)
+    assert q1 is not None, "the prior real-user QA must remain present"
+    assert "A1: previous human answer" in (q1["answer"] or "")
+    assert "A_async_final" not in answers_blob(ctx.db, session), (
+        "autonomous output must remain outside the prior human QA")
+
+    dels = _deliveries(ctx, session)
+    assert len(dels) == 1, f"replay x3 must yield one delivery; {dels}"
+    d = dels[0]
+    assert d["trigger_event_id"] == "c2-async"
+    assert d["trigger_kind"] == HOST_EVENT_ASYNC_BOUNDARY
+    assert d["event_ids"] == ["c2-a-async"]
+    assert d["content"] == "A_async_final: autonomous result"
+    assert d["source_id"] == AD.delivery_source_id(HOST, session, "c2-async")
+
+
+def test_c2_one_delivery_groups_contiguous_assistant_segments(ctx):
+    """ASYNC → A1/A2/A3 ⇒ ONE delivery containing all three in order."""
+    s = "sess-p0c2-group"
+    sync(ctx, s, [U("u1", "Q1 group", TS[0]),
+                  A("a1", "A1 seg one", TS[1])])
+    sync(ctx, s, [U("u1", "Q1 group", TS[0]),
+                  A("a1", "A1 seg one", TS[1]),
+                  U("async", ASYNC_BATCH_COMPLETE, TS[2],
+                    display_kind="async_delegation_complete"),
+                  A("a2", "A2 seg two", TS[3], turn=""),
+                  A("a3", "A3 seg three", TS[4], turn="")])
+    flush(ctx)
+    dels = _deliveries(ctx, s)
+    assert len(dels) == 1, dels
+    assert dels[0]["event_ids"] == ["a2", "a3"], dels[0]
+    assert dels[0]["content"] == "A2 seg two\nA3 seg three", dels[0]
+    assert "A1 seg one" not in dels[0]["content"], (
+        "the human answer before the boundary must not enter the delivery")
+
+
+def test_c2_control_and_terminal_excluded_from_delivery_body(ctx):
+    """CONTROL / TERMINAL inside an autonomous segment are body-transparent."""
+    s = "sess-p0c2-control"
+    sync(ctx, s, [U("async", ASYNC_BATCH_COMPLETE, TS[0],
+                    display_kind="async_delegation_complete"),
+                  A("a1", "A1 real segment", TS[1], turn=""),
+                  U("ctl", SYS_MODEL_SWITCH, TS[2], display_kind="model_switch"),
+                  A("a2", "A2 after control", TS[3], turn=""),
+                  A("term", FAILED_TURN_NOTICE, TS[4], turn="",
+                    display_kind="failed_turn"),
+                  A("a3", "A3 after terminal", TS[5], turn="")])
+    flush(ctx)
+    dels = _deliveries(ctx, s)
+    assert len(dels) == 1, dels
+    assert dels[0]["event_ids"] == ["a1", "a2", "a3"], dels[0]
+    body = dels[0]["content"]
+    assert "A1 real segment" in body and "A2 after control" in body
+    assert "A3 after terminal" in body
+    assert "[System:" not in body and FAILED_TURN_NOTICE not in body
+
+
+def test_c2_cron_new_root_delivery(ctx):
+    """A cron NEW_ROOT opens a delivery for its autonomous output."""
+    s = "cron_job_abc_20261004"
+    sync(ctx, s, [U("cron1", CRON_JOB, TS[0], session_source="cron"),
+                  A("ca1", "cron result body", TS[1], turn="")])
+    flush(ctx)
+    dels = _deliveries(ctx, s)
+    assert len(dels) == 1, dels
+    assert dels[0]["trigger_event_id"] == "cron1"
+    assert dels[0]["trigger_kind"] == HOST_EVENT_NEW_ROOT
+    assert dels[0]["content"] == "cron result body"
+    assert "cron result body" not in answers_blob(ctx.db, s), (
+        "cron output must not become a human QA answer")
+
+
+def test_c2_empty_and_tool_assistant_excluded(ctx):
+    """Empty assistant and tool rows never enter the delivery body."""
+    s = "sess-p0c2-empty"
+    sync(ctx, s, [U("async", ASYNC_BATCH_COMPLETE, TS[0],
+                    display_kind="async_delegation_complete"),
+                  A("empty", "", TS[1], turn=""),
+                  A("a1", "A1 only real", TS[2], turn="")])
+    flush(ctx)
+    dels = _deliveries(ctx, s)
+    assert len(dels) == 1, dels
+    assert dels[0]["event_ids"] == ["a1"], dels[0]
+    assert dels[0]["content"] == "A1 only real"
+
+
+def test_c2_delivery_replay_and_restart_same_result(ctx):
+    """Replay x3 then restart ⇒ still exactly one delivery, same identity."""
+    s = "sess-p0c2-restart"
+    msgs = [U("async", ASYNC_BATCH_COMPLETE, TS[0],
+              display_kind="async_delegation_complete"),
+            A("a1", "A1 durable", TS[1], turn="")]
+    for _ in range(3):
+        sync(ctx, s, msgs)
+    flush(ctx)
+    before = _deliveries(ctx, s)
+    assert len(before) == 1, before
+    ctx.restart()
+    for _ in range(2):
+        sync(ctx, s, msgs)
+    flush(ctx)
+    after = _deliveries(ctx, s)
+    assert len(after) == 1, after
+    assert after[0]["source_id"] == before[0]["source_id"]
+    assert after[0]["event_ids"] == before[0]["event_ids"]
+
+
+def test_c2_no_embedding_provider_delivery_and_source_durable(ctx):
+    """No embedding config must not block source or delivery durability."""
+    s = "sess-p0c2-no-embed"
+    assert ctx.core._config.get("embed") is None
+    sync(ctx, s, [U("async", ASYNC_BATCH_COMPLETE, TS[0],
+                    display_kind="async_delegation_complete"),
+                  A("a1", "A1 no-embed durable", TS[1], turn="")])
+    flush(ctx)
+    assert _deliveries(ctx, s), (
+        "delivery must be durable without an embedding provider")
+    records = _outbox_records(ctx)
+    assert any(r.get("msg_id") == "a1" for r in records), "source must be durable"
+
+
+def test_c2_delivery_rebuild_from_source_is_deterministic(ctx):
+    """A delivery is rebuildable from conversation_stream alone."""
+    s = "sess-p0c2-rebuild"
+    for r in [
+        {"session_id": s, "role": "user", "host": HOST, "host_turn_id": "T1",
+         "event_id": "u1", "turn_id": "T1", "content": "Q1 human",
+         "timestamp": TS[0]},
+        {"session_id": s, "role": "assistant", "host": HOST, "host_turn_id": "T1",
+         "event_id": "a1", "turn_id": "T1", "content": "A1 human",
+         "timestamp": TS[1]},
+        {"session_id": s, "role": AD.host_event_role(HOST_EVENT_ASYNC_BOUNDARY),
+         "host": HOST, "host_turn_id": "", "event_id": "async1", "turn_id": "",
+         "content": ASYNC_BATCH_COMPLETE, "timestamp": TS[2]},
+        {"session_id": s, "role": "assistant", "host": HOST, "host_turn_id": "",
+         "event_id": "aa1", "turn_id": "", "content": "autonomous body",
+         "timestamp": TS[3]},
+    ]:
+        ctx.db.insert_cs(**r)
+    groups = AD.derive_deliveries(ctx.core._pg, s, HOST)
+    assert len(groups) == 1, groups
+    assert groups[0].trigger_event_id == "async1"
+    assert groups[0].event_ids == ["aa1"]
+    assert AD.rebuild_deliveries(ctx.core._pg, s, HOST) == 1
+    assert AD.rebuild_deliveries(ctx.core._pg, s, HOST) == 1  # idempotent
+    assert len(_deliveries(ctx, s)) == 1
+
+
+def test_c2_delivery_recall_lane_and_source_trace(ctx):
+    """Deliveries map onto the existing qa lane (no sixth lane) + trace."""
+    from v3core.recall_v2.adapters import lane_for_kind
+    from v3core.recall_v2.contracts import ALL_LANES
+    assert AD.DELIVERY_KIND == "assistant_delivery"
+    lane = lane_for_kind("assistant_delivery")
+    assert lane == "qa", lane
+    assert lane in tuple(ALL_LANES)
+    s = "sess-p0c2-recall"
+    sync(ctx, s, [U("async", ASYNC_BATCH_COMPLETE, TS[0],
+                    display_kind="async_delegation_complete"),
+                  A("a1", "A1 recallable delivery", TS[1], turn="")])
+    flush(ctx)
+    hits = AD.delivery_recall_hits(ctx.core._pg, session_id=s)
+    assert len(hits) == 1, hits
+    assert hits[0]["kind"] == "assistant_delivery"
+    assert hits[0]["trigger_event_id"] == "async"
+    assert hits[0]["event_ids"] == ["a1"]
+    assert "A1 recallable delivery" in hits[0]["content"]
+    # source trace: trigger + member events are durable source (LiveBuffer outbox)
+    records = _outbox_records(ctx)
+    src_ids = {r.get("msg_id") for r in records}
+    assert "async" in src_ids, "delivery trigger must trace to durable source"
+    assert "a1" in src_ids, "delivery member must trace to durable source"
+
+
+def test_c2_repair_plan_is_readonly_deterministic(ctx):
+    """Historical repair dry-run: deterministic, identifies contamination."""
+    s = "sess-p0c2-repair"
+    # durable source: human turn + autonomous boundary + folded output
+    for r in [
+        {"session_id": s, "role": "user", "host": HOST, "host_turn_id": "T1",
+         "event_id": "u1", "turn_id": "T1", "content": "Q1 human",
+         "timestamp": TS[0]},
+        {"session_id": s, "role": "assistant", "host": HOST, "host_turn_id": "T1",
+         "event_id": "a1", "turn_id": "T1", "content": "A1 human",
+         "timestamp": TS[1]},
+        {"session_id": s, "role": AD.host_event_role(HOST_EVENT_ASYNC_BOUNDARY),
+         "host": HOST, "host_turn_id": "", "event_id": "async", "turn_id": "",
+         "content": ASYNC_BATCH_COMPLETE, "timestamp": TS[2]},
+        {"session_id": s, "role": "assistant", "host": HOST, "host_turn_id": "",
+         "event_id": "aa1", "turn_id": "", "content": "A_autonomous folded",
+         "timestamp": TS[3]},
+    ]:
+        ctx.db.insert_cs(**r)
+    # historical contamination: the autonomous event was folded into the QA
+    ctx.db.insert(
+        source_id=ctx.core._qa_source_id(s, 1, "u1", host=HOST), session_id=s, turn_id=1,
+        question="Q1 human", answer="A1 human\nA_autonomous folded",
+        tool_calls=[], tool_results=[], timestamp=TS[0],
+        source="live_sync", merged_event_ids=["a1", "aa1"])
+
+    before = json.dumps(ctx.db.delivery_rows, default=str, sort_keys=True)
+    plan_a = AD.plan_delivery_repair(ctx.core._pg, s, HOST)
+    plan_b = AD.plan_delivery_repair(ctx.core._pg, s, HOST)
+    assert plan_a == plan_b, "repair plan must be deterministic"
+    after = json.dumps(ctx.db.delivery_rows, default=str, sort_keys=True)
+    assert before == after, "repair plan must never write"
+
+    created = plan_a["would_create_deliveries"]
+    assert len(created) == 1, created
+    assert created[0]["trigger_event_id"] == "async"
+    polluted = plan_a["would_rebuild_polluted_qa"]
+    assert len(polluted) == 1, polluted
+    assert polluted[0]["contaminated_event_ids"] == ["aa1"]
+    assert plan_a["unknown"] == []
+
+
+def test_c2_repair_plan_marks_unprovable_provenance_unknown(ctx):
+    """Legacy contamination with no event ledger → UNKNOWN, never repaired."""
+    s = "sess-p0c2-repair-unknown"
+    for r in [
+        {"session_id": s, "role": AD.host_event_role(HOST_EVENT_ASYNC_BOUNDARY),
+         "host": HOST, "host_turn_id": "", "event_id": "async", "turn_id": "",
+         "content": ASYNC_BATCH_COMPLETE, "timestamp": TS[0]},
+        {"session_id": s, "role": "assistant", "host": HOST, "host_turn_id": "",
+         "event_id": "aa1", "turn_id": "", "content": "A_autonomous legacy",
+         "timestamp": TS[1]},
+    ]:
+        ctx.db.insert_cs(**r)
+    # a legacy QA row with no merged_event_ids ledger but overlapping text
+    ctx.db.insert(
+        source_id="legacy/qa/1", session_id=s, turn_id=1,
+        question="Q legacy", answer="prefix A_autonomous legacy suffix",
+        tool_calls=[], tool_results=[], timestamp=TS[0],
+        source="live_sync", merged_event_ids=[])
+    plan = AD.plan_delivery_repair(ctx.core._pg, s, HOST)
+    assert plan["would_rebuild_polluted_qa"] == [], plan
+    assert len(plan["unknown"]) == 1, plan
+    assert "merged_event_ids" in plan["unknown"][0]["reason"]
+
+
+def test_c2_delivery_refreshes_when_async_snapshot_grows(ctx):
+    """Later source events must replace the earlier partial derived delivery."""
+    s = "sess-p0c2-growing-delivery"
+    first = [
+        U("async", ASYNC_BATCH_COMPLETE, TS[0],
+          display_kind="async_delegation_complete"),
+        A("a1", "A1 partial", TS[1], turn=""),
+    ]
+    sync(ctx, s, first)
+    before = _deliveries(ctx, s)
+    assert len(before) == 1, before
+    assert before[0]["event_ids"] == ["a1"], before
+
+    sync(ctx, s, first + [A("a2", "A2 final", TS[2], turn="")])
+    after = _deliveries(ctx, s)
+    assert len(after) == 1, after
+    assert after[0]["event_ids"] == ["a1", "a2"], after
+    assert after[0]["content"] == "A1 partial\nA2 final", after
+
+
+def test_c2_rejected_source_event_cannot_create_delivery(ctx, monkeypatch):
+    """A derived row must never outlive a source event that was rejected."""
+    s = "sess-p0c2-rejected-source"
+    original = ctx.core._enqueue_live_message_status
+
+    def reject_assistant(*args, **kwargs):
+        if len(args) > 1 and args[1] == "a1":
+            return "rejected"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ctx.core, "_enqueue_live_message_status", reject_assistant)
+    receipt = sync(ctx, s, [
+        U("async", ASYNC_BATCH_COMPLETE, TS[0],
+          display_kind="async_delegation_complete"),
+        A("a1", "A1 not durable", TS[1], turn=""),
+    ])
+    assert receipt["ok"] is False, receipt
+    assert "a1" in receipt["rejected"], receipt
+    assert _deliveries(ctx, s) == []
+
+
+def test_c2_delivery_source_identity_is_unambiguous():
+    """Composite F2 identity components cannot collide on embedded slashes."""
+    assert AD.delivery_source_id("h/x", "s", "e") != AD.delivery_source_id(
+        "h", "x/s", "e")
+
+
+def test_c2_keyword_delivery_candidates_search_real_content_without_question():
+    """Delivery retrieval queries assistant content, not a synthetic Q field."""
+    class Cursor:
+        def __init__(self):
+            self.sql = ""
+            self.params = ()
+
+        def execute(self, sql, params):
+            self.sql = " ".join(str(sql).split())
+            self.params = tuple(params)
+
+        def fetchall(self):
+            return [("delivery/h/s/trigger", "ASYNC_BOUNDARY",
+                     "needle assistant answer", "2026-10-06T00:00:00+00:00", 1)]
+
+    cur = Cursor()
+    rows = AD.keyword_delivery_candidates(cur, ["needle"], limit=7)
+    assert "assistant_deliveries" in cur.sql.lower(), cur.sql
+    assert "content ilike" in cur.sql.lower(), cur.sql
+    assert "question" not in cur.sql.lower(), cur.sql
+    assert cur.params.count("%needle%") == 2, cur.params
+    assert len(rows) == 1, rows
+    assert rows[0]["source_id"] == "delivery/h/s/trigger"
+    assert rows[0]["content"] == "needle assistant answer"
+    assert rows[0]["matched_terms"] == 1
+
+
+def test_c2_rebuild_without_host_keeps_f2_host_partitions_separate(ctx):
+    s = "session-reused-across-hosts"
+    for host, suffix in (("host-a", "a"), ("host-b", "b")):
+        ctx.db.insert_cs(
+            session_id=s, role="host_event:ASYNC_BOUNDARY", host=host,
+            host_turn_id="", event_id=f"trigger-{suffix}", turn_id="",
+            content=ASYNC_BATCH_COMPLETE, timestamp=TS[0],
+        )
+        ctx.db.insert_cs(
+            session_id=s, role="assistant", host=host, host_turn_id="",
+            event_id=f"answer-{suffix}", turn_id="",
+            content=f"answer from {host}", timestamp=TS[1],
+        )
+    groups = AD.derive_deliveries(ctx.core._pg, s)
+    assert {group.host for group in groups} == {"host-a", "host-b"}
+    assert {tuple(group.event_ids) for group in groups} == {
+        ("answer-a",), ("answer-b",)
+    }
+
+
+def test_c2_repair_planner_reports_unknown_on_source_read_failure(ctx, monkeypatch):
+    def fail_read(*args, **kwargs):
+        raise RuntimeError("simulated read failure")
+
+    monkeypatch.setattr(AD, "load_source_rows", fail_read)
+    result = AD.plan_delivery_repair(ctx.core._pg, "repair-session", HOST)
+    assert result["status"] == "unknown", result
+    assert result["reason"] == "source_or_qa_read_failed", result
+    assert result["would_create_deliveries"] == [], result
+
+
+def test_c2_repair_plan_scopes_qa_provenance_by_f2_host(ctx):
+    """Bare event IDs from another host must not mark this host's QA polluted."""
+    s = "session-shared-for-repair"
+    for host, event_id, content, suffix in (
+        (HOST, "same-event", "autonomous payload for dsh", "dsh"),
+        ("host-b", "same-event", "different host payload", "b"),
+    ):
+        if host == HOST:
+            ctx.db.insert_cs(
+                session_id=s, role="host_event:ASYNC_BOUNDARY", host=host,
+                host_turn_id="", event_id=f"trigger-{suffix}", turn_id="",
+                content=ASYNC_BATCH_COMPLETE, timestamp=TS[0],
+            )
+        ctx.db.insert_cs(
+            session_id=s, role="assistant", host=host, host_turn_id="",
+            event_id=event_id, turn_id="", content=content, timestamp=TS[1],
+        )
+    qa_this_host = ctx.core._qa_source_id(s, 1, "human-a", host=HOST)
+    qa_other_host = ctx.core._qa_source_id(s, 1, "human-b", host="host-b")
+    for source_id, answer in (
+        (qa_this_host, "human answer plus autonomous payload for dsh"),
+        (qa_other_host, "unrelated answer from host-b"),
+    ):
+        ctx.db.insert(
+            source_id=source_id, session_id=s, turn_id=1,
+            question="human question", answer=answer,
+            tool_calls=[], tool_results=[], timestamp=TS[0],
+            source="live_sync", merged_event_ids=["same-event"],
+        )
+
+    plan = AD.plan_delivery_repair(ctx.core._pg, s, HOST)
+    assert [row["qa_source_id"] for row in plan["would_rebuild_polluted_qa"]] == [
+        qa_this_host
+    ], plan
+    assert all(row["qa_source_id"] != qa_other_host for row in plan["unknown"]), plan
+
+
+def test_c2_rebuild_rejects_member_without_f2_event_id(ctx):
+    """A durable delivery may not contain an untraceable assistant member."""
+    s = "sess-p0c2-missing-event-id"
+    ctx.db.insert_cs(
+        session_id=s, role="host_event:ASYNC_BOUNDARY", host=HOST,
+        host_turn_id="", event_id="trigger", turn_id="",
+        content=ASYNC_BATCH_COMPLETE, timestamp=TS[0],
+    )
+    ctx.db.insert_cs(
+        session_id=s, role="assistant", host=HOST, host_turn_id="",
+        event_id="", turn_id="", content="untraceable output", timestamp=TS[1],
+    )
+    with pytest.raises(ValueError, match="event_id"):
+        AD.rebuild_deliveries(ctx.core._pg, s, HOST)
+    assert _deliveries(ctx, s) == []
+
+
+def test_c2_live_replay_preserves_authoritative_content_for_same_event_id(ctx):
+    """A compressed/stale snapshot must not rewrite durable source content."""
+    s = "sess-p0c2-content-rewrite"
+    boundary = U("async", ASYNC_BATCH_COMPLETE, TS[0],
+                 display_kind="async_delegation_complete")
+    first = [boundary, A("a1", "A1 full durable source text", TS[1], turn="")]
+    sync(ctx, s, first)
+    initial = _deliveries(ctx, s)
+    assert len(initial) == 1, initial
+    assert initial[0]["content"] == "A1 full durable source text", initial
+
+    rewritten = [boundary, A("a1", "A1 compressed snapshot", TS[1], turn="")]
+    sync(ctx, s, rewritten)
+    same_ids = _deliveries(ctx, s)
+    assert len(same_ids) == 1, same_ids
+    assert same_ids[0]["event_ids"] == ["a1"], same_ids
+    assert same_ids[0]["content"] == "A1 full durable source text", same_ids
+
+    sync(ctx, s, rewritten + [A("a2", "A2 newly durable", TS[2], turn="")])
+    extended = _deliveries(ctx, s)
+    assert len(extended) == 1, extended
+    assert extended[0]["event_ids"] == ["a1", "a2"], extended
+    assert extended[0]["content"] == "A1 full durable source text\nA2 newly durable", extended

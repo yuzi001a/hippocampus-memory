@@ -2119,6 +2119,7 @@ def recall_pool(
     # 不改任何排序语义 (空字典触发 false 分支, 等价于 keyword 路径未命中)。
     _rare_bonus = {}
     _qa_boost_sig = {}
+    _delivery_hits_raw: list[dict] = []
 
     # Keyword path — PG topics 表（优先）或 SQLite topic_blocks 兜底
     # Keyword + QA lanes (single combined block — both seams share the
@@ -2676,6 +2677,26 @@ def recall_pool(
                                             if _r[0] not in _seen_qa:
                                                 _seen_qa.add(_r[0])
                                                 _qa_hits_raw.append(_r)
+                                # P0-C2: assistant deliveries join the existing
+                                # lexical QA retrieval path, but only their real
+                                # assistant content is searched (never a fake Q).
+                                try:
+                                    from .assistant_delivery import keyword_delivery_candidates
+                                    _delivery_hits_raw = keyword_delivery_candidates(
+                                        _pg_cur, _terms,
+                                        limit=max(rerank_top_n or 0, limit * 8),
+                                    )
+                                except PrefetchDeadlineExceeded:
+                                    raise
+                                except Exception as _delivery_lookup_error:
+                                    try:
+                                        _pg_conn.rollback()
+                                    except Exception:
+                                        pass
+                                    logger.debug(
+                                        "assistant-delivery keyword lookup failed: %s",
+                                        _safe_err(_delivery_lookup_error)[:100],
+                                    )
                 except PrefetchDeadlineExceeded:
                     # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
                     try:
@@ -2837,6 +2858,32 @@ def recall_pool(
                         kind='qa',
                         created_at=_ts,
                     )
+                # Deliveries are real assistant output, not QA.  They share
+                # the existing lexical QA lane/fusion path while retaining a
+                # distinct kind and source_id for provenance.
+                for _delivery_row in _delivery_hits_raw:
+                    _delivery_sid = str(_delivery_row.get("source_id") or "")
+                    _delivery_content = str(_delivery_row.get("content") or "")
+                    _matched_count = int(_delivery_row.get("matched_terms") or 0)
+                    if not _delivery_sid or not _delivery_content or _matched_count <= 0:
+                        continue
+                    _delivery_kind = str(_delivery_row.get("trigger_kind") or "")
+                    _delivery_ts = _delivery_row.get("created_at")
+                    if hasattr(_delivery_ts, "isoformat"):
+                        _delivery_ts = _delivery_ts.isoformat()
+                    kw_ids.add(_delivery_sid)
+                    hits[_delivery_sid] = RecallHit(
+                        source_id=_delivery_sid,
+                        title=(f"assistant delivery ({_delivery_kind})"
+                               if _delivery_kind else "assistant delivery"),
+                        content_preview=_delivery_content[:500],
+                        content=_delivery_content,
+                        category="assistant_delivery",
+                        tags=[],
+                        rrf_score=min(0.6 + 0.2 * _matched_count, 2.0),
+                        kind="assistant_delivery",
+                        created_at=str(_delivery_ts or ""),
+                    )
             except PrefetchDeadlineExceeded:
                 # A8 (G6B Slice B): record the lane timeout BEFORE the
                 # raise.  Inside the QA scoring block.
@@ -2879,7 +2926,7 @@ def recall_pool(
                 _k = str(getattr(_h, "kind", "") or "")
             except Exception:
                 _k = ""
-            if _k == "qa":
+            if _k in ("qa", "assistant_delivery"):
                 _qa_kw_ids.append(_sid)
             else:
                 _kw_kw_ids.append(_sid)
