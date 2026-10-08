@@ -80,6 +80,17 @@ storage:
   #   endpoint: "https://your-rerank-host.example/v1/rerank"
   #   api_key:  ""
   #   model:    "your-rerank-model"
+
+# Recall tuning is optional. `qa_tail_quota` (default 3) is the additive tail
+# quota for the QA-keyword lane: the existing per-term head cap C is unchanged,
+# and up to T further eligible QA rows immediately after that head (same id ASC
+# order) are admitted. Head rows are never evicted or reordered, and
+# `qa_tail_quota: 0` restores the pre-P0-B3 head-only admission exactly. The
+# default is provisional — derived from a deterministic synthetic sweep, NOT
+# calibrated against a production corpus — so tune it per deployment.
+# Negative/malformed values fall back to the default.
+# prefetch:
+#   qa_tail_quota: 3
 ```
 
 > The config schema is owned by `v3core.config` / `v3core.config_model`. If

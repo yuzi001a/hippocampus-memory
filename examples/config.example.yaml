@@ -50,3 +50,13 @@ storage:
   #   endpoint: "https://your-rerank-host.example/v1/rerank"
   #   api_key:  ""
   #   model:    "your-rerank-model"
+
+# Recall tuning is optional. The QA-keyword lane keeps its existing per-term
+# head cap C (the first C eligible QA rows by id ASC); `qa_tail_quota` admits up
+# to T further eligible rows immediately after that head, still id ASC. It never
+# evicts or reorders a head row, and `qa_tail_quota: 0` restores the pre-P0-B3
+# head-only admission exactly. The default (3) is provisional — derived from a
+# deterministic synthetic sweep, NOT calibrated against a production corpus —
+# so tune it per deployment. Negative/malformed values fall back to the default.
+# prefetch:
+#   qa_tail_quota: 3

@@ -644,6 +644,77 @@ def _resolve_qa_snapshot_min_terms(config) -> int:
     return value
 
 
+# 2026-10-08 P0-B3: additive QA-keyword candidate *tail quota* T.
+# Existing per-term head cap C is unchanged (first C eligible rows by id ASC);
+# T extends it with at most T further eligible rows (ranks C+1..C+T, id ASC).
+# The result is a strict superset of the pre-P0-B3 admission set — no head row
+# is ever evicted or reordered, and T=0 is byte-identical to the old output.
+#
+# Default 3 is derived ONLY from the deterministic synthetic B3 sweep; the
+# production corpus-wide frequency/rank distribution is NOT calibrated, so the
+# value is configurable/provisional. Explicit 0 disables it; a negative or
+# malformed value falls back to the default (never coerced through truthiness).
+_QA_TAIL_QUOTA_DEFAULT = 3
+
+
+def _clamp_qa_tail_quota(value) -> int:
+    """Coerce a *direct* ``tail_quota`` argument to a non-negative int.
+
+    Unlike :func:`_resolve_qa_tail_quota` (which applies the configured
+    default for a negative/malformed value), a direct per-call argument
+    clamps to 0 — a negative quota means "no tail", preserving the legacy
+    head-only result exactly.
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return coerced if coerced > 0 else 0
+
+
+def _resolve_qa_tail_quota(config) -> int:
+    """Return the configured ``prefetch.qa_tail_quota`` (default 3; 0 disables).
+
+    Tolerant to V3Config / PrefetchConfig / raw dict / None / missing field.
+    An explicit ``0`` is preserved (it disables the tail); a negative or
+    malformed value falls back to the default 3 rather than being coerced
+    through truthiness.
+    """
+    default = _QA_TAIL_QUOTA_DEFAULT
+    if config is None:
+        return default
+    try:
+        if isinstance(config, dict):
+            pf = config.get("prefetch") or {}
+            raw_value = pf.get("qa_tail_quota", default) if isinstance(pf, dict) else default
+        else:
+            pf = getattr(config, "prefetch", None)
+            raw_value = (
+                getattr(config, "qa_tail_quota", default)
+                if hasattr(config, "qa_tail_quota")
+                else (getattr(pf, "qa_tail_quota", default) if pf is not None else default)
+            )
+    except (TypeError, AttributeError):
+        return default
+    if raw_value is None or (isinstance(raw_value, str) and not raw_value.strip()):
+        return default
+    try:
+        if isinstance(raw_value, bool):
+            # bool is a subclass of int — malformed, not 0/1.
+            return default
+        if isinstance(raw_value, str):
+            value = int(raw_value.strip())
+        else:
+            value = int(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if value < 0:
+        return default
+    return value
+
+
 def _qa_snapshot_load(
     pg,
     pool,
@@ -981,6 +1052,7 @@ def _qa_snapshot_lookup(
     rare_limit: int,
     per_term_limit: int,
     freq_limit: int,
+    tail_quota: int = 0,
     matched_terms_out=None,
     deadline=None,
 ) -> tuple[dict, list]:
@@ -990,6 +1062,20 @@ def _qa_snapshot_lookup(
     case-insensitive). Selected rows for ranking require answer IS NOT NULL
     and session_id NOT LIKE '%.trajectory%', ordered by id ASC, and capped
     by the existing rare / common dynamic limits.
+
+    2026-10-08 P0-B3 additive tail quota (``tail_quota``, default 0):
+
+      * The existing per-term head cap C is unchanged (first C eligible rows
+        by ``id`` ASC).
+      * ``tail_quota`` T extends the admitted set with at most T further
+        eligible rows immediately after the head (ranks C+1..C+T, still
+        ``id`` ASC). It is NOT the final T rows of the full set and NOT
+        two-ended sampling.
+      * The result is ``head + tail`` — a strict superset of the pre-P0-B3
+        rows; no head row is ever evicted or reordered, and ``T=0``
+        reproduces the old result exactly. A negative direct value clamps
+        to 0. Frequency counts are unchanged (they count every matching row
+        regardless of the admission quota).
 
     2026-09-04 P1.3.1 deadline-closure — two new optional kwargs:
 
@@ -1070,6 +1156,7 @@ def _qa_snapshot_lookup(
             matched_terms_out.update(per_row_hits)
 
     by_id = {row[0]: row for row in rows}
+    tail = _clamp_qa_tail_quota(tail_quota)
     rows_by_term = []
     for idx, ids in enumerate(eligible_per_term):
         ids_sorted = sorted(ids)  # id ASC, mirror ORDER BY id ASC in SQL
@@ -1081,6 +1168,9 @@ def _qa_snapshot_lookup(
                 cap = max(int(per_term_limit), min(freq, int(freq_limit)))
             else:
                 cap = max(int(per_term_limit), 1)
+        # 2026-10-08 P0-B3: head cap C + bounded tail T, contiguous id ASC.
+        # T=0 -> ids_sorted[:cap] (byte-identical to the pre-P0-B3 slice).
+        admitted = cap + tail
         rows_by_term.append(
             [
                 (
@@ -1089,7 +1179,7 @@ def _qa_snapshot_lookup(
                     by_id[rid][2],
                     by_id[rid][3],
                 )
-                for rid in ids_sorted[:cap]
+                for rid in ids_sorted[:admitted]
             ]
         )
     return frequencies, rows_by_term
@@ -1286,6 +1376,31 @@ def _topic_snapshot_lookup(snapshot, terms, *, limit):
     return main_rows, rare_rows
 
 
+def _qa_legacy_keyword_lookup(cursor, term, limit, *, tail_quota=0) -> list:
+    """Legacy single-term QA fallback: head cap ``limit`` + tail ``tail_quota``.
+
+    Extracted verbatim from the old per-term fallback SQL so it can be
+    exercised in isolation. It preserves the current match/eligibility rules
+    exactly — ``question ILIKE %term% OR answer ILIKE %term%``,
+    ``answer IS NOT NULL`` and ``session_id NOT LIKE '%.trajectory%'`` —
+    ordered ``id`` ASC, and returns the contiguous slice ``[0 : C + T]``
+    where ``C = limit`` is the existing head cap and ``T = tail_quota`` the
+    additive P0-B3 tail (a direct negative/malformed quota clamps to 0, so
+    ``tail_quota=0`` reproduces the pre-P0-B3 head-only read).
+    """
+    head = max(int(limit or 0), 0)
+    tail = _clamp_qa_tail_quota(tail_quota)
+    cursor.execute(
+        "SELECT id, timestamp, question, answer FROM qa_pairs "
+        "WHERE (question ILIKE %s OR answer ILIKE %s) "
+        "AND answer IS NOT NULL "
+        "AND session_id NOT LIKE '%%.trajectory%%' "
+        "ORDER BY id ASC LIMIT %s",
+        [f'%{term}%', f'%{term}%', head + tail],
+    )
+    return list(cursor.fetchall())
+
+
 def _combined_qa_keyword_lookup(
     cursor,
     terms: list[str],
@@ -1293,6 +1408,7 @@ def _combined_qa_keyword_lookup(
     rare_limit: int,
     per_term_limit: int,
     freq_limit: int,
+    tail_quota: int = 0,
 ) -> tuple[dict[str, int], list[list[tuple]]]:
     """Return exact term frequencies and per-term QA rows in one SQL round-trip.
 
@@ -1303,6 +1419,11 @@ def _combined_qa_keyword_lookup(
       filters.
     * ``ranked`` applies the old ``answer IS NOT NULL`` and trajectory filters,
       then keeps ``id ASC`` rows for the dynamic per-term limit.
+
+    2026-10-08 P0-B3: the per-term dynamic head cap C is unchanged; the
+    additive ``tail_quota`` T admits the next up-to-T eligible ranks after
+    that head (``rn <= C + T``), still ``id`` ASC and duplicate-free. ``T=0``
+    reproduces the pre-P0-B3 SQL exactly; a direct negative value clamps to 0.
 
     ``term_list`` is built only from tokenizer output.  Its values are still
     bound parameters; the generated SQL contains no user text or bind values.
@@ -1346,7 +1467,7 @@ def _combined_qa_keyword_lookup(
             WHERE rn <= CASE
                     WHEN freq <= 3 THEN %s
                     ELSE GREATEST(%s, LEAST(freq, %s))
-                 END
+                 END + %s
         )
         SELECT t.ord, COALESCE(s.freq, 0) AS freq,
                r.id, r.timestamp, q.question, q.answer
@@ -1359,7 +1480,12 @@ def _combined_qa_keyword_lookup(
     params: list[Any] = []
     for index, term in enumerate(terms):
         params.extend((index, term))
-    params.extend((int(rare_limit), int(per_term_limit), int(freq_limit)))
+    params.extend((
+        int(rare_limit),
+        int(per_term_limit),
+        int(freq_limit),
+        _clamp_qa_tail_quota(tail_quota),
+    ))
     cursor.execute(sql, params)
 
     frequencies = {str(term).lower(): 0 for term in terms}
@@ -1416,6 +1542,7 @@ def _combined_qa_keyword_lookup_parallel(
     rare_limit: int,
     per_term_limit: int,
     freq_limit: int,
+    tail_quota: int = 0,
 ) -> tuple[dict[str, int], list[list[tuple]]]:
     """Run independent term chunks on independent pool leases.
 
@@ -1423,6 +1550,9 @@ def _combined_qa_keyword_lookup_parallel(
     chunk is independent, and the caller must prove that the pool has one
     spare connection beyond the worker set; callers invoke it before their
     main keyword lease is acquired.
+
+    2026-10-08 P0-B3: ``tail_quota`` is forwarded unchanged into each chunk's
+    ``_combined_qa_keyword_lookup`` so every term admits its head + tail.
     """
     worker_count = max(2, min(int(workers), len(terms)))
     chunk_count = worker_count + 1 if worker_count >= 3 and len(terms) >= 4 else worker_count
@@ -1442,6 +1572,7 @@ def _combined_qa_keyword_lookup_parallel(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
 
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="v3-qa") as executor:
@@ -1509,6 +1640,9 @@ def _qa_prefill_parallel_cache(
     freq_limit = max(rerank_top_n or 0, limit * 8)
     if isinstance(config, dict):
         freq_limit = int((config.get("recall") or {}).get("qa_freq_limit", freq_limit) or freq_limit)
+    # 2026-10-08 P0-B3: resolve the additive tail quota once and fold it into
+    # the cache identity so a T change invalidates cached head-only rows.
+    tail_quota = _resolve_qa_tail_quota(config)
 
     version = None
     try:
@@ -1530,7 +1664,7 @@ def _qa_prefill_parallel_cache(
     cache = _qa_keyword_cache_for_pool(
         pool,
         version,
-        (int(rare_limit), int(per_term_limit), int(freq_limit)),
+        (int(rare_limit), int(per_term_limit), int(freq_limit), int(tail_quota)),
     )
     # ── A2 admission gate ──────────────────────────────────────────
     # Only reserve worker slots when there is real work to do (i.e. cache
@@ -1614,6 +1748,7 @@ def _qa_prefill_parallel_cache(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
             else:
                 _combined_qa_keyword_lookup_parallel(
@@ -1623,6 +1758,7 @@ def _qa_prefill_parallel_cache(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
         except PrefetchDeadlineExceeded:
             raise
@@ -1646,6 +1782,7 @@ def _qa_prefill_parallel_cache(
                 rare_limit=rare_limit,
                 per_term_limit=per_term_limit,
                 freq_limit=freq_limit,
+                tail_quota=tail_quota,
             )
         except PrefetchDeadlineExceeded:
             raise
@@ -1657,7 +1794,7 @@ def _qa_prefill_parallel_cache(
 def _qa_keyword_cache_for_pool(
     pool: Any,
     version: tuple[int, int] | None,
-    params: tuple[int, int, int],
+    params: tuple[int, ...],
 ) -> dict[str, Any] | None:
     """Return a pool-scoped read cache when a stable QA version is available.
 
@@ -1706,8 +1843,16 @@ def _qa_keyword_cache_lookup(
     rare_limit: int,
     per_term_limit: int,
     freq_limit: int,
+    tail_quota: int = 0,
 ) -> tuple[dict[str, int], list[list[tuple]]]:
-    """Read/fill a pool-scoped QA cache without exposing partial entries."""
+    """Read/fill a pool-scoped QA cache without exposing partial entries.
+
+    2026-10-08 P0-B3: ``tail_quota`` is forwarded to both the serial and the
+    parallel SQL lookup so every cache fill admits head + tail. The cache
+    identity tuple carries T as its fourth element (see
+    ``_qa_keyword_cache_for_pool``), so a T change invalidates cached
+    head-only rows rather than serving a stale admission set.
+    """
     lock = cache.get("lock")
     if lock is None:
         lock = threading.RLock()
@@ -1735,6 +1880,7 @@ def _qa_keyword_cache_lookup(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
             else:
                 missing_freq, missing_rows = _combined_qa_keyword_lookup(
@@ -1743,6 +1889,7 @@ def _qa_keyword_cache_lookup(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
             new_entries = {}
             for index, term in enumerate(missing_terms):
@@ -2300,11 +2447,18 @@ def recall_pool(
                                 _qa_freq_limit = max(rerank_top_n or 0, limit * 8)
                                 if isinstance(config, dict):
                                     _qa_freq_limit = int((config.get("recall") or {}).get("qa_freq_limit", _qa_freq_limit) or _qa_freq_limit)
+                                # 2026-10-08 P0-B3: additive per-term tail quota.
+                                # Resolved once and threaded into the snapshot /
+                                # cache / combined lookups; it is the 4th element
+                                # of the cache identity so a T change invalidates
+                                # cached head-only rows.
+                                _qa_tail_quota = _resolve_qa_tail_quota(config)
                                 _combined_qa_rows = None
                                 _qa_cache_params = (
                                     int(_qa_rare_limit),
                                     int(_qa_per_term_limit),
                                     int(_qa_freq_limit),
+                                    int(_qa_tail_quota),
                                 )
                                 _qa_cache = (
                                     _qa_keyword_cache_for_pool(
@@ -2354,6 +2508,7 @@ def recall_pool(
                                                 rare_limit=_qa_rare_limit,
                                                 per_term_limit=_qa_per_term_limit,
                                                 freq_limit=_qa_freq_limit,
+                                                tail_quota=_qa_tail_quota,
                                                 matched_terms_out=_qa_matched_terms_by_id,
                                                 deadline=deadline,
                                             )
@@ -2388,6 +2543,7 @@ def recall_pool(
                                                 rare_limit=_qa_rare_limit,
                                                 per_term_limit=_qa_per_term_limit,
                                                 freq_limit=_qa_freq_limit,
+                                                tail_quota=_qa_tail_quota,
                                             )
                                     except PrefetchDeadlineExceeded:
                                         raise
@@ -2404,6 +2560,7 @@ def recall_pool(
                                             rare_limit=_qa_rare_limit,
                                             per_term_limit=_qa_per_term_limit,
                                             freq_limit=_qa_freq_limit,
+                                            tail_quota=_qa_tail_quota,
                                         )
                                     except PrefetchDeadlineExceeded:
                                         raise
@@ -2593,6 +2750,10 @@ def recall_pool(
                                 _qa_freq_limit = max(rerank_top_n or 0, limit * 8)  # 默认 limit=5 -> 40
                                 if isinstance(config, dict):
                                     _qa_freq_limit = int((config.get("recall") or {}).get("qa_freq_limit", _qa_freq_limit) or _qa_freq_limit)
+                                # 2026-10-08 P0-B3: same additive tail quota as the
+                                # combined/snapshot path; recomputed here so this
+                                # legacy fallback block is self-contained.
+                                _qa_tail_quota = _resolve_qa_tail_quota(config)
                                 _qa_rows_per_term: list[list] = []
                                 _qa_is_rare_per_term: list[bool] = []
                                 _qa_terms_in_order: list[str] = []
@@ -2601,15 +2762,14 @@ def recall_pool(
                                     if _combined_qa_rows is not None:
                                         return _combined_qa_rows[len(_qa_rows_per_term)]
                                     try:
-                                        _pg_cur.execute(
-                                            "SELECT id, timestamp, question, answer FROM qa_pairs "
-                                            "WHERE (question ILIKE %s OR answer ILIKE %s) "
-                                            "AND answer IS NOT NULL "
-                                            "AND session_id NOT LIKE '%%.trajectory%%' "
-                                            "ORDER BY id ASC LIMIT %s",
-                                            [f'%{_term}%', f'%{_term}%', _limit]
+                                        # 2026-10-08 P0-B3: extracted module-level
+                                        # helper — head cap ``_limit`` (C) plus the
+                                        # additive tail quota, id ASC.
+                                        return _qa_legacy_keyword_lookup(
+                                            _pg_cur, _term,
+                                            limit=_limit,
+                                            tail_quota=_qa_tail_quota,
                                         )
-                                        return list(_pg_cur.fetchall())
                                     except PrefetchDeadlineExceeded:
                                         raise
                                     except Exception:
@@ -2635,15 +2795,17 @@ def recall_pool(
                                     _qa_term_limits.append(_lim)
                                     _qa_rows_per_term.append(_read_qa_rows_for_term(_t, _lim))
                                     _qa_is_rare_per_term.append(_is_rare)
-                                # Phase 1: 按 _terms 顺序, 每词只取 rows[:_lim] (lim=该词动态配额,
-                                # 非稀有词按词频缩放后能覆盖 id 靠后的精确命中), dedup append。
+                                # Phase 1: 按 _terms 顺序, 每词只取 rows[:_lim + T] (lim=该词动态配额 C,
+                                # 非稀有词按词频缩放后能覆盖 id 靠后的精确命中; T=prefetch.qa_tail_quota
+                                # 是 P0-B3 附加尾部配额 — 必须一起消费, 否则 rows[:C] 会把 tail 丢掉),
+                                # dedup append。
                                 # 2026-09-04 P1.3.1 deadline-closure: probe every 64
                                 # candidate appends so a long raw-hit list cannot
                                 # overrun the SLO.  PrefetchDeadlineExceeded propagates
                                 # through the surrounding try/except.
                                 _phase1_seen = 0
                                 for _t, _rows, _lim in zip(_qa_terms_in_order, _qa_rows_per_term, _qa_term_limits):
-                                    for _r in _rows[:_lim]:
+                                    for _r in _rows[:_lim + _qa_tail_quota]:
                                         if deadline is not None and (_phase1_seen & 0x3F) == 0:
                                             deadline.check(context="qa phase1 dedup")
                                         _phase1_seen += 1
