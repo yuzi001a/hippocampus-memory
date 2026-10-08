@@ -4,6 +4,7 @@ import contextlib
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import inspect
 import json
 import logging
 import math
@@ -338,8 +339,22 @@ def _cjk_bigram_score(meta, bigrams):
         return 0.0
     return min(0.15 * matched, 0.9)
 
-def _rerank(query, hits, top_n=20, rerank_cfg=None, *, deadline=None):
-    """Re-rank top-N hits via cross-encoder. Failures degrade silently."""
+def _rerank(
+    query,
+    hits,
+    top_n=20,
+    rerank_cfg=None,
+    *,
+    deadline=None,
+    on_input=None,
+    on_result=None,
+):
+    """Re-rank top-N hits via cross-encoder. Failures degrade silently.
+
+    Optional callbacks expose the prepared input candidates and validated
+    provider ``(index, score)`` results for diagnostics; observer failures are
+    swallowed and the normal ranking/fallback contract is unchanged.
+    """
     if not hits or not rerank_cfg or not rerank_cfg.get("endpoint"):
         return hits
     deadline = coerce_deadline(deadline)
@@ -382,7 +397,30 @@ def _rerank(query, hits, top_n=20, rerank_cfg=None, *, deadline=None):
         documents = [(h.content or h.content_preview or h.title) for h in candidates]
         # rerank API 单文档长度限制保护 (一般 512-2048 token), 超长截到 2000 字符
         documents = [d[:2000] for d in documents]
-        scores = _rerank_api(query, documents, cfg)
+        if callable(on_input):
+            for position, candidate in enumerate(candidates, start=1):
+                try:
+                    on_input(position, candidate)
+                except Exception:
+                    pass
+        if callable(on_result):
+            try:
+                _api_parameters = inspect.signature(_rerank_api).parameters
+                _accepts_result_observer = (
+                    "on_result" in _api_parameters
+                    and _api_parameters["on_result"].kind is not inspect.Parameter.POSITIONAL_ONLY
+                ) or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in _api_parameters.values()
+                )
+            except (TypeError, ValueError):
+                _accepts_result_observer = False
+            if _accepts_result_observer:
+                scores = _rerank_api(query, documents, cfg, on_result=on_result)
+            else:
+                scores = _rerank_api(query, documents, cfg)
+        else:
+            scores = _rerank_api(query, documents, cfg)
         if deadline is not None:
             deadline.check(context="rerank result")
         if scores is None:
@@ -2196,6 +2234,15 @@ def recall_pool(
               * selection 阶段: ``final`` 里的 hit 发出
                 ``select(source_id)``; ``ranked[limit:]`` 里的 hit 发出
                 ``drop(source_id, 'OUTSIDE_LIMIT', stage='selection')``;
+              * P0-B4-A 诊断探针 (只读, 不改变任何算法/权重/配置; 无 trace 时
+                整块跳过): 每条 hit 发出 ``candidate_kind(source_id, kind)``;
+                每个 lane 检索路径发出 ``lane_evidence(source_id, lane,
+                present, raw_rank, raw_score, rrf_contribution)``; RRF 排序前后
+                发出 ``fusion_position(source_id, pre_fusion_position,
+                post_fusion_position)``; 实际跑 rerank 时对 rerank 输入里的每条
+                hit 发出 ``rerank_evidence(source_id, input_position,
+                provider_index, score)``; 进入最终结果列表的 hit 发出
+                ``final_position(source_id, position)``;
               * lane degradation: 每个 lane 的 ``except Exception as e``
                 日志分支前, 发出 ``error('lane=NAME: ' + str(e)[:200])``;
               * lane timed-out: 每个 lane 的 ``except PrefetchDeadlineExceeded``
@@ -2282,6 +2329,9 @@ def recall_pool(
     # ran (include_keyword and/or include_card_vector).
     _am_kw_ids_for_probe: list[str] = []
     _am_vec_ids_for_probe: list[str] = []
+    _am_kw_rank_for_trace: dict[str, int] | None = {} if trace is not None else None
+    _am_vec_rank_for_trace: dict[str, int] | None = {} if trace is not None else None
+    _am_vec_score_for_trace: dict[str, float] | None = {} if trace is not None else None
     _am_kw_reader_seen = False  # reader resolver ran for kw seam
     _am_vec_reader_seen = False  # reader resolver ran for vec seam
     _am_kw_reader_present = False  # kw reader resolved to non-None
@@ -2335,13 +2385,15 @@ def recall_pool(
                     # Snapshot the explicit ids BEFORE adding to hits so the
                     # probe can record the *real* active-memory provenance
                     # even after _add_active_memory_to_hits mutates the dict.
-                    for _row in (_am_kw_rows or []):
+                    for _row_rank, _row in enumerate((_am_kw_rows or []), start=1):
                         try:
                             _mid = _row.get("memory_id") or _row.get("source_id")
                         except Exception:
                             _mid = None
                         if isinstance(_mid, str) and _mid:
                             _am_kw_ids_for_probe.append(_mid)
+                            if _am_kw_rank_for_trace is not None:
+                                _am_kw_rank_for_trace.setdefault(_mid, _row_rank)
                     _add_active_memory_to_hits(
                         _am_kw_rows, hits=hits, target_ids=kw_ids, with_cosine=False
                     )
@@ -3147,13 +3199,21 @@ def recall_pool(
                                 _safe_err(_am_vec_exc)[:200],
                             )
                             _am_vec_rows = []
-                        for _row in (_am_vec_rows or []):
+                        for _row_rank, _row in enumerate((_am_vec_rows or []), start=1):
                             try:
                                 _mid = _row.get("memory_id") or _row.get("source_id")
                             except Exception:
                                 _mid = None
                             if isinstance(_mid, str) and _mid:
                                 _am_vec_ids_for_probe.append(_mid)
+                                if _am_vec_rank_for_trace is not None:
+                                    _am_vec_rank_for_trace.setdefault(_mid, _row_rank)
+                                    try:
+                                        _raw_score = float(_row.get("cosine"))
+                                        if math.isfinite(_raw_score):
+                                            _am_vec_score_for_trace.setdefault(_mid, _raw_score)
+                                    except (AttributeError, TypeError, ValueError):
+                                        pass
                         _add_active_memory_to_hits(
                             _am_vec_rows,
                             hits=hits,
@@ -3359,6 +3419,44 @@ def recall_pool(
     except Exception:
         _explicit_ids = []
     _probe(trace, 'lane_candidates', 'explicit', _explicit_ids)
+    if trace is not None:
+        for _sid in _explicit_ids:
+            _kw_rank = (_am_kw_rank_for_trace or {}).get(_sid)
+            _vec_rank = (_am_vec_rank_for_trace or {}).get(_sid)
+            if _kw_rank is not None:
+                _probe(
+                    trace,
+                    'lane_evidence',
+                    _sid,
+                    'explicit',
+                    present=True,
+                    raw_rank=_kw_rank,
+                    raw_score=None,
+                    rrf_contribution=0.0,
+                    path='explicit_keyword',
+                )
+            if _vec_rank is not None:
+                _probe(
+                    trace,
+                    'lane_evidence',
+                    _sid,
+                    'explicit',
+                    present=True,
+                    raw_rank=_vec_rank,
+                    raw_score=(_am_vec_score_for_trace or {}).get(_sid),
+                    rrf_contribution=0.0,
+                    path='explicit_vector',
+                )
+            if _kw_rank is None and _vec_rank is None:
+                _probe(
+                    trace,
+                    'lane_evidence',
+                    _sid,
+                    'explicit',
+                    present=True,
+                    rrf_contribution=0.0,
+                    path='explicit_untyped',
+                )
     if not (_am_kw_reader_seen or _am_vec_reader_seen):
         # Neither kw nor vec seam ran at all (e.g. include_keyword=False AND
         # include_card_vector=False).
@@ -3817,6 +3915,54 @@ def recall_pool(
     for _m03_sid in _m03_suppress_topic_hits(hits, _m03_sup):
         _probe(trace, 'drop', _m03_sid, 'M03_INVALIDATED', stage='suppression')
 
+    # P0-B4-A: expose each physical RRF path and its exact additive term.
+    # This distinguishes candidate admission from fusion without collapsing
+    # multiple votes that share a canonical lane (e.g. topic/QA subpaths).
+    # The block is guarded by ``trace is not None``; it never mutates recall
+    # state, weights, candidates, or scores.
+    if trace is not None:
+        try:
+            # (canonical lane, physical RRF path, rank map, weight, raw-score family)
+            _lane_paths = (
+                ('keyword', 'keyword', kw_rank, KW_RRF_WEIGHT, 'kw'),
+                ('qa', 'qa_keyword', qa_kw_rank, QA_RRF_WEIGHT, 'kw'),
+                ('qa', 'qa_vector', qa_vec_rank, QA_RRF_WEIGHT, 'vec'),
+                ('vector', 'vector', vec_rank, VEC_RRF_WEIGHT, 'vec'),
+                ('vector', 'message_vector', msg_rank, VEC_RRF_WEIGHT, 'vec'),
+                ('vector', 'effective_vector', eff_rank, VEC_RRF_WEIGHT, 'vec'),
+                ('topic', 'topic_vector', topic_rank, TOPIC_RRF_WEIGHT, 'vec'),
+                ('vector', 'yin_vector', yin_rank, VEC_RRF_WEIGHT, 'vec'),
+                ('vector', 'notes_vector', notes_rank, VEC_RRF_WEIGHT, 'vec'),
+            )
+            for _sid, _hit in hits.items():
+                _probe(trace, 'candidate_kind', _sid, _hit.kind)
+            for _lane_name, _path_name, _rank_map, _w, _src in _lane_paths:
+                for _sid, _rank in _rank_map.items():
+                    _hit = hits.get(_sid)
+                    if _hit is None:
+                        continue
+                    try:
+                        _rank_i = int(_rank)
+                    except (TypeError, ValueError):
+                        continue
+                    # Keyword-family lanes report the pre-fusion RRF score;
+                    # vector-family lanes report the cosine.  Read BEFORE the
+                    # fusion loop overwrites ``hit.rrf_score``.
+                    _raw = _hit.rrf_score if _src == 'kw' else _hit.cosine
+                    _probe(
+                        trace,
+                        'lane_evidence',
+                        _sid,
+                        _lane_name,
+                        present=True,
+                        raw_rank=_rank_i,
+                        raw_score=_raw,
+                        rrf_contribution=float(_w) / (K + _rank_i),
+                        path=_path_name,
+                    )
+        except Exception:
+            pass
+
     scored = []
     for sid, hit in hits.items():
         rrf = 0.0
@@ -3908,12 +4054,93 @@ def recall_pool(
     except Exception:
         pass
 
+    # P0-B4-A: capture the pre-fusion union/admission order before the final
+    # fused-score sort. This is not a cross-lane rank; the per-lane ranks above
+    # are authoritative. Read-only; skipped entirely when no trace is attached.
+    _pre_fusion_positions = None
+    if trace is not None:
+        _pre_fusion_positions = {}
+        try:
+            for _i, _h in enumerate(scored):
+                _pre_fusion_positions[_h.source_id] = _i + 1
+        except Exception:
+            _pre_fusion_positions = {}
+
     scored.sort(key=lambda x: x.rrf_score, reverse=True)
+
+    if trace is not None:
+        try:
+            for _i, _h in enumerate(scored):
+                _probe(
+                    trace,
+                    'fusion_position',
+                    _h.source_id,
+                    pre_fusion_position=_pre_fusion_positions.get(_h.source_id),
+                    post_fusion_position=_i + 1,
+                    fusion_score=_h.rrf_score,
+                )
+        except Exception:
+            pass
 
     # Optional rerank
     ranked = scored
     if rerank_top_n and len(ranked) > rerank_top_n and rerank_cfg:
-        if deadline is None:
+        if trace is not None:
+            # Match the exact candidate sequence passed to _rerank. This map
+            # is diagnostic only and is not built on the untraced path.
+            try:
+                _rerank_input_hits = list(ranked[:int(rerank_top_n)])
+            except Exception:
+                _rerank_input_hits = []
+
+            def _trace_rerank_input(position, candidate):
+                _probe(
+                    trace,
+                    "rerank_evidence",
+                    candidate.source_id,
+                    input_position=position,
+                )
+
+            def _trace_rerank_result(provider_index, score):
+                if type(provider_index) is not int or not 0 <= provider_index < len(_rerank_input_hits):
+                    return
+                _candidate = _rerank_input_hits[provider_index]
+                _probe(
+                    trace,
+                    "rerank_evidence",
+                    _candidate.source_id,
+                    input_position=provider_index + 1,
+                    provider_index=provider_index,
+                    score=score,
+                )
+
+            _rerank_kwargs = {}
+            try:
+                _rerank_parameters = inspect.signature(_rerank).parameters
+                _supports_trace_callbacks = (
+                    ("on_input" in _rerank_parameters and "on_result" in _rerank_parameters)
+                    or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in _rerank_parameters.values()
+                    )
+                )
+            except (TypeError, ValueError):
+                _supports_trace_callbacks = False
+            if _supports_trace_callbacks:
+                _rerank_kwargs.update(
+                    on_input=_trace_rerank_input,
+                    on_result=_trace_rerank_result,
+                )
+            if deadline is not None:
+                _rerank_kwargs["deadline"] = deadline
+            ranked = _rerank(
+                query,
+                ranked,
+                top_n=rerank_top_n,
+                rerank_cfg=rerank_cfg,
+                **_rerank_kwargs,
+            )
+        elif deadline is None:
             ranked = _rerank(query, ranked, top_n=rerank_top_n, rerank_cfg=rerank_cfg)
         else:
             ranked = _rerank(
@@ -3931,6 +4158,7 @@ def recall_pool(
                 _probe(trace, 'event', _h.source_id, 'RERANKED')
         except Exception:
             pass
+
     else:
         # A5 (G6B Slice B): rerank was skipped.  Emit a warn probe with
         # the SINGLE real reason — derived only from the real condition.
@@ -3958,6 +4186,16 @@ def recall_pool(
             _probe(trace, 'select', _h.source_id)
     except Exception:
         pass
+    # P0-B4-A: record the final 1-based position of every hit that made the
+    # returned list.  A hit in ``ranked[limit:]`` has no final position and
+    # is dropped OUTSIDE_LIMIT below — that is the final-limit-miss signal.
+    # Read-only; skipped when no trace is attached.
+    if trace is not None:
+        try:
+            for _i, _h in enumerate(final):
+                _probe(trace, 'final_position', _h.source_id, _i + 1)
+        except Exception:
+            pass
     try:
         for _h in ranked[limit:]:
             _probe(trace, 'drop', _h.source_id, 'OUTSIDE_LIMIT', stage='selection')

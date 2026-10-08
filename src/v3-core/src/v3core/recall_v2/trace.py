@@ -76,6 +76,46 @@ class InjectionSummary:
 
 
 @dataclass
+class LaneEvidence:
+    """Diagnostic evidence for one retrieval lane's view of a candidate.
+
+    Recorded additively by the recall sink when the legacy retrieval code
+    reports that ``lane`` ranked ``candidate_id``.  This is a pure
+    observability record — it never influences fusion / rerank / selection.
+
+    ``present`` distinguishes "the lane returned this candidate" from a
+    lane that did not (a caller may record ``present=False`` explicitly).
+    ``raw_rank`` is the lane's own 1-based rank for the candidate;
+    ``raw_score`` is the lane's raw score at fusion time (keyword-family
+    lanes report the pre-fusion RRF score, vector-family lanes report the
+    cosine; an explicit keyword result may expose no score). ``rrf_contribution``
+    is the candidate's additive contribution from this
+    retrieval path, i.e. ``weight / (K + raw_rank)``. A canonical lane may
+    have multiple separately recorded RRF paths (for example ``qa_keyword``
+    and ``qa_vector``); the explicit-memory source reuses keyword/vector RRF
+    paths and therefore has no independent RRF term (its provenance paths
+    carry contribution 0).
+    """
+
+    lane: str
+    path: str = ""
+    present: bool = False
+    raw_rank: Optional[int] = None
+    raw_score: Optional[float] = None
+    rrf_contribution: Optional[float] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "lane": self.lane,
+            "path": self.path,
+            "present": bool(self.present),
+            "raw_rank": self.raw_rank,
+            "raw_score": self.raw_score,
+            "rrf_contribution": self.rrf_contribution,
+        }
+
+
+@dataclass
 class CandidateSnapshot:
     """Privacy-safe per-candidate snapshot stored on the trace.
 
@@ -109,6 +149,52 @@ class CandidateSnapshot:
     score_history: list[ScoreRecord] = field(default_factory=list)
     events: list[CandidateEvent] = field(default_factory=list)
     contributing_lanes: list[str] = field(default_factory=list)
+    # ----- P0-B4-A diagnostic fields (additive, observability only) -----
+    # ``kind`` is the legacy retrieval kind of the hit (``qa`` / ``topic`` /
+    # ``card`` / ``message`` / ``note`` / ``active_memory`` / ``yin`` …),
+    # i.e. the wire kind — distinct from ``source_type``, which is the
+    # lane-recorded source classification.
+    kind: str = ""
+    # One entry per physical retrieval/RRF path; several paths may share one
+    # canonical lane (e.g. QA keyword + QA vector).
+    lane_evidence: list[LaneEvidence] = field(default_factory=list)
+    # 1-based positions that let a reviewer tell an admission miss from a
+    # fusion miss / rerank miss / final-limit miss.  ``None`` means the
+    # candidate never reached that stage.
+    pre_fusion_position: Optional[int] = None
+    post_fusion_position: Optional[int] = None
+    rerank_input_position: Optional[int] = None
+    rerank_provider_index: Optional[int] = None
+    final_position: Optional[int] = None
+
+    @property
+    def lane_vote_count(self) -> int:
+        """Count distinct RRF paths that contributed to this candidate."""
+        return sum(
+            1
+            for ev in self.lane_evidence
+            if ev.present and ev.rrf_contribution is not None and ev.rrf_contribution > 0
+        )
+
+    def lane_evidence_for(
+        self, lane: str, path: Optional[str] = None
+    ) -> Optional[LaneEvidence]:
+        """Return lane evidence, optionally for one physical retrieval path."""
+        for ev in self.lane_evidence:
+            if ev.lane == lane and (path is None or ev.path == path):
+                return ev
+        return None
+
+    def lane_presence(self) -> dict[str, bool]:
+        """Explicit ``{lane: present}`` map over the five canonical lanes.
+
+        A lane with no recorded evidence is ``False`` — i.e. it did not
+        return this candidate (an *admission miss* for that lane).
+        """
+        return {
+            lane: any(ev.present for ev in self.lane_evidence if ev.lane == lane)
+            for lane in ALL_LANES
+        }
 
     def to_dict(self, *, include_content: bool = False) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -116,7 +202,16 @@ class CandidateSnapshot:
             "lane": self.lane,
             "source_type": self.source_type,
             "source_id": self.source_id,
+            "kind": self.kind,
             "contributing_lanes": list(self.contributing_lanes),
+            "lane_evidence": [ev.to_dict() for ev in self.lane_evidence],
+            "lane_vote_count": self.lane_vote_count,
+            "lane_presence": self.lane_presence(),
+            "pre_fusion_position": self.pre_fusion_position,
+            "post_fusion_position": self.post_fusion_position,
+            "rerank_input_position": self.rerank_input_position,
+            "rerank_provider_index": self.rerank_provider_index,
+            "final_position": self.final_position,
             "text_reference": self.text_reference,
             "timestamp": self.timestamp,
             "scores": {
@@ -288,6 +383,10 @@ class RecallTrace:
                 score_history=[ScoreRecord(s.stage, s.value, s.operation, dict(s.params) if s.params else {}) for s in candidate.score_history],
                 events=[CandidateEvent(e.event_type, e.note, ts=e.ts) for e in candidate.events],
                 contributing_lanes=list(candidate.contributing_lanes),
+                # ``source_type`` on a legacy candidate is the hit's wire
+                # kind (see adapters.hit_to_candidate); mirror it onto the
+                # diagnostic ``kind`` field so the snapshot is self-describing.
+                kind=str(candidate.source_type or ""),
             )
             self.candidate_snapshots[candidate.candidate_id] = snap
             # Drop the reference to the original candidate — caller may still
@@ -437,6 +536,149 @@ class RecallTrace:
             if snap is None:
                 raise KeyError(f"unknown candidate {candidate_id!r}")
             snap.events.append(CandidateEvent(event_type, note))
+
+    # ----- P0-B4-A diagnostic recorders ------------------------------
+    # These are pure observability: they write diagnostic fields on the
+    # candidate snapshot and never touch scores / ordering / selection.
+
+    def record_kind(self, candidate_id: str, kind: str) -> None:
+        """Record the legacy wire kind (``qa`` / ``topic`` / ``card`` …)."""
+        with self._lock:
+            snap = self.candidate_snapshots.get(candidate_id)
+            if snap is None:
+                raise KeyError(f"unknown candidate {candidate_id!r}")
+            if kind:
+                snap.kind = str(kind)
+
+    def record_lane_evidence(
+        self,
+        candidate_id: str,
+        lane: str,
+        *,
+        path: Optional[str] = None,
+        present: bool = True,
+        raw_rank: Any = None,
+        raw_score: Any = None,
+        rrf_contribution: Any = None,
+    ) -> None:
+        """Record one physical retrieval path under its canonical lane.
+
+        Duplicate records for the same ``(lane, path)`` aggregate: presence
+        is OR-ed, rank keeps the minimum, score keeps the maximum, and RRF
+        contributions are summed. Different paths stay separate so each
+        actual fusion vote remains inspectable.
+        """
+        if lane not in ALL_LANES:
+            return
+        path_name = str(path or lane)
+        with self._lock:
+            snap = self.candidate_snapshots.get(candidate_id)
+            if snap is None:
+                raise KeyError(f"unknown candidate {candidate_id!r}")
+            ev = snap.lane_evidence_for(lane, path_name)
+            if ev is None:
+                ev = LaneEvidence(lane=lane, path=path_name, present=bool(present))
+                snap.lane_evidence.append(ev)
+            elif present:
+                ev.present = True
+            if raw_rank is not None:
+                try:
+                    r = int(raw_rank)
+                except (TypeError, ValueError):
+                    r = None
+                if r is not None:
+                    ev.raw_rank = r if ev.raw_rank is None else min(ev.raw_rank, r)
+            if raw_score is not None:
+                try:
+                    v = float(raw_score)
+                except (TypeError, ValueError):
+                    v = None
+                if v is not None:
+                    ev.raw_score = v if ev.raw_score is None else max(ev.raw_score, v)
+            if rrf_contribution is not None:
+                try:
+                    c = float(rrf_contribution)
+                except (TypeError, ValueError):
+                    c = None
+                if c is not None:
+                    ev.rrf_contribution = (
+                        c if ev.rrf_contribution is None
+                        else ev.rrf_contribution + c
+                    )
+
+    def record_fusion_position(
+        self,
+        candidate_id: str,
+        *,
+        pre_fusion_position: Any = None,
+        post_fusion_position: Any = None,
+        fusion_score: Any = None,
+    ) -> None:
+        """Record positions and the effective fused score used for sorting."""
+        with self._lock:
+            snap = self.candidate_snapshots.get(candidate_id)
+            if snap is None:
+                raise KeyError(f"unknown candidate {candidate_id!r}")
+            if pre_fusion_position is not None:
+                try:
+                    snap.pre_fusion_position = int(pre_fusion_position)
+                except (TypeError, ValueError):
+                    pass
+            if post_fusion_position is not None:
+                try:
+                    snap.post_fusion_position = int(post_fusion_position)
+                except (TypeError, ValueError):
+                    pass
+            if fusion_score is not None:
+                try:
+                    snap.fusion_score = float(fusion_score)
+                except (TypeError, ValueError):
+                    pass
+
+    def record_rerank_evidence(
+        self,
+        candidate_id: str,
+        *,
+        input_position: Any = None,
+        provider_index: Any = None,
+        score: Any = None,
+    ) -> None:
+        """Record rerank input position, provider index and rerank score.
+
+        ``input_position`` is the 1-based position in the rerank input list;
+        ``provider_index`` is the (0-based) document index the rerank
+        provider assigned to the candidate; ``score`` is the rerank score.
+        """
+        with self._lock:
+            snap = self.candidate_snapshots.get(candidate_id)
+            if snap is None:
+                raise KeyError(f"unknown candidate {candidate_id!r}")
+            if input_position is not None:
+                try:
+                    snap.rerank_input_position = int(input_position)
+                except (TypeError, ValueError):
+                    pass
+            if provider_index is not None:
+                try:
+                    snap.rerank_provider_index = int(provider_index)
+                except (TypeError, ValueError):
+                    pass
+            if score is not None:
+                try:
+                    snap.rerank_score = float(score)
+                except (TypeError, ValueError):
+                    pass
+
+    def record_final_position(self, candidate_id: str, position: Any) -> None:
+        """Record the candidate's 1-based position in the final result list."""
+        with self._lock:
+            snap = self.candidate_snapshots.get(candidate_id)
+            if snap is None:
+                raise KeyError(f"unknown candidate {candidate_id!r}")
+            try:
+                snap.final_position = int(position)
+            except (TypeError, ValueError):
+                pass
 
     def record_event(self, kind: str, note: str = "") -> None:
         if not kind:

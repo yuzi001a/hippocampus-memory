@@ -30,7 +30,7 @@ from .contracts import (
 )
 from .trace import (
     RecallTrace, recall_trace_from_plan,
-    CandidateSnapshot, LaneSummary, InjectionSummary,
+    CandidateSnapshot, LaneSummary, InjectionSummary, LaneEvidence,
 )
 
 __all__ = [
@@ -45,7 +45,7 @@ __all__ = [
     "ProvenanceRecord", "ScoreRecord", "CandidateEvent",
     "StageTransition", "DropEvent",
     # Trace summaries
-    "CandidateSnapshot", "LaneSummary", "InjectionSummary",
+    "CandidateSnapshot", "LaneSummary", "InjectionSummary", "LaneEvidence",
     # Helpers
     "safe_metadata",
     "build_default_query_plan", "build_effective_query_plan",
