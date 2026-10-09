@@ -169,7 +169,8 @@ class TestTraceLaneEvidence:
         snap = trace.candidate_snapshots["c1"]
         qa_entries = [e for e in snap.lane_evidence if e.lane == "qa"]
         assert len(qa_entries) == 2
-        assert snap.lane_vote_count == 2  # explicit provenance is not an RRF vote
+        assert snap.lane_vote_count == 1  # one canonical QA lane
+        assert snap.rrf_path_count == 2  # keyword + vector subpaths
         qa_kw = snap.lane_evidence_for("qa", "qa_keyword")
         qa_vec = snap.lane_evidence_for("qa", "qa_vector")
         assert qa_kw is not None and qa_kw.raw_rank == 5
@@ -180,7 +181,9 @@ class TestTraceLaneEvidence:
         assert qa_vec.rrf_contribution == pytest.approx(1.0 / 62)
         assert snap.lane_presence()["qa"] is True
         assert snap.lane_presence()["explicit"] is True
-        assert snap.to_dict()["lane_vote_count"] == 2
+        assert snap.lane_vote_count == 1
+        assert snap.to_dict()["lane_vote_count"] == 1
+        assert snap.to_dict()["rrf_path_count"] == 2
         topic_snap = trace.candidate_snapshots["topic1"]
         topic_paths = {ev.path for ev in topic_snap.lane_evidence if ev.present}
         assert topic_paths == {"keyword", "vector", "topic_vector"}
@@ -560,7 +563,12 @@ class TestRecallPoolDiagnosticProbes:
                 f"{cid}: physical RRF paths {sorted(paths)} missing keyword/QA votes"
             )
             assert snap.lane_vote_count >= 2
-            assert snap.lane_vote_count == sum(
+            assert snap.lane_vote_count == len({
+                ev.lane for ev in snap.lane_evidence
+                if ev.present and ev.rrf_contribution is not None
+                and ev.rrf_contribution > 0
+            })
+            assert snap.rrf_path_count == sum(
                 1 for ev in snap.lane_evidence
                 if ev.present and ev.rrf_contribution is not None
                 and ev.rrf_contribution > 0

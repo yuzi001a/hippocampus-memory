@@ -169,7 +169,18 @@ class CandidateSnapshot:
 
     @property
     def lane_vote_count(self) -> int:
-        """Count distinct RRF paths that contributed to this candidate."""
+        """Count distinct canonical retrieval lanes with positive RRF contribution."""
+        return sum(
+            1
+            for lane in {
+                ev.lane for ev in self.lane_evidence
+                if ev.present and ev.rrf_contribution is not None and ev.rrf_contribution > 0
+            }
+        )
+
+    @property
+    def rrf_path_count(self) -> int:
+        """Count distinct physical RRF paths with positive contribution."""
         return sum(
             1
             for ev in self.lane_evidence
@@ -206,6 +217,7 @@ class CandidateSnapshot:
             "contributing_lanes": list(self.contributing_lanes),
             "lane_evidence": [ev.to_dict() for ev in self.lane_evidence],
             "lane_vote_count": self.lane_vote_count,
+            "rrf_path_count": self.rrf_path_count,
             "lane_presence": self.lane_presence(),
             "pre_fusion_position": self.pre_fusion_position,
             "post_fusion_position": self.post_fusion_position,
