@@ -433,7 +433,12 @@ def _rerank(
                 h.cosine = float(s)
             except (TypeError, ValueError):
                 pass
-        reranked = sorted(candidates, key=lambda h: -h.cosine)
+        # P0-B4 deterministic-ordering: the provider can return exactly equal
+        # scores, and the sort key was score-only, so the tie order used to
+        # inherit the caller's collection order for ties.  The canonical
+        # (kind, source_id) identity decides only exact ties; the primary
+        # cosine ordering is unchanged.
+        reranked = sorted(candidates, key=lambda h: (-h.cosine, _stable_identity_key(h)))
         if top_n and len(hits) > top_n:
             reranked.extend(hits[top_n:])
         return reranked
@@ -600,6 +605,42 @@ def _bind_topic_recall_deadline(topic_recall, deadline):
     view = copy.copy(topic_recall)
     view._pool = DeadlinePoolView(pool, bound)
     return view
+
+
+def _stable_identity_key(hit) -> tuple[str, str]:
+    """Canonical ``(kind, source_id)`` identity of one recall candidate.
+
+    P0-B4 deterministic-ordering: this is ONLY ever used as the *last* element
+    of a sort key, so it can decide an order exclusively when the primary score
+    of two candidates is exactly equal.  Every comparison that separates
+    candidates by an actually-different primary score is untouched.
+
+    ``source_id`` is the ``hits`` dict key, so the pair is a total order — the
+    resolved order never depends on set/dict iteration order, ``PYTHONHASHSEED``,
+    ``id()``, or a timestamp.  ``kind`` leads because it is the wire-level
+    candidate class; ordering by it first groups equal-score candidates of the
+    same class together and is itself value-derived (never numeric-id based).
+    """
+    try:
+        sid = str(getattr(hit, "source_id", "") or "")
+    except Exception:
+        sid = ""
+    try:
+        kind = str(getattr(hit, "kind", "") or "")
+    except Exception:
+        kind = ""
+    return (kind, sid)
+
+
+def _stable_sid_key(hits: dict, sid) -> tuple[str, str]:
+    """``_stable_identity_key`` for id-keyed rank maps (``hits[sid]``)."""
+    try:
+        hit = hits.get(sid)
+    except Exception:
+        hit = None
+    if hit is None:
+        return ("", str(sid))
+    return _stable_identity_key(hit)
 
 
 def _resolve_topic_recall(core, embed_cfg, pg, deadline=None):
@@ -2128,8 +2169,16 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
                         str(_e.get("observation_version"))),
     )
     _out: list = []
+    # P0-B4 deterministic-ordering: this slice is a top-k cut (``_cap``), so a
+    # tie on cosine used to be decided by collection order.  The secondary key
+    # is the SAME canonical identity ``_daily`` above already uses for this
+    # candidate family, and only decides exact ties.
     for _e in list(_daily) + sorted(
-            _nos, key=lambda _x: -_x.get("cosine", 0))[:max(_cap - len(_daily), 0)]:
+            _nos,
+            key=lambda _x: (-_x.get("cosine", 0),
+                            str(_x.get("observation_id")),
+                            str(_x.get("observation_version"))),
+    )[:max(_cap - len(_daily), 0)]:
         if len(_out) >= _cap:
             break
         try:
@@ -3865,11 +3914,18 @@ def recall_pool(
     TOPIC_RRF_WEIGHT = 2.0
     QA_RRF_WEIGHT = 1.0  # 原文精确命中权重 (高于降半的 keyword, 低于 topic)
 
-    kw_rank = {sid: i + 1 for i, sid in enumerate(sorted(kw_ids, key=lambda s: hits[s].rrf_score, reverse=True))} if kw_ids else {}
+    # P0-B4 deterministic-ordering: every rank map below sorts a SET with a
+    # stable sort and a score-only key, so exactly-equal scores used to inherit
+    # the set's PYTHONHASHSEED-dependent iteration order — an arbitrary rank
+    # that changes the RRF contribution ``w / (K + rank)``.  Each key therefore
+    # ends in the canonical ``(kind, source_id)`` identity, which decides the
+    # order only when the primary score is exactly equal.  All score
+    # comparisons, weights and the rank arithmetic are unchanged.
+    kw_rank = {sid: i + 1 for i, sid in enumerate(sorted(kw_ids, key=lambda s: (-hits[s].rrf_score, _stable_sid_key(hits, s))))} if kw_ids else {}
     qa_kw_rank = {sid: i + 1 for i, sid in enumerate(sorted([s for s in kw_ids if hits[s].kind == 'qa'],
-                                                           key=lambda s: hits[s].rrf_score, reverse=True))} if kw_ids else {}
+                                                           key=lambda s: (-hits[s].rrf_score, _stable_sid_key(hits, s))))} if kw_ids else {}
     vec_rank = {sid: i + 1 for i, sid in enumerate(sorted([s for s in vec_ids if hits[s].kind != 'qa'],
-                                                           key=lambda s: hits[s].cosine, reverse=True))} if vec_ids else {}
+                                                           key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))} if vec_ids else {}
     # 2026-08-12 A-2: vec_rank 排除 QA — QA 向量命中只走 qa_vec_rank 一条路径, 消除双计分
     # (之前 QA 同时参与 vec_rank(1.0) + qa_vec_rank(1.0) = 无关语义 QA 双倍虚高 0.022-0.025,
     # 把精确命中压出 top30; 归因 A 类 55.5% 的次要根因)
@@ -3877,12 +3933,12 @@ def recall_pool(
     # 之前 QA 只在 qa_kw_rank(1.0)+vec_rank(1.0) 混合, topic 有 topic_rank(2.0) 单独路径
     # → topic 天生多一条 2.0 路径, QA 原文永远被压出 limit (LGBTQ 查询 qa_231 cos=0.696 排 14 名)
     qa_vec_rank = {sid: i + 1 for i, sid in enumerate(sorted([s for s in vec_ids if hits[s].kind == 'qa'],
-                                                            key=lambda s: hits[s].cosine, reverse=True))} if vec_ids else {}
-    msg_rank = {sid: i + 1 for i, sid in enumerate(sorted(msg_ids, key=lambda s: hits[s].cosine, reverse=True))} if msg_ids else {}
-    eff_rank = {sid: i + 1 for i, sid in enumerate(sorted(eff_ids, key=lambda s: hits[s].cosine, reverse=True))} if eff_ids else {}
-    topic_rank = {sid: i + 1 for i, sid in enumerate(sorted(topic_ids, key=lambda s: hits[s].cosine, reverse=True))}
-    yin_rank = {sid: i + 1 for i, sid in enumerate(sorted(yin_ids, key=lambda s: hits[s].cosine, reverse=True))}
-    notes_rank = {sid: i + 1 for i, sid in enumerate(sorted(notes_ids, key=lambda s: hits[s].cosine, reverse=True))}
+                                                            key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))} if vec_ids else {}
+    msg_rank = {sid: i + 1 for i, sid in enumerate(sorted(msg_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))} if msg_ids else {}
+    eff_rank = {sid: i + 1 for i, sid in enumerate(sorted(eff_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))} if eff_ids else {}
+    topic_rank = {sid: i + 1 for i, sid in enumerate(sorted(topic_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))}
+    yin_rank = {sid: i + 1 for i, sid in enumerate(sorted(yin_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))}
+    notes_rank = {sid: i + 1 for i, sid in enumerate(sorted(notes_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))}
 
     paths = []
     if kw_rank:
@@ -4039,7 +4095,14 @@ def recall_pool(
         if _qa_boost_sig:
             _boost_thr = max(3, int(_total_qa * 0.01))
             _boost_sids = [sid for sid, (mf, lc) in _qa_boost_sig.items() if mf <= 3 or lc >= 2]
-            _boost_sids.sort(key=lambda s: hits[s].rrf_score, reverse=True)
+            # P0-B4 deterministic-ordering: ``_qa_boost_sig`` is a dict keyed by
+            # source_id, so ``_boost_sids[:2]`` used to inherit PYTHONHASHSEED
+            # iteration order whenever two candidates tied on rrf_score and the
+            # top-2 boost selection flipped between processes.  The canonical
+            # (kind, source_id) identity decides only exact ties; the primary
+            # rrf_score ordering — and the 0.5 boost / 2-candidate cap — is
+            # unchanged.
+            _boost_sids.sort(key=lambda s: (-hits[s].rrf_score, _stable_sid_key(hits, s)))
             for _sid in _boost_sids[:2]:
                 for _hit in scored:
                     if _hit.kind == 'qa' and _hit.source_id == _sid:
@@ -4066,7 +4129,14 @@ def recall_pool(
         except Exception:
             _pre_fusion_positions = {}
 
-    scored.sort(key=lambda x: x.rrf_score, reverse=True)
+    # P0-B4 deterministic-ordering: ``scored`` is built by iterating the ``hits``
+    # dict (insertion-ordered, but populated from several hash-ordered lanes),
+    # and the sort key was score-only — so exactly-equal fused scores used to
+    # resolve by whatever order the candidates happened to be collected in.
+    # The canonical (kind, source_id) identity decides only exact ties; the
+    # primary rrf_score ordering (and therefore rerank top-k and the final
+    # limit cut) is unchanged.
+    scored.sort(key=lambda x: (-x.rrf_score, _stable_identity_key(x)))
 
     if trace is not None:
         try:
@@ -4563,7 +4633,11 @@ def _chain_fallback_file(query, pg, *, deadline=None):
                     "rrf_score": round(score, 4),
                     "kind": "card",
                 })
-        scored.sort(key=lambda x: -x["rrf_score"])
+        # P0-B4 deterministic-ordering: this feeds the top-10 cut below, so an exact
+        # tie on the rounded score used to be decided by file iteration order.
+        # The canonical (kind, source_id) identity decides only exact ties; the
+        # primary score ordering is unchanged.
+        scored.sort(key=lambda x: (-x["rrf_score"], x["kind"], x["source_id"]))
         scored = scored[:10]
     except PrefetchDeadlineExceeded:
         raise
