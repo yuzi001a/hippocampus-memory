@@ -425,7 +425,12 @@ _LEGACY_DEFAULT_CONFIG: dict[str, Any] = {
                      # 2026-09-03 P1.3.1: 长 term 时启用 QA snapshot 路径的阈值;
                      # 默认 5 — 覆盖 5-term term_frequency SQL tail (~6502ms),
                      # 普通 query (term 数 <5) 仍走 combined/parallel PG ILIKE 路径.
-                     "qa_snapshot_min_terms": 5},
+                     "qa_snapshot_min_terms": 5,
+                     # 2026-10-08 P0-B3: 附加 QA 关键词候选尾部配额 T (每词 head cap C
+                     # 之后的下一批最多 T 条 eligible 行, id ASC). 默认 3 仅来自确定性
+                     # 合成 B3 sweep; 生产全库 frequency/rank 分布未标定 → 可配置/临时值.
+                     # 显式 0 关闭; 负数/非法值回落默认 3.
+                     "qa_tail_quota": 3},
     "ingest": {"cron": "0 2 * * *",
                "live_buffer": {"batch": 8, "flush_sec": 30.0}},
     "prompts": {},  # 用户可覆盖内置 prompt: {"extract": "...", "e1_system": "...", ...}

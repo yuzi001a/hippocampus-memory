@@ -4,6 +4,7 @@ import contextlib
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import inspect
 import json
 import logging
 import math
@@ -338,8 +339,22 @@ def _cjk_bigram_score(meta, bigrams):
         return 0.0
     return min(0.15 * matched, 0.9)
 
-def _rerank(query, hits, top_n=20, rerank_cfg=None, *, deadline=None):
-    """Re-rank top-N hits via cross-encoder. Failures degrade silently."""
+def _rerank(
+    query,
+    hits,
+    top_n=20,
+    rerank_cfg=None,
+    *,
+    deadline=None,
+    on_input=None,
+    on_result=None,
+):
+    """Re-rank top-N hits via cross-encoder. Failures degrade silently.
+
+    Optional callbacks expose the prepared input candidates and validated
+    provider ``(index, score)`` results for diagnostics; observer failures are
+    swallowed and the normal ranking/fallback contract is unchanged.
+    """
     if not hits or not rerank_cfg or not rerank_cfg.get("endpoint"):
         return hits
     deadline = coerce_deadline(deadline)
@@ -382,7 +397,30 @@ def _rerank(query, hits, top_n=20, rerank_cfg=None, *, deadline=None):
         documents = [(h.content or h.content_preview or h.title) for h in candidates]
         # rerank API 单文档长度限制保护 (一般 512-2048 token), 超长截到 2000 字符
         documents = [d[:2000] for d in documents]
-        scores = _rerank_api(query, documents, cfg)
+        if callable(on_input):
+            for position, candidate in enumerate(candidates, start=1):
+                try:
+                    on_input(position, candidate)
+                except Exception:
+                    pass
+        if callable(on_result):
+            try:
+                _api_parameters = inspect.signature(_rerank_api).parameters
+                _accepts_result_observer = (
+                    "on_result" in _api_parameters
+                    and _api_parameters["on_result"].kind is not inspect.Parameter.POSITIONAL_ONLY
+                ) or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in _api_parameters.values()
+                )
+            except (TypeError, ValueError):
+                _accepts_result_observer = False
+            if _accepts_result_observer:
+                scores = _rerank_api(query, documents, cfg, on_result=on_result)
+            else:
+                scores = _rerank_api(query, documents, cfg)
+        else:
+            scores = _rerank_api(query, documents, cfg)
         if deadline is not None:
             deadline.check(context="rerank result")
         if scores is None:
@@ -395,7 +433,12 @@ def _rerank(query, hits, top_n=20, rerank_cfg=None, *, deadline=None):
                 h.cosine = float(s)
             except (TypeError, ValueError):
                 pass
-        reranked = sorted(candidates, key=lambda h: -h.cosine)
+        # P0-B4 deterministic-ordering: the provider can return exactly equal
+        # scores, and the sort key was score-only, so the tie order used to
+        # inherit the caller's collection order for ties.  The canonical
+        # (kind, source_id) identity decides only exact ties; the primary
+        # cosine ordering is unchanged.
+        reranked = sorted(candidates, key=lambda h: (-h.cosine, _stable_identity_key(h)))
         if top_n and len(hits) > top_n:
             reranked.extend(hits[top_n:])
         return reranked
@@ -564,6 +607,42 @@ def _bind_topic_recall_deadline(topic_recall, deadline):
     return view
 
 
+def _stable_identity_key(hit) -> tuple[str, str]:
+    """Canonical ``(kind, source_id)`` identity of one recall candidate.
+
+    P0-B4 deterministic-ordering: this is ONLY ever used as the *last* element
+    of a sort key, so it can decide an order exclusively when the primary score
+    of two candidates is exactly equal.  Every comparison that separates
+    candidates by an actually-different primary score is untouched.
+
+    ``source_id`` is the ``hits`` dict key, so the pair is a total order — the
+    resolved order never depends on set/dict iteration order, ``PYTHONHASHSEED``,
+    ``id()``, or a timestamp.  ``kind`` leads because it is the wire-level
+    candidate class; ordering by it first groups equal-score candidates of the
+    same class together and is itself value-derived (never numeric-id based).
+    """
+    try:
+        sid = str(getattr(hit, "source_id", "") or "")
+    except Exception:
+        sid = ""
+    try:
+        kind = str(getattr(hit, "kind", "") or "")
+    except Exception:
+        kind = ""
+    return (kind, sid)
+
+
+def _stable_sid_key(hits: dict, sid) -> tuple[str, str]:
+    """``_stable_identity_key`` for id-keyed rank maps (``hits[sid]``)."""
+    try:
+        hit = hits.get(sid)
+    except Exception:
+        hit = None
+    if hit is None:
+        return ("", str(sid))
+    return _stable_identity_key(hit)
+
+
 def _resolve_topic_recall(core, embed_cfg, pg, deadline=None):
     """Reuse Runtime cache, then legacy core._topic_recall, else a temporary instance.
 
@@ -639,6 +718,77 @@ def _resolve_qa_snapshot_min_terms(config) -> int:
     except (TypeError, ValueError):
         return default
     # Negative handling: existing safe default/warning contract (silent fallback).
+    if value < 0:
+        return default
+    return value
+
+
+# 2026-10-08 P0-B3: additive QA-keyword candidate *tail quota* T.
+# Existing per-term head cap C is unchanged (first C eligible rows by id ASC);
+# T extends it with at most T further eligible rows (ranks C+1..C+T, id ASC).
+# The result is a strict superset of the pre-P0-B3 admission set — no head row
+# is ever evicted or reordered, and T=0 is byte-identical to the old output.
+#
+# Default 3 is derived ONLY from the deterministic synthetic B3 sweep; the
+# production corpus-wide frequency/rank distribution is NOT calibrated, so the
+# value is configurable/provisional. Explicit 0 disables it; a negative or
+# malformed value falls back to the default (never coerced through truthiness).
+_QA_TAIL_QUOTA_DEFAULT = 3
+
+
+def _clamp_qa_tail_quota(value) -> int:
+    """Coerce a *direct* ``tail_quota`` argument to a non-negative int.
+
+    Unlike :func:`_resolve_qa_tail_quota` (which applies the configured
+    default for a negative/malformed value), a direct per-call argument
+    clamps to 0 — a negative quota means "no tail", preserving the legacy
+    head-only result exactly.
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return coerced if coerced > 0 else 0
+
+
+def _resolve_qa_tail_quota(config) -> int:
+    """Return the configured ``prefetch.qa_tail_quota`` (default 3; 0 disables).
+
+    Tolerant to V3Config / PrefetchConfig / raw dict / None / missing field.
+    An explicit ``0`` is preserved (it disables the tail); a negative or
+    malformed value falls back to the default 3 rather than being coerced
+    through truthiness.
+    """
+    default = _QA_TAIL_QUOTA_DEFAULT
+    if config is None:
+        return default
+    try:
+        if isinstance(config, dict):
+            pf = config.get("prefetch") or {}
+            raw_value = pf.get("qa_tail_quota", default) if isinstance(pf, dict) else default
+        else:
+            pf = getattr(config, "prefetch", None)
+            raw_value = (
+                getattr(config, "qa_tail_quota", default)
+                if hasattr(config, "qa_tail_quota")
+                else (getattr(pf, "qa_tail_quota", default) if pf is not None else default)
+            )
+    except (TypeError, AttributeError):
+        return default
+    if raw_value is None or (isinstance(raw_value, str) and not raw_value.strip()):
+        return default
+    try:
+        if isinstance(raw_value, bool):
+            # bool is a subclass of int — malformed, not 0/1.
+            return default
+        if isinstance(raw_value, str):
+            value = int(raw_value.strip())
+        else:
+            value = int(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        return default
     if value < 0:
         return default
     return value
@@ -981,6 +1131,7 @@ def _qa_snapshot_lookup(
     rare_limit: int,
     per_term_limit: int,
     freq_limit: int,
+    tail_quota: int = 0,
     matched_terms_out=None,
     deadline=None,
 ) -> tuple[dict, list]:
@@ -990,6 +1141,20 @@ def _qa_snapshot_lookup(
     case-insensitive). Selected rows for ranking require answer IS NOT NULL
     and session_id NOT LIKE '%.trajectory%', ordered by id ASC, and capped
     by the existing rare / common dynamic limits.
+
+    2026-10-08 P0-B3 additive tail quota (``tail_quota``, default 0):
+
+      * The existing per-term head cap C is unchanged (first C eligible rows
+        by ``id`` ASC).
+      * ``tail_quota`` T extends the admitted set with at most T further
+        eligible rows immediately after the head (ranks C+1..C+T, still
+        ``id`` ASC). It is NOT the final T rows of the full set and NOT
+        two-ended sampling.
+      * The result is ``head + tail`` — a strict superset of the pre-P0-B3
+        rows; no head row is ever evicted or reordered, and ``T=0``
+        reproduces the old result exactly. A negative direct value clamps
+        to 0. Frequency counts are unchanged (they count every matching row
+        regardless of the admission quota).
 
     2026-09-04 P1.3.1 deadline-closure — two new optional kwargs:
 
@@ -1070,6 +1235,7 @@ def _qa_snapshot_lookup(
             matched_terms_out.update(per_row_hits)
 
     by_id = {row[0]: row for row in rows}
+    tail = _clamp_qa_tail_quota(tail_quota)
     rows_by_term = []
     for idx, ids in enumerate(eligible_per_term):
         ids_sorted = sorted(ids)  # id ASC, mirror ORDER BY id ASC in SQL
@@ -1081,6 +1247,9 @@ def _qa_snapshot_lookup(
                 cap = max(int(per_term_limit), min(freq, int(freq_limit)))
             else:
                 cap = max(int(per_term_limit), 1)
+        # 2026-10-08 P0-B3: head cap C + bounded tail T, contiguous id ASC.
+        # T=0 -> ids_sorted[:cap] (byte-identical to the pre-P0-B3 slice).
+        admitted = cap + tail
         rows_by_term.append(
             [
                 (
@@ -1089,7 +1258,7 @@ def _qa_snapshot_lookup(
                     by_id[rid][2],
                     by_id[rid][3],
                 )
-                for rid in ids_sorted[:cap]
+                for rid in ids_sorted[:admitted]
             ]
         )
     return frequencies, rows_by_term
@@ -1286,6 +1455,31 @@ def _topic_snapshot_lookup(snapshot, terms, *, limit):
     return main_rows, rare_rows
 
 
+def _qa_legacy_keyword_lookup(cursor, term, limit, *, tail_quota=0) -> list:
+    """Legacy single-term QA fallback: head cap ``limit`` + tail ``tail_quota``.
+
+    Extracted verbatim from the old per-term fallback SQL so it can be
+    exercised in isolation. It preserves the current match/eligibility rules
+    exactly — ``question ILIKE %term% OR answer ILIKE %term%``,
+    ``answer IS NOT NULL`` and ``session_id NOT LIKE '%.trajectory%'`` —
+    ordered ``id`` ASC, and returns the contiguous slice ``[0 : C + T]``
+    where ``C = limit`` is the existing head cap and ``T = tail_quota`` the
+    additive P0-B3 tail (a direct negative/malformed quota clamps to 0, so
+    ``tail_quota=0`` reproduces the pre-P0-B3 head-only read).
+    """
+    head = max(int(limit or 0), 0)
+    tail = _clamp_qa_tail_quota(tail_quota)
+    cursor.execute(
+        "SELECT id, timestamp, question, answer FROM qa_pairs "
+        "WHERE (question ILIKE %s OR answer ILIKE %s) "
+        "AND answer IS NOT NULL "
+        "AND session_id NOT LIKE '%%.trajectory%%' "
+        "ORDER BY id ASC LIMIT %s",
+        [f'%{term}%', f'%{term}%', head + tail],
+    )
+    return list(cursor.fetchall())
+
+
 def _combined_qa_keyword_lookup(
     cursor,
     terms: list[str],
@@ -1293,6 +1487,7 @@ def _combined_qa_keyword_lookup(
     rare_limit: int,
     per_term_limit: int,
     freq_limit: int,
+    tail_quota: int = 0,
 ) -> tuple[dict[str, int], list[list[tuple]]]:
     """Return exact term frequencies and per-term QA rows in one SQL round-trip.
 
@@ -1303,6 +1498,11 @@ def _combined_qa_keyword_lookup(
       filters.
     * ``ranked`` applies the old ``answer IS NOT NULL`` and trajectory filters,
       then keeps ``id ASC`` rows for the dynamic per-term limit.
+
+    2026-10-08 P0-B3: the per-term dynamic head cap C is unchanged; the
+    additive ``tail_quota`` T admits the next up-to-T eligible ranks after
+    that head (``rn <= C + T``), still ``id`` ASC and duplicate-free. ``T=0``
+    reproduces the pre-P0-B3 SQL exactly; a direct negative value clamps to 0.
 
     ``term_list`` is built only from tokenizer output.  Its values are still
     bound parameters; the generated SQL contains no user text or bind values.
@@ -1346,7 +1546,7 @@ def _combined_qa_keyword_lookup(
             WHERE rn <= CASE
                     WHEN freq <= 3 THEN %s
                     ELSE GREATEST(%s, LEAST(freq, %s))
-                 END
+                 END + %s
         )
         SELECT t.ord, COALESCE(s.freq, 0) AS freq,
                r.id, r.timestamp, q.question, q.answer
@@ -1359,7 +1559,12 @@ def _combined_qa_keyword_lookup(
     params: list[Any] = []
     for index, term in enumerate(terms):
         params.extend((index, term))
-    params.extend((int(rare_limit), int(per_term_limit), int(freq_limit)))
+    params.extend((
+        int(rare_limit),
+        int(per_term_limit),
+        int(freq_limit),
+        _clamp_qa_tail_quota(tail_quota),
+    ))
     cursor.execute(sql, params)
 
     frequencies = {str(term).lower(): 0 for term in terms}
@@ -1416,6 +1621,7 @@ def _combined_qa_keyword_lookup_parallel(
     rare_limit: int,
     per_term_limit: int,
     freq_limit: int,
+    tail_quota: int = 0,
 ) -> tuple[dict[str, int], list[list[tuple]]]:
     """Run independent term chunks on independent pool leases.
 
@@ -1423,6 +1629,9 @@ def _combined_qa_keyword_lookup_parallel(
     chunk is independent, and the caller must prove that the pool has one
     spare connection beyond the worker set; callers invoke it before their
     main keyword lease is acquired.
+
+    2026-10-08 P0-B3: ``tail_quota`` is forwarded unchanged into each chunk's
+    ``_combined_qa_keyword_lookup`` so every term admits its head + tail.
     """
     worker_count = max(2, min(int(workers), len(terms)))
     chunk_count = worker_count + 1 if worker_count >= 3 and len(terms) >= 4 else worker_count
@@ -1442,6 +1651,7 @@ def _combined_qa_keyword_lookup_parallel(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
 
     with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="v3-qa") as executor:
@@ -1509,6 +1719,9 @@ def _qa_prefill_parallel_cache(
     freq_limit = max(rerank_top_n or 0, limit * 8)
     if isinstance(config, dict):
         freq_limit = int((config.get("recall") or {}).get("qa_freq_limit", freq_limit) or freq_limit)
+    # 2026-10-08 P0-B3: resolve the additive tail quota once and fold it into
+    # the cache identity so a T change invalidates cached head-only rows.
+    tail_quota = _resolve_qa_tail_quota(config)
 
     version = None
     try:
@@ -1530,7 +1743,7 @@ def _qa_prefill_parallel_cache(
     cache = _qa_keyword_cache_for_pool(
         pool,
         version,
-        (int(rare_limit), int(per_term_limit), int(freq_limit)),
+        (int(rare_limit), int(per_term_limit), int(freq_limit), int(tail_quota)),
     )
     # ── A2 admission gate ──────────────────────────────────────────
     # Only reserve worker slots when there is real work to do (i.e. cache
@@ -1614,6 +1827,7 @@ def _qa_prefill_parallel_cache(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
             else:
                 _combined_qa_keyword_lookup_parallel(
@@ -1623,6 +1837,7 @@ def _qa_prefill_parallel_cache(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
         except PrefetchDeadlineExceeded:
             raise
@@ -1646,6 +1861,7 @@ def _qa_prefill_parallel_cache(
                 rare_limit=rare_limit,
                 per_term_limit=per_term_limit,
                 freq_limit=freq_limit,
+                tail_quota=tail_quota,
             )
         except PrefetchDeadlineExceeded:
             raise
@@ -1657,7 +1873,7 @@ def _qa_prefill_parallel_cache(
 def _qa_keyword_cache_for_pool(
     pool: Any,
     version: tuple[int, int] | None,
-    params: tuple[int, int, int],
+    params: tuple[int, ...],
 ) -> dict[str, Any] | None:
     """Return a pool-scoped read cache when a stable QA version is available.
 
@@ -1706,8 +1922,16 @@ def _qa_keyword_cache_lookup(
     rare_limit: int,
     per_term_limit: int,
     freq_limit: int,
+    tail_quota: int = 0,
 ) -> tuple[dict[str, int], list[list[tuple]]]:
-    """Read/fill a pool-scoped QA cache without exposing partial entries."""
+    """Read/fill a pool-scoped QA cache without exposing partial entries.
+
+    2026-10-08 P0-B3: ``tail_quota`` is forwarded to both the serial and the
+    parallel SQL lookup so every cache fill admits head + tail. The cache
+    identity tuple carries T as its fourth element (see
+    ``_qa_keyword_cache_for_pool``), so a T change invalidates cached
+    head-only rows rather than serving a stale admission set.
+    """
     lock = cache.get("lock")
     if lock is None:
         lock = threading.RLock()
@@ -1735,6 +1959,7 @@ def _qa_keyword_cache_lookup(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
             else:
                 missing_freq, missing_rows = _combined_qa_keyword_lookup(
@@ -1743,6 +1968,7 @@ def _qa_keyword_cache_lookup(
                     rare_limit=rare_limit,
                     per_term_limit=per_term_limit,
                     freq_limit=freq_limit,
+                    tail_quota=tail_quota,
                 )
             new_entries = {}
             for index, term in enumerate(missing_terms):
@@ -1943,8 +2169,16 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
                         str(_e.get("observation_version"))),
     )
     _out: list = []
+    # P0-B4 deterministic-ordering: this slice is a top-k cut (``_cap``), so a
+    # tie on cosine used to be decided by collection order.  The secondary key
+    # is the SAME canonical identity ``_daily`` above already uses for this
+    # candidate family, and only decides exact ties.
     for _e in list(_daily) + sorted(
-            _nos, key=lambda _x: -_x.get("cosine", 0))[:max(_cap - len(_daily), 0)]:
+            _nos,
+            key=lambda _x: (-_x.get("cosine", 0),
+                            str(_x.get("observation_id")),
+                            str(_x.get("observation_version"))),
+    )[:max(_cap - len(_daily), 0)]:
         if len(_out) >= _cap:
             break
         try:
@@ -2049,6 +2283,15 @@ def recall_pool(
               * selection 阶段: ``final`` 里的 hit 发出
                 ``select(source_id)``; ``ranked[limit:]`` 里的 hit 发出
                 ``drop(source_id, 'OUTSIDE_LIMIT', stage='selection')``;
+              * P0-B4-A 诊断探针 (只读, 不改变任何算法/权重/配置; 无 trace 时
+                整块跳过): 每条 hit 发出 ``candidate_kind(source_id, kind)``;
+                每个 lane 检索路径发出 ``lane_evidence(source_id, lane,
+                present, raw_rank, raw_score, rrf_contribution)``; RRF 排序前后
+                发出 ``fusion_position(source_id, pre_fusion_position,
+                post_fusion_position)``; 实际跑 rerank 时对 rerank 输入里的每条
+                hit 发出 ``rerank_evidence(source_id, input_position,
+                provider_index, score)``; 进入最终结果列表的 hit 发出
+                ``final_position(source_id, position)``;
               * lane degradation: 每个 lane 的 ``except Exception as e``
                 日志分支前, 发出 ``error('lane=NAME: ' + str(e)[:200])``;
               * lane timed-out: 每个 lane 的 ``except PrefetchDeadlineExceeded``
@@ -2119,6 +2362,7 @@ def recall_pool(
     # 不改任何排序语义 (空字典触发 false 分支, 等价于 keyword 路径未命中)。
     _rare_bonus = {}
     _qa_boost_sig = {}
+    _delivery_hits_raw: list[dict] = []
 
     # Keyword path — PG topics 表（优先）或 SQLite topic_blocks 兜底
     # Keyword + QA lanes (single combined block — both seams share the
@@ -2134,6 +2378,9 @@ def recall_pool(
     # ran (include_keyword and/or include_card_vector).
     _am_kw_ids_for_probe: list[str] = []
     _am_vec_ids_for_probe: list[str] = []
+    _am_kw_rank_for_trace: dict[str, int] | None = {} if trace is not None else None
+    _am_vec_rank_for_trace: dict[str, int] | None = {} if trace is not None else None
+    _am_vec_score_for_trace: dict[str, float] | None = {} if trace is not None else None
     _am_kw_reader_seen = False  # reader resolver ran for kw seam
     _am_vec_reader_seen = False  # reader resolver ran for vec seam
     _am_kw_reader_present = False  # kw reader resolved to non-None
@@ -2187,13 +2434,15 @@ def recall_pool(
                     # Snapshot the explicit ids BEFORE adding to hits so the
                     # probe can record the *real* active-memory provenance
                     # even after _add_active_memory_to_hits mutates the dict.
-                    for _row in (_am_kw_rows or []):
+                    for _row_rank, _row in enumerate((_am_kw_rows or []), start=1):
                         try:
                             _mid = _row.get("memory_id") or _row.get("source_id")
                         except Exception:
                             _mid = None
                         if isinstance(_mid, str) and _mid:
                             _am_kw_ids_for_probe.append(_mid)
+                            if _am_kw_rank_for_trace is not None:
+                                _am_kw_rank_for_trace.setdefault(_mid, _row_rank)
                     _add_active_memory_to_hits(
                         _am_kw_rows, hits=hits, target_ids=kw_ids, with_cosine=False
                     )
@@ -2299,11 +2548,18 @@ def recall_pool(
                                 _qa_freq_limit = max(rerank_top_n or 0, limit * 8)
                                 if isinstance(config, dict):
                                     _qa_freq_limit = int((config.get("recall") or {}).get("qa_freq_limit", _qa_freq_limit) or _qa_freq_limit)
+                                # 2026-10-08 P0-B3: additive per-term tail quota.
+                                # Resolved once and threaded into the snapshot /
+                                # cache / combined lookups; it is the 4th element
+                                # of the cache identity so a T change invalidates
+                                # cached head-only rows.
+                                _qa_tail_quota = _resolve_qa_tail_quota(config)
                                 _combined_qa_rows = None
                                 _qa_cache_params = (
                                     int(_qa_rare_limit),
                                     int(_qa_per_term_limit),
                                     int(_qa_freq_limit),
+                                    int(_qa_tail_quota),
                                 )
                                 _qa_cache = (
                                     _qa_keyword_cache_for_pool(
@@ -2353,6 +2609,7 @@ def recall_pool(
                                                 rare_limit=_qa_rare_limit,
                                                 per_term_limit=_qa_per_term_limit,
                                                 freq_limit=_qa_freq_limit,
+                                                tail_quota=_qa_tail_quota,
                                                 matched_terms_out=_qa_matched_terms_by_id,
                                                 deadline=deadline,
                                             )
@@ -2387,6 +2644,7 @@ def recall_pool(
                                                 rare_limit=_qa_rare_limit,
                                                 per_term_limit=_qa_per_term_limit,
                                                 freq_limit=_qa_freq_limit,
+                                                tail_quota=_qa_tail_quota,
                                             )
                                     except PrefetchDeadlineExceeded:
                                         raise
@@ -2403,6 +2661,7 @@ def recall_pool(
                                             rare_limit=_qa_rare_limit,
                                             per_term_limit=_qa_per_term_limit,
                                             freq_limit=_qa_freq_limit,
+                                            tail_quota=_qa_tail_quota,
                                         )
                                     except PrefetchDeadlineExceeded:
                                         raise
@@ -2592,6 +2851,10 @@ def recall_pool(
                                 _qa_freq_limit = max(rerank_top_n or 0, limit * 8)  # 默认 limit=5 -> 40
                                 if isinstance(config, dict):
                                     _qa_freq_limit = int((config.get("recall") or {}).get("qa_freq_limit", _qa_freq_limit) or _qa_freq_limit)
+                                # 2026-10-08 P0-B3: same additive tail quota as the
+                                # combined/snapshot path; recomputed here so this
+                                # legacy fallback block is self-contained.
+                                _qa_tail_quota = _resolve_qa_tail_quota(config)
                                 _qa_rows_per_term: list[list] = []
                                 _qa_is_rare_per_term: list[bool] = []
                                 _qa_terms_in_order: list[str] = []
@@ -2600,15 +2863,14 @@ def recall_pool(
                                     if _combined_qa_rows is not None:
                                         return _combined_qa_rows[len(_qa_rows_per_term)]
                                     try:
-                                        _pg_cur.execute(
-                                            "SELECT id, timestamp, question, answer FROM qa_pairs "
-                                            "WHERE (question ILIKE %s OR answer ILIKE %s) "
-                                            "AND answer IS NOT NULL "
-                                            "AND session_id NOT LIKE '%%.trajectory%%' "
-                                            "ORDER BY id ASC LIMIT %s",
-                                            [f'%{_term}%', f'%{_term}%', _limit]
+                                        # 2026-10-08 P0-B3: extracted module-level
+                                        # helper — head cap ``_limit`` (C) plus the
+                                        # additive tail quota, id ASC.
+                                        return _qa_legacy_keyword_lookup(
+                                            _pg_cur, _term,
+                                            limit=_limit,
+                                            tail_quota=_qa_tail_quota,
                                         )
-                                        return list(_pg_cur.fetchall())
                                     except PrefetchDeadlineExceeded:
                                         raise
                                     except Exception:
@@ -2634,15 +2896,17 @@ def recall_pool(
                                     _qa_term_limits.append(_lim)
                                     _qa_rows_per_term.append(_read_qa_rows_for_term(_t, _lim))
                                     _qa_is_rare_per_term.append(_is_rare)
-                                # Phase 1: 按 _terms 顺序, 每词只取 rows[:_lim] (lim=该词动态配额,
-                                # 非稀有词按词频缩放后能覆盖 id 靠后的精确命中), dedup append。
+                                # Phase 1: 按 _terms 顺序, 每词只取 rows[:_lim + T] (lim=该词动态配额 C,
+                                # 非稀有词按词频缩放后能覆盖 id 靠后的精确命中; T=prefetch.qa_tail_quota
+                                # 是 P0-B3 附加尾部配额 — 必须一起消费, 否则 rows[:C] 会把 tail 丢掉),
+                                # dedup append。
                                 # 2026-09-04 P1.3.1 deadline-closure: probe every 64
                                 # candidate appends so a long raw-hit list cannot
                                 # overrun the SLO.  PrefetchDeadlineExceeded propagates
                                 # through the surrounding try/except.
                                 _phase1_seen = 0
                                 for _t, _rows, _lim in zip(_qa_terms_in_order, _qa_rows_per_term, _qa_term_limits):
-                                    for _r in _rows[:_lim]:
+                                    for _r in _rows[:_lim + _qa_tail_quota]:
                                         if deadline is not None and (_phase1_seen & 0x3F) == 0:
                                             deadline.check(context="qa phase1 dedup")
                                         _phase1_seen += 1
@@ -2676,6 +2940,26 @@ def recall_pool(
                                             if _r[0] not in _seen_qa:
                                                 _seen_qa.add(_r[0])
                                                 _qa_hits_raw.append(_r)
+                                # P0-C2: assistant deliveries join the existing
+                                # lexical QA retrieval path, but only their real
+                                # assistant content is searched (never a fake Q).
+                                try:
+                                    from .assistant_delivery import keyword_delivery_candidates
+                                    _delivery_hits_raw = keyword_delivery_candidates(
+                                        _pg_cur, _terms,
+                                        limit=max(rerank_top_n or 0, limit * 8),
+                                    )
+                                except PrefetchDeadlineExceeded:
+                                    raise
+                                except Exception as _delivery_lookup_error:
+                                    try:
+                                        _pg_conn.rollback()
+                                    except Exception:
+                                        pass
+                                    logger.debug(
+                                        "assistant-delivery keyword lookup failed: %s",
+                                        _safe_err(_delivery_lookup_error)[:100],
+                                    )
                 except PrefetchDeadlineExceeded:
                     # A8 (G6B Slice B): record the lane timeout BEFORE the raise.
                     try:
@@ -2837,6 +3121,32 @@ def recall_pool(
                         kind='qa',
                         created_at=_ts,
                     )
+                # Deliveries are real assistant output, not QA.  They share
+                # the existing lexical QA lane/fusion path while retaining a
+                # distinct kind and source_id for provenance.
+                for _delivery_row in _delivery_hits_raw:
+                    _delivery_sid = str(_delivery_row.get("source_id") or "")
+                    _delivery_content = str(_delivery_row.get("content") or "")
+                    _matched_count = int(_delivery_row.get("matched_terms") or 0)
+                    if not _delivery_sid or not _delivery_content or _matched_count <= 0:
+                        continue
+                    _delivery_kind = str(_delivery_row.get("trigger_kind") or "")
+                    _delivery_ts = _delivery_row.get("created_at")
+                    if hasattr(_delivery_ts, "isoformat"):
+                        _delivery_ts = _delivery_ts.isoformat()
+                    kw_ids.add(_delivery_sid)
+                    hits[_delivery_sid] = RecallHit(
+                        source_id=_delivery_sid,
+                        title=(f"assistant delivery ({_delivery_kind})"
+                               if _delivery_kind else "assistant delivery"),
+                        content_preview=_delivery_content[:500],
+                        content=_delivery_content,
+                        category="assistant_delivery",
+                        tags=[],
+                        rrf_score=min(0.6 + 0.2 * _matched_count, 2.0),
+                        kind="assistant_delivery",
+                        created_at=str(_delivery_ts or ""),
+                    )
             except PrefetchDeadlineExceeded:
                 # A8 (G6B Slice B): record the lane timeout BEFORE the
                 # raise.  Inside the QA scoring block.
@@ -2879,7 +3189,7 @@ def recall_pool(
                 _k = str(getattr(_h, "kind", "") or "")
             except Exception:
                 _k = ""
-            if _k == "qa":
+            if _k in ("qa", "assistant_delivery"):
                 _qa_kw_ids.append(_sid)
             else:
                 _kw_kw_ids.append(_sid)
@@ -2938,13 +3248,21 @@ def recall_pool(
                                 _safe_err(_am_vec_exc)[:200],
                             )
                             _am_vec_rows = []
-                        for _row in (_am_vec_rows or []):
+                        for _row_rank, _row in enumerate((_am_vec_rows or []), start=1):
                             try:
                                 _mid = _row.get("memory_id") or _row.get("source_id")
                             except Exception:
                                 _mid = None
                             if isinstance(_mid, str) and _mid:
                                 _am_vec_ids_for_probe.append(_mid)
+                                if _am_vec_rank_for_trace is not None:
+                                    _am_vec_rank_for_trace.setdefault(_mid, _row_rank)
+                                    try:
+                                        _raw_score = float(_row.get("cosine"))
+                                        if math.isfinite(_raw_score):
+                                            _am_vec_score_for_trace.setdefault(_mid, _raw_score)
+                                    except (AttributeError, TypeError, ValueError):
+                                        pass
                         _add_active_memory_to_hits(
                             _am_vec_rows,
                             hits=hits,
@@ -3150,6 +3468,44 @@ def recall_pool(
     except Exception:
         _explicit_ids = []
     _probe(trace, 'lane_candidates', 'explicit', _explicit_ids)
+    if trace is not None:
+        for _sid in _explicit_ids:
+            _kw_rank = (_am_kw_rank_for_trace or {}).get(_sid)
+            _vec_rank = (_am_vec_rank_for_trace or {}).get(_sid)
+            if _kw_rank is not None:
+                _probe(
+                    trace,
+                    'lane_evidence',
+                    _sid,
+                    'explicit',
+                    present=True,
+                    raw_rank=_kw_rank,
+                    raw_score=None,
+                    rrf_contribution=0.0,
+                    path='explicit_keyword',
+                )
+            if _vec_rank is not None:
+                _probe(
+                    trace,
+                    'lane_evidence',
+                    _sid,
+                    'explicit',
+                    present=True,
+                    raw_rank=_vec_rank,
+                    raw_score=(_am_vec_score_for_trace or {}).get(_sid),
+                    rrf_contribution=0.0,
+                    path='explicit_vector',
+                )
+            if _kw_rank is None and _vec_rank is None:
+                _probe(
+                    trace,
+                    'lane_evidence',
+                    _sid,
+                    'explicit',
+                    present=True,
+                    rrf_contribution=0.0,
+                    path='explicit_untyped',
+                )
     if not (_am_kw_reader_seen or _am_vec_reader_seen):
         # Neither kw nor vec seam ran at all (e.g. include_keyword=False AND
         # include_card_vector=False).
@@ -3558,11 +3914,18 @@ def recall_pool(
     TOPIC_RRF_WEIGHT = 2.0
     QA_RRF_WEIGHT = 1.0  # 原文精确命中权重 (高于降半的 keyword, 低于 topic)
 
-    kw_rank = {sid: i + 1 for i, sid in enumerate(sorted(kw_ids, key=lambda s: hits[s].rrf_score, reverse=True))} if kw_ids else {}
+    # P0-B4 deterministic-ordering: every rank map below sorts a SET with a
+    # stable sort and a score-only key, so exactly-equal scores used to inherit
+    # the set's PYTHONHASHSEED-dependent iteration order — an arbitrary rank
+    # that changes the RRF contribution ``w / (K + rank)``.  Each key therefore
+    # ends in the canonical ``(kind, source_id)`` identity, which decides the
+    # order only when the primary score is exactly equal.  All score
+    # comparisons, weights and the rank arithmetic are unchanged.
+    kw_rank = {sid: i + 1 for i, sid in enumerate(sorted(kw_ids, key=lambda s: (-hits[s].rrf_score, _stable_sid_key(hits, s))))} if kw_ids else {}
     qa_kw_rank = {sid: i + 1 for i, sid in enumerate(sorted([s for s in kw_ids if hits[s].kind == 'qa'],
-                                                           key=lambda s: hits[s].rrf_score, reverse=True))} if kw_ids else {}
+                                                           key=lambda s: (-hits[s].rrf_score, _stable_sid_key(hits, s))))} if kw_ids else {}
     vec_rank = {sid: i + 1 for i, sid in enumerate(sorted([s for s in vec_ids if hits[s].kind != 'qa'],
-                                                           key=lambda s: hits[s].cosine, reverse=True))} if vec_ids else {}
+                                                           key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))} if vec_ids else {}
     # 2026-08-12 A-2: vec_rank 排除 QA — QA 向量命中只走 qa_vec_rank 一条路径, 消除双计分
     # (之前 QA 同时参与 vec_rank(1.0) + qa_vec_rank(1.0) = 无关语义 QA 双倍虚高 0.022-0.025,
     # 把精确命中压出 top30; 归因 A 类 55.5% 的次要根因)
@@ -3570,12 +3933,12 @@ def recall_pool(
     # 之前 QA 只在 qa_kw_rank(1.0)+vec_rank(1.0) 混合, topic 有 topic_rank(2.0) 单独路径
     # → topic 天生多一条 2.0 路径, QA 原文永远被压出 limit (LGBTQ 查询 qa_231 cos=0.696 排 14 名)
     qa_vec_rank = {sid: i + 1 for i, sid in enumerate(sorted([s for s in vec_ids if hits[s].kind == 'qa'],
-                                                            key=lambda s: hits[s].cosine, reverse=True))} if vec_ids else {}
-    msg_rank = {sid: i + 1 for i, sid in enumerate(sorted(msg_ids, key=lambda s: hits[s].cosine, reverse=True))} if msg_ids else {}
-    eff_rank = {sid: i + 1 for i, sid in enumerate(sorted(eff_ids, key=lambda s: hits[s].cosine, reverse=True))} if eff_ids else {}
-    topic_rank = {sid: i + 1 for i, sid in enumerate(sorted(topic_ids, key=lambda s: hits[s].cosine, reverse=True))}
-    yin_rank = {sid: i + 1 for i, sid in enumerate(sorted(yin_ids, key=lambda s: hits[s].cosine, reverse=True))}
-    notes_rank = {sid: i + 1 for i, sid in enumerate(sorted(notes_ids, key=lambda s: hits[s].cosine, reverse=True))}
+                                                            key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))} if vec_ids else {}
+    msg_rank = {sid: i + 1 for i, sid in enumerate(sorted(msg_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))} if msg_ids else {}
+    eff_rank = {sid: i + 1 for i, sid in enumerate(sorted(eff_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))} if eff_ids else {}
+    topic_rank = {sid: i + 1 for i, sid in enumerate(sorted(topic_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))}
+    yin_rank = {sid: i + 1 for i, sid in enumerate(sorted(yin_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))}
+    notes_rank = {sid: i + 1 for i, sid in enumerate(sorted(notes_ids, key=lambda s: (-hits[s].cosine, _stable_sid_key(hits, s))))}
 
     paths = []
     if kw_rank:
@@ -3607,6 +3970,54 @@ def recall_pool(
         _probe(trace, 'warn', 'M03 suppression_degraded=True (recall_pool topic lane)')
     for _m03_sid in _m03_suppress_topic_hits(hits, _m03_sup):
         _probe(trace, 'drop', _m03_sid, 'M03_INVALIDATED', stage='suppression')
+
+    # P0-B4-A: expose each physical RRF path and its exact additive term.
+    # This distinguishes candidate admission from fusion without collapsing
+    # multiple votes that share a canonical lane (e.g. topic/QA subpaths).
+    # The block is guarded by ``trace is not None``; it never mutates recall
+    # state, weights, candidates, or scores.
+    if trace is not None:
+        try:
+            # (canonical lane, physical RRF path, rank map, weight, raw-score family)
+            _lane_paths = (
+                ('keyword', 'keyword', kw_rank, KW_RRF_WEIGHT, 'kw'),
+                ('qa', 'qa_keyword', qa_kw_rank, QA_RRF_WEIGHT, 'kw'),
+                ('qa', 'qa_vector', qa_vec_rank, QA_RRF_WEIGHT, 'vec'),
+                ('vector', 'vector', vec_rank, VEC_RRF_WEIGHT, 'vec'),
+                ('vector', 'message_vector', msg_rank, VEC_RRF_WEIGHT, 'vec'),
+                ('vector', 'effective_vector', eff_rank, VEC_RRF_WEIGHT, 'vec'),
+                ('topic', 'topic_vector', topic_rank, TOPIC_RRF_WEIGHT, 'vec'),
+                ('vector', 'yin_vector', yin_rank, VEC_RRF_WEIGHT, 'vec'),
+                ('vector', 'notes_vector', notes_rank, VEC_RRF_WEIGHT, 'vec'),
+            )
+            for _sid, _hit in hits.items():
+                _probe(trace, 'candidate_kind', _sid, _hit.kind)
+            for _lane_name, _path_name, _rank_map, _w, _src in _lane_paths:
+                for _sid, _rank in _rank_map.items():
+                    _hit = hits.get(_sid)
+                    if _hit is None:
+                        continue
+                    try:
+                        _rank_i = int(_rank)
+                    except (TypeError, ValueError):
+                        continue
+                    # Keyword-family lanes report the pre-fusion RRF score;
+                    # vector-family lanes report the cosine.  Read BEFORE the
+                    # fusion loop overwrites ``hit.rrf_score``.
+                    _raw = _hit.rrf_score if _src == 'kw' else _hit.cosine
+                    _probe(
+                        trace,
+                        'lane_evidence',
+                        _sid,
+                        _lane_name,
+                        present=True,
+                        raw_rank=_rank_i,
+                        raw_score=_raw,
+                        rrf_contribution=float(_w) / (K + _rank_i),
+                        path=_path_name,
+                    )
+        except Exception:
+            pass
 
     scored = []
     for sid, hit in hits.items():
@@ -3684,7 +4095,14 @@ def recall_pool(
         if _qa_boost_sig:
             _boost_thr = max(3, int(_total_qa * 0.01))
             _boost_sids = [sid for sid, (mf, lc) in _qa_boost_sig.items() if mf <= 3 or lc >= 2]
-            _boost_sids.sort(key=lambda s: hits[s].rrf_score, reverse=True)
+            # P0-B4 deterministic-ordering: ``_qa_boost_sig`` is a dict keyed by
+            # source_id, so ``_boost_sids[:2]`` used to inherit PYTHONHASHSEED
+            # iteration order whenever two candidates tied on rrf_score and the
+            # top-2 boost selection flipped between processes.  The canonical
+            # (kind, source_id) identity decides only exact ties; the primary
+            # rrf_score ordering — and the 0.5 boost / 2-candidate cap — is
+            # unchanged.
+            _boost_sids.sort(key=lambda s: (-hits[s].rrf_score, _stable_sid_key(hits, s)))
             for _sid in _boost_sids[:2]:
                 for _hit in scored:
                     if _hit.kind == 'qa' and _hit.source_id == _sid:
@@ -3699,12 +4117,100 @@ def recall_pool(
     except Exception:
         pass
 
-    scored.sort(key=lambda x: x.rrf_score, reverse=True)
+    # P0-B4-A: capture the pre-fusion union/admission order before the final
+    # fused-score sort. This is not a cross-lane rank; the per-lane ranks above
+    # are authoritative. Read-only; skipped entirely when no trace is attached.
+    _pre_fusion_positions = None
+    if trace is not None:
+        _pre_fusion_positions = {}
+        try:
+            for _i, _h in enumerate(scored):
+                _pre_fusion_positions[_h.source_id] = _i + 1
+        except Exception:
+            _pre_fusion_positions = {}
+
+    # P0-B4 deterministic-ordering: ``scored`` is built by iterating the ``hits``
+    # dict (insertion-ordered, but populated from several hash-ordered lanes),
+    # and the sort key was score-only — so exactly-equal fused scores used to
+    # resolve by whatever order the candidates happened to be collected in.
+    # The canonical (kind, source_id) identity decides only exact ties; the
+    # primary rrf_score ordering (and therefore rerank top-k and the final
+    # limit cut) is unchanged.
+    scored.sort(key=lambda x: (-x.rrf_score, _stable_identity_key(x)))
+
+    if trace is not None:
+        try:
+            for _i, _h in enumerate(scored):
+                _probe(
+                    trace,
+                    'fusion_position',
+                    _h.source_id,
+                    pre_fusion_position=_pre_fusion_positions.get(_h.source_id),
+                    post_fusion_position=_i + 1,
+                    fusion_score=_h.rrf_score,
+                )
+        except Exception:
+            pass
 
     # Optional rerank
     ranked = scored
     if rerank_top_n and len(ranked) > rerank_top_n and rerank_cfg:
-        if deadline is None:
+        if trace is not None:
+            # Match the exact candidate sequence passed to _rerank. This map
+            # is diagnostic only and is not built on the untraced path.
+            try:
+                _rerank_input_hits = list(ranked[:int(rerank_top_n)])
+            except Exception:
+                _rerank_input_hits = []
+
+            def _trace_rerank_input(position, candidate):
+                _probe(
+                    trace,
+                    "rerank_evidence",
+                    candidate.source_id,
+                    input_position=position,
+                )
+
+            def _trace_rerank_result(provider_index, score):
+                if type(provider_index) is not int or not 0 <= provider_index < len(_rerank_input_hits):
+                    return
+                _candidate = _rerank_input_hits[provider_index]
+                _probe(
+                    trace,
+                    "rerank_evidence",
+                    _candidate.source_id,
+                    input_position=provider_index + 1,
+                    provider_index=provider_index,
+                    score=score,
+                )
+
+            _rerank_kwargs = {}
+            try:
+                _rerank_parameters = inspect.signature(_rerank).parameters
+                _supports_trace_callbacks = (
+                    ("on_input" in _rerank_parameters and "on_result" in _rerank_parameters)
+                    or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in _rerank_parameters.values()
+                    )
+                )
+            except (TypeError, ValueError):
+                _supports_trace_callbacks = False
+            if _supports_trace_callbacks:
+                _rerank_kwargs.update(
+                    on_input=_trace_rerank_input,
+                    on_result=_trace_rerank_result,
+                )
+            if deadline is not None:
+                _rerank_kwargs["deadline"] = deadline
+            ranked = _rerank(
+                query,
+                ranked,
+                top_n=rerank_top_n,
+                rerank_cfg=rerank_cfg,
+                **_rerank_kwargs,
+            )
+        elif deadline is None:
             ranked = _rerank(query, ranked, top_n=rerank_top_n, rerank_cfg=rerank_cfg)
         else:
             ranked = _rerank(
@@ -3722,6 +4228,7 @@ def recall_pool(
                 _probe(trace, 'event', _h.source_id, 'RERANKED')
         except Exception:
             pass
+
     else:
         # A5 (G6B Slice B): rerank was skipped.  Emit a warn probe with
         # the SINGLE real reason — derived only from the real condition.
@@ -3749,6 +4256,16 @@ def recall_pool(
             _probe(trace, 'select', _h.source_id)
     except Exception:
         pass
+    # P0-B4-A: record the final 1-based position of every hit that made the
+    # returned list.  A hit in ``ranked[limit:]`` has no final position and
+    # is dropped OUTSIDE_LIMIT below — that is the final-limit-miss signal.
+    # Read-only; skipped when no trace is attached.
+    if trace is not None:
+        try:
+            for _i, _h in enumerate(final):
+                _probe(trace, 'final_position', _h.source_id, _i + 1)
+        except Exception:
+            pass
     try:
         for _h in ranked[limit:]:
             _probe(trace, 'drop', _h.source_id, 'OUTSIDE_LIMIT', stage='selection')
@@ -4116,7 +4633,11 @@ def _chain_fallback_file(query, pg, *, deadline=None):
                     "rrf_score": round(score, 4),
                     "kind": "card",
                 })
-        scored.sort(key=lambda x: -x["rrf_score"])
+        # P0-B4 deterministic-ordering: this feeds the top-10 cut below, so an exact
+        # tie on the rounded score used to be decided by file iteration order.
+        # The canonical (kind, source_id) identity decides only exact ties; the
+        # primary score ordering is unchanged.
+        scored.sort(key=lambda x: (-x["rrf_score"], x["kind"], x["source_id"]))
         scored = scored[:10]
     except PrefetchDeadlineExceeded:
         raise

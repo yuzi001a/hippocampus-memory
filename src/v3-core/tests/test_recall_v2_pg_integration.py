@@ -663,6 +663,283 @@ class TestPgIntegration:
             f"source_id, got sids={sids}, source_ids={source_ids}"
         )
 
+    def test_c2_delivery_rebuilds_and_enters_existing_qa_recall_lane(
+        self, pg_pool: PgPool, pg_store: PgEmbedStore
+    ) -> None:
+        """Real PG proof: source -> derived delivery -> legacy recall -> F2 trace."""
+        import uuid
+
+        from datetime import datetime
+
+        from v3core.assistant_delivery import (
+            DeliveryGroup,
+            delivery_source_id,
+            rebuild_deliveries,
+            write_delivery,
+        )
+        from v3core.recall_v2.adapters import lane_for_kind
+
+        suffix = uuid.uuid4().hex[:12]
+        host = "p0c2-y400"
+        session_id = f"g6b_test_c2delivery_{suffix}"
+        trigger_id = f"{session_id}_trigger"
+        assistant_ids = [f"{session_id}_a1", f"{session_id}_a2"]
+        source_id = delivery_source_id(host, session_id, trigger_id)
+        query_token = f"p0c2deliveryneedle{suffix}"
+
+        def insert_source(event_id: str, role: str, content: str,
+                          timestamp: str) -> None:
+            inserted = pg_store.insert_message(
+                event_id,
+                content,
+                embedding=None,
+                metadata={
+                    "session_id": session_id,
+                    "role": role,
+                    "host": host,
+                    "event_id": event_id,
+                    "turn_id": 1,
+                    "timestamp": timestamp,
+                },
+            )
+            assert inserted, f"source event did not insert: {event_id}"
+
+        try:
+            insert_source(
+                trigger_id, "host_event:ASYNC_BOUNDARY",
+                "background task complete",
+                "2026-10-06T01:00:00+00:00",
+            )
+            insert_source(
+                assistant_ids[0], "assistant", "The task started safely.",
+                "2026-10-06T01:00:01+00:00",
+            )
+            insert_source(
+                assistant_ids[1], "assistant",
+                f"Final result contains {query_token} and is ready.",
+                "2026-10-06T01:00:02+00:00",
+            )
+
+            boundary_time = datetime.fromisoformat("2026-10-06T01:00:00+00:00")
+            source_a1 = "The task started safely."
+            first_group = DeliveryGroup(
+                trigger_event_id=trigger_id,
+                trigger_kind="ASYNC_BOUNDARY",
+                host=host,
+                session_id=session_id,
+                event_ids=[assistant_ids[0]],
+                segments=[(assistant_ids[0], source_a1)],
+                content=source_a1,
+                started_at=boundary_time,
+            )
+            assert write_delivery(pg_store, first_group, strict=True)
+
+            # Same F2 event ID with rewritten snapshot text must not replace the
+            # first durable source body.
+            stale_a1 = "shortened replay snapshot"
+            same_id_replay = DeliveryGroup(
+                trigger_event_id=trigger_id,
+                trigger_kind="ASYNC_BOUNDARY",
+                host=host,
+                session_id=session_id,
+                event_ids=[assistant_ids[0]],
+                segments=[(assistant_ids[0], stale_a1)],
+                content=stale_a1,
+                started_at=boundary_time,
+            )
+            assert write_delivery(pg_store, same_id_replay, strict=True)
+
+            source_a2 = f"Final result contains {query_token} and is ready."
+            extended_group = DeliveryGroup(
+                trigger_event_id=trigger_id,
+                trigger_kind="ASYNC_BOUNDARY",
+                host=host,
+                session_id=session_id,
+                event_ids=assistant_ids,
+                segments=[(assistant_ids[0], stale_a1), (assistant_ids[1], source_a2)],
+                content=chr(10).join([stale_a1, source_a2]),
+                started_at=boundary_time,
+            )
+            assert write_delivery(pg_store, extended_group, strict=True)
+            with pg_pool.lease() as lease:
+                cur = lease.connection.cursor()
+                cur.execute(
+                    "SELECT content, event_ids FROM public.assistant_deliveries "
+                    "WHERE source_id=%s",
+                    (source_id,),
+                )
+                live_row = cur.fetchone()
+                assert live_row is not None
+                assert live_row[0] == chr(10).join([source_a1, source_a2]), live_row
+                assert list(live_row[1]) == assistant_ids
+
+            # Canonical rebuild from conversation_stream replaces any stale
+            # derivative with the exact authoritative source representation.
+            assert rebuild_deliveries(pg_store, session_id, host=host) == 1
+            hits, _ = recall_pool.recall_pool(
+                query_token,
+                card_index={}, pg=pg_store, q_emb=None,
+                include_keyword=True, include_card_vector=False,
+                include_message_vector=False, include_effective=False,
+                include_topic=False, include_yin=False, include_notes=False,
+                rerank_top_n=None, rerank_cfg=None, limit=10,
+                pg_was_connected=True, config=_production_config(),
+                sqlite_store=None, core=None, deadline=None,
+            )
+            delivery_hits = [hit for hit in hits if hit.source_id == source_id]
+            assert len(delivery_hits) == 1, [hit.source_id for hit in hits]
+            hit = delivery_hits[0]
+            assert hit.kind == "assistant_delivery"
+            assert lane_for_kind(hit.kind) == "qa"
+            assert query_token in hit.content
+
+            with pg_pool.lease() as lease:
+                cur = lease.connection.cursor()
+                cur.execute(
+                    "SELECT host, session_id, trigger_event_id, event_ids "
+                    "FROM public.assistant_deliveries WHERE source_id = %s",
+                    (source_id,),
+                )
+                row = cur.fetchone()
+                assert row is not None
+                assert row[:3] == (host, session_id, trigger_id)
+                assert list(row[3]) == assistant_ids
+                cur.execute(
+                    "SELECT event_id, role, content FROM public.conversation_stream "
+                    "WHERE host = %s AND session_id = %s AND event_id = ANY(%s)",
+                    (host, session_id, assistant_ids),
+                )
+                source_rows = cur.fetchall()
+                assert {row[0] for row in source_rows} == set(assistant_ids)
+        finally:
+            with pg_pool.lease() as lease:
+                conn = lease.connection
+                cur = conn.cursor()
+                cur.execute(
+                    "DELETE FROM public.assistant_deliveries WHERE source_id = %s",
+                    (source_id,),
+                )
+                cur.execute(
+                    "DELETE FROM public.conversation_stream "
+                    "WHERE host = %s AND session_id = %s AND event_id = ANY(%s)",
+                    (host, session_id, [trigger_id, *assistant_ids]),
+                )
+                conn.commit()
+
+    def test_c2_historical_repair_plan_is_read_only_with_real_pg(
+        self, pg_pool: PgPool, pg_store: PgEmbedStore
+    ) -> None:
+        """Real PG fixture: deterministic host-scoped repair plan, zero writes."""
+        import json
+        import uuid
+
+        from v3core import V3Core
+        from v3core.assistant_delivery import plan_delivery_repair
+
+        suffix = uuid.uuid4().hex[:12]
+        host = "p0c2-y400-repair"
+        session_id = f"g6b_test_c2repair_{suffix}"
+        trigger_id = f"{session_id}_trigger"
+        assistant_ids = [f"{session_id}_a1", f"{session_id}_a2"]
+        qa_ids = [
+            V3Core._qa_source_id(session_id, 1, f"{session_id}_human_a", host=host),
+            V3Core._qa_source_id(session_id, 1, f"{session_id}_human_b", host=host),
+        ]
+        payload_a = f"c2repairpayloada{suffix}"
+        payload_b = f"c2repairpayloadb{suffix}"
+
+        def insert_source(event_id: str, role: str, content: str, timestamp: str) -> None:
+            inserted = pg_store.insert_message(
+                event_id, content, embedding=None,
+                metadata={
+                    "session_id": session_id, "role": role, "host": host,
+                    "event_id": event_id, "turn_id": 1, "timestamp": timestamp,
+                },
+            )
+            assert inserted, f"source event did not insert: {event_id}"
+
+        def snapshot():
+            with pg_pool.lease() as lease:
+                cur = lease.connection.cursor()
+                cur.execute(
+                    "SELECT source_id, answer, merged_event_ids FROM public.qa_pairs "
+                    "WHERE source_id = ANY(%s) ORDER BY source_id",
+                    (qa_ids,),
+                )
+                qa_state = cur.fetchall()
+                cur.execute(
+                    "SELECT count(*) FROM public.assistant_deliveries "
+                    "WHERE host=%s AND session_id=%s",
+                    (host, session_id),
+                )
+                delivery_count = int(cur.fetchone()[0])
+                cur.execute(
+                    "SELECT event_id, role, content FROM public.conversation_stream "
+                    "WHERE host=%s AND session_id=%s AND event_id = ANY(%s) "
+                    "ORDER BY id",
+                    (host, session_id, [trigger_id, *assistant_ids]),
+                )
+                source_state = cur.fetchall()
+                return qa_state, delivery_count, source_state
+
+        try:
+            insert_source(trigger_id, "host_event:ASYNC_BOUNDARY",
+                          "background task complete", "2026-10-06T01:10:00+00:00")
+            insert_source(assistant_ids[0], "assistant", payload_a,
+                          "2026-10-06T01:10:01+00:00")
+            insert_source(assistant_ids[1], "assistant", payload_b,
+                          "2026-10-06T01:10:02+00:00")
+            with pg_pool.lease() as lease:
+                conn = lease.connection
+                cur = conn.cursor()
+                rows = [
+                    (qa_ids[0], session_id, 1, "human question",
+                     f"human answer {payload_a}\\n{payload_b}", "2026-10-06T01:10:03+00:00",
+                     "live_sync", "[]", "[]", None, "", json.dumps(assistant_ids)),
+                    (qa_ids[1], session_id, 1, "legacy human question",
+                     f"answer without a provenance ledger contains {payload_b}",
+                     "2026-10-06T01:10:04+00:00", "live_sync", "[]", "[]", None, "", "[]"),
+                ]
+                for row in rows:
+                    cur.execute(
+                        "INSERT INTO public.qa_pairs "
+                        "(source_id,session_id,turn_id,question,answer,timestamp,source,"
+                        "tool_calls,tool_results,embedding,embed_model,merged_event_ids) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::vector,%s,%s::jsonb) "
+                        "ON CONFLICT (source_id) DO NOTHING",
+                        row,
+                    )
+                conn.commit()
+
+            before = snapshot()
+            plan_a = plan_delivery_repair(pg_store, session_id, host)
+            plan_b = plan_delivery_repair(pg_store, session_id, host)
+            after = snapshot()
+            assert plan_a == plan_b, plan_a
+            assert before == after, "repair dry-run must not modify QA or sidecar rows"
+            assert len(plan_a["would_create_deliveries"]) == 1, plan_a
+            assert plan_a["would_create_deliveries"][0]["event_ids"] == assistant_ids
+            assert [x["qa_source_id"] for x in plan_a["would_rebuild_polluted_qa"]] == [qa_ids[0]]
+            assert plan_a["would_rebuild_polluted_qa"][0]["contaminated_event_ids"] == assistant_ids
+            assert [x["qa_source_id"] for x in plan_a["unknown"]] == [qa_ids[1]]
+            encoded_plan = json.dumps(plan_a, ensure_ascii=False)
+            assert payload_a not in encoded_plan and payload_b not in encoded_plan
+        finally:
+            with pg_pool.lease() as lease:
+                conn = lease.connection
+                cur = conn.cursor()
+                cur.execute(
+                    "DELETE FROM public.assistant_deliveries WHERE host=%s AND session_id=%s",
+                    (host, session_id),
+                )
+                cur.execute("DELETE FROM public.qa_pairs WHERE source_id = ANY(%s)", (qa_ids,))
+                cur.execute(
+                    "DELETE FROM public.conversation_stream "
+                    "WHERE host=%s AND session_id=%s AND event_id = ANY(%s)",
+                    (host, session_id, [trigger_id, *assistant_ids]),
+                )
+                conn.commit()
+
     def test_vector_path_returns_hits_via_supplied_q_emb(
         self, pg_pool: PgPool, pg_store: PgEmbedStore
     ) -> None:

@@ -65,6 +65,18 @@ Per-candidate::
     drop(candidate_id: str, code: DropReasonCode,
          detail: str = '', stage: str = '') -> None
 
+Diagnostics (P0-B4-A — additive, observability only)::
+
+    candidate_kind(candidate_id: str, kind: str = '') -> None
+    lane_evidence(candidate_id: str, lane: str, present: bool = True,
+                  raw_rank: int | None = None, raw_score: float | None = None,
+                  rrf_contribution: float | None = None) -> None
+    fusion_position(candidate_id: str, pre_fusion_position=None,
+                    post_fusion_position=None) -> None
+    rerank_evidence(candidate_id: str, input_position=None,
+                    provider_index=None, score=None) -> None
+    final_position(candidate_id: str, position: int) -> None
+
 Selection / injection::
 
     select(candidate_id: str) -> None
@@ -627,6 +639,104 @@ class LegacySink:
         if inject_fn is None:
             return
         self._safe(inject_fn, candidate_id, char_count=cc)
+
+    # ---- P0-B4-A diagnostic protocol --------------------------------
+    # Duck-typed protocol extensions used by the legacy retrieval code to
+    # expose *why* a candidate did or did not survive each stage.  Every
+    # method is exception-safe and a no-op when the lane/input is invalid.
+
+    def candidate_kind(self, candidate_id: str, kind: str = "") -> None:
+        """Record the legacy wire kind of a candidate (``qa`` / ``card`` …)."""
+        if self._trace is None or not candidate_id:
+            return
+        self._ensure_snapshot(candidate_id, lane="vector", source_type="")
+        record_kind = getattr(self._trace, "record_kind", None)
+        if record_kind is None:
+            return
+        self._safe(record_kind, candidate_id, str(kind or ""))
+
+    def lane_evidence(
+        self,
+        candidate_id: str,
+        lane: str,
+        present: bool = True,
+        raw_rank: Any = None,
+        raw_score: Any = None,
+        rrf_contribution: Any = None,
+        *,
+        path: str | None = None,
+    ) -> None:
+        """Record one physical retrieval path under its canonical lane."""
+        if self._trace is None or not candidate_id or lane not in _VALID_LANES:
+            return
+        self._ensure_snapshot(candidate_id, lane=lane, source_type="")
+        record = getattr(self._trace, "record_lane_evidence", None)
+        if record is None:
+            return
+        self._safe(
+            record,
+            candidate_id,
+            lane,
+            present=bool(present),
+            raw_rank=raw_rank,
+            raw_score=raw_score,
+            rrf_contribution=rrf_contribution,
+            path=path,
+        )
+
+    def fusion_position(
+        self,
+        candidate_id: str,
+        pre_fusion_position: Any = None,
+        post_fusion_position: Any = None,
+        fusion_score: Any = None,
+    ) -> None:
+        """Record positions and the effective fused score used for sorting."""
+        if self._trace is None or not candidate_id:
+            return
+        self._ensure_snapshot(candidate_id, lane="vector", source_type="")
+        record = getattr(self._trace, "record_fusion_position", None)
+        if record is None:
+            return
+        self._safe(
+            record,
+            candidate_id,
+            pre_fusion_position=pre_fusion_position,
+            post_fusion_position=post_fusion_position,
+            fusion_score=fusion_score,
+        )
+
+    def rerank_evidence(
+        self,
+        candidate_id: str,
+        input_position: Any = None,
+        provider_index: Any = None,
+        score: Any = None,
+    ) -> None:
+        """Record rerank input position, provider index and rerank score."""
+        if self._trace is None or not candidate_id:
+            return
+        self._ensure_snapshot(candidate_id, lane="vector", source_type="")
+        record = getattr(self._trace, "record_rerank_evidence", None)
+        if record is None:
+            return
+        self._safe(
+            record,
+            candidate_id,
+            input_position=input_position,
+            provider_index=provider_index,
+            score=score,
+        )
+
+    def final_position(self, candidate_id: str, position: Any) -> None:
+        """Record the candidate's final 1-based result position."""
+        if self._trace is None or not candidate_id:
+            return
+        self._ensure_snapshot(candidate_id, lane="vector", source_type="")
+        record = getattr(self._trace, "record_final_position", None)
+        if record is None:
+            return
+        self._safe(record, candidate_id, position)
 
     def warn(self, text: str) -> None:
         if self._trace is None or not text:

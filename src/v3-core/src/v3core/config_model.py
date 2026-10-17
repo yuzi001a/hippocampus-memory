@@ -157,6 +157,12 @@ class PrefetchConfig:
     # combined/parallel + A2 worker path, 不静默改 rerank/topic/A2 行为); 显式 1–4
     # 仍走 snapshot 但等于「低于默认」, 显式 32 仅作对照.
     qa_snapshot_min_terms: int = 5
+    # 2026-10-08 P0-B3: 附加 QA 关键词候选尾部配额 T. 既有每词 head cap C 不变,
+    # T 追加紧邻 head 之后的最多 T 条 eligible 行 (仍 id ASC) — head+tail 是旧结果的
+    # 严格超集, 不淘汰/重排任何 head 行, T=0 与旧输出逐字节一致. 默认 3 仅来自确定性
+    # 合成 B3 sweep, 生产全库 frequency/rank 分布未标定 → 可配置/临时值. 显式 0 关闭;
+    # 负数原样保留并触发校验告警, 由 recall_pool._resolve_qa_tail_quota 回落默认 3.
+    qa_tail_quota: int = 3
 
 
 @dataclass
@@ -304,7 +310,7 @@ def _coerce_int(v: Any, default: int) -> int:
         return default
     try:
         return int(v)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return default
 
 
@@ -431,6 +437,15 @@ def from_legacy_dict(src: dict | None) -> V3Config:
         include_message_vector=_coerce_bool(prefetch_raw.get("include_message_vector"), True),
         # 2026-09-03 P1.3.1: 字段缺失 / 类型异常回落 5 (term_frequency tail; 5-term boundary).
         qa_snapshot_min_terms=_coerce_int(prefetch_raw.get("qa_snapshot_min_terms"), 5),
+        # 2026-10-08 P0-B3: 附加 QA 候选尾部配额 T — 显式 0 保留; 负数按既有
+        # qa_snapshot_min_terms 契约原样保留 (校验告警), 由 recall_pool 的
+        # _resolve_qa_tail_quota 回落到默认 3.
+        # bool 是 int 的子类；YAML true/false 必须回落默认，而不能变成 1/0.
+        qa_tail_quota=(
+            3
+            if isinstance(prefetch_raw.get("qa_tail_quota"), bool)
+            else _coerce_int(prefetch_raw.get("qa_tail_quota"), 3)
+        ),
     )
 
     # -- Ingest --
@@ -508,6 +523,10 @@ def validate_config(cfg: V3Config) -> list[str]:
     # (5-term boundary / term_frequency tail).
     if getattr(cfg.prefetch, "qa_snapshot_min_terms", 5) < 0:
         warnings.append("prefetch.qa_snapshot_min_terms 应为非负整数，使用默认 5")
+
+    # 2026-10-08 P0-B3: qa_tail_quota 应为非负整数; 负值会被回落到默认 3.
+    if getattr(cfg.prefetch, "qa_tail_quota", 3) < 0:
+        warnings.append("prefetch.qa_tail_quota 应为非负整数，使用默认 3")
 
     if cfg.pg and cfg.pg.port and not (1 <= cfg.pg.port <= 65535):
         warnings.append(f"PG 端口异常: {cfg.pg.port}")

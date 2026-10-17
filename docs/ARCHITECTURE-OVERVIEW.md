@@ -124,6 +124,46 @@ This split is what "clean boundary" means in the alpha contract. See
 [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](PUBLIC_ALPHA_SUPPORTED_SURFACE.md) §
 2.3 for the corresponding supported-surface row.
 
+### 3.1 Infrastructure boundary: memory vs intelligence
+
+Hippocampus is **memory infrastructure**, not an agent. This is a product
+boundary, not a preference — it decides which failures belong to this
+codebase at all.
+
+| Side | Owns | Does **not** own |
+|---|---|---|
+| **Hippocampus (this repo)** | Storing history; organising it (topics, versions, relations, lineage); making it retrievable; keeping identity stable | Deciding what is *true*; judging a claim; acting for the user |
+| **Host agent (Hermes / dsh / pi)** | Understanding the request; judging what matters; deciding and acting | Owning the durable record; rewriting history |
+
+The hard rule that follows from it:
+
+> A model whose job is to summarise, compress or distil **must never be the
+> gate that decides which raw facts are allowed to reach a future model.**
+> Summaries and derived cards are indexes into history — an accelerator,
+> never a filter that silently drops the underlying record.
+
+Consequences that are already implemented:
+
+- **Raw facts are retained by default.** A correction, a supersede or a
+  withdrawal changes which version is *current*; it does not delete the
+  original `conversation_stream` / `qa_pairs` rows. History stays traceable
+  and re-retrievable.
+- **Current vs history is a read mode, not a deletion.** `hm_get` returns the
+  terminal current version by default and the requested original version plus
+  its full history chain under `mode="history"`.
+- **Derived invalidation only touches derived objects.** M03 propagation marks
+  the derived artefacts that were *mapped* to the corrected memory (`topic`,
+  `observer_note`, `yin_paragraph`) as invalidated and rebuilds them on
+  demand. It never rewrites or erases the source.
+- **Recalling a historical QA pair is not a defect.** Recall surfaces what
+  history says; whether the *answer* is current is the agent's judgement.
+  Model answer quality is a usage observation, not a correctness gate for
+  this repo.
+
+New capabilities are classified against this table first: behaviour that needs
+understanding or judgement belongs to the agent side and must not be pushed
+into Hippocampus.
+
 ---
 
 ## 4. Hook → flow mapping (Hermes-mediated)

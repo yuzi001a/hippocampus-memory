@@ -568,8 +568,8 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
     when the canonical alpha tables all exist.
 
     v0.2 additive behavior: when canonical tables are missing (notably
-    ``explicit_memories`` and the optional ``qa_embedding_chunks`` child-A
-    artifact), the detail and evidence point at the exact dry-run /
+    ``explicit_memories``, ``assistant_deliveries``, and the optional
+    ``qa_embedding_chunks`` child-A artifact), the detail and evidence point at the exact dry-run /
     apply upgrade command rather than telling the operator to recreate
     the database. The existing ``tables_present`` / ``tables_total``
     count contract is preserved; ``missing_tables`` is an additive
@@ -618,17 +618,17 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
             canonical_alpha_tables = (
                 "qa_pairs", "conversation_stream", "topics",
                 "topic_entries", "observation_notes", "explicit_memories",
-                "yin_paragraphs",
+                "yin_paragraphs", "assistant_deliveries",
             )
             # v0.2 additive set: tables the upgrade tool specifically
-            # brings to an existing install. ``explicit_memories`` is in
-            # both lists (it's a canonical alpha table AND a v0.2 upgrade
-            # target); the child-A sidecar ``qa_embedding_chunks`` is
-            # only in the upgrade set. We track both because the upgrade
-            # command distinguishes them.
+            # brings to an existing install. ``explicit_memories`` and
+            # ``assistant_deliveries`` are in both lists (canonical alpha
+            # tables and upgrade targets); the child-A sidecar
+            # ``qa_embedding_chunks`` is only in the upgrade set. We track
+            # both because the upgrade command distinguishes them.
             upgrade_target_tables = (
                 "explicit_memories", "schema_versions",
-                "qa_embedding_chunks",
+                "qa_embedding_chunks", "assistant_deliveries",
             )
             with conn.cursor() as cur:
                 # If a schema_versions table exists, use it.
@@ -643,7 +643,7 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
                     # A failed statement aborts the transaction: without this
                     # rollback every later probe on this cursor raises
                     # InFailedSqlTransaction, which is how the canonical-table
-                    # fallback below reported 0/7 on a perfectly good install.
+                    # fallback below reported 0/8 on a perfectly good install.
                     try:
                         conn.rollback()
                     except Exception:  # noqa: BLE001
@@ -666,6 +666,11 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
                             "source_end", "source_sha256", "token_count",
                             "representation_version", "content", "embedding",
                             "embed_model",
+                        ),
+                        "assistant_deliveries": (
+                            "source_id", "host", "session_id", "trigger_event_id",
+                            "trigger_kind", "content", "event_ids", "started_at",
+                            "created_at",
                         ),
                     }
                     missing_columns: dict[str, list[str]] = {}
@@ -740,8 +745,9 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
                     if t not in present_set
                 ]
                 # Probe the v0.2 upgrade targets that are NOT already in
-                # the canonical alpha set (qa_embedding_chunks) plus
-                # explicit_memories (which is in both).
+                # the canonical alpha set (qa_embedding_chunks) plus the
+                # explicitly shared targets (explicit_memories and
+                # assistant_deliveries).
                 upgrade_presence: dict[str, bool] = {}
                 for tbl in upgrade_target_tables:
                     try:
@@ -778,6 +784,11 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
                         "source_end", "source_sha256", "token_count",
                         "representation_version", "content", "embedding",
                         "embed_model",
+                    ),
+                    "assistant_deliveries": (
+                        "source_id", "host", "session_id", "trigger_event_id",
+                        "trigger_kind", "content", "event_ids", "started_at",
+                        "created_at",
                     ),
                 }
                 missing_columns: dict[str, list[str]] = {}

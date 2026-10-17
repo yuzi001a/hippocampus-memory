@@ -116,7 +116,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
-from ._deadline import PrefetchDeadlineExceeded
+from ._deadline import DeadlinePoolView, PrefetchDeadlineExceeded
 from .pg_pool import DEFAULT_LEASE_TIMEOUT, PgPool
 
 logger = logging.getLogger("v3core.active_memory_store")
@@ -421,18 +421,19 @@ def _lease_slots(target: Any) -> tuple:
 
     Callers that receive a single injected store/pool (the M03 derived
     invalidation/rebuild plumbing does) must route it into the slot
-    ``_acquire_lease`` expects. A real ``PgPool`` belongs in the ``pool`` slot
-    (its ``lease()`` yields a ``PgLease``, NOT a DBAPI connection); anything
-    else — ``PgEmbedStore``, a store-shaped fake — belongs in the ``pg`` slot
-    so the ``open_side_connection`` seam / ``_PgStoreLeaseAdapter`` is used.
+    ``_acquire_lease`` expects. A ``PgPool`` and its ``DeadlinePoolView`` wrapper
+    belong in the ``pool`` slot (their ``lease()`` yields a ``PgLease``, NOT a
+    bare DBAPI connection); anything else — ``PgEmbedStore`` or a store-shaped
+    fake — belongs in the ``pg`` slot so the ``open_side_connection`` seam /
+    ``_PgStoreLeaseAdapter`` is used.
 
-    Putting a ``PgPool`` in the ``pg`` slot silently takes the adapter path,
-    where ``PgLease.__enter__()`` returns the lease itself, so
+    Putting either pool form in the ``pg`` slot silently takes the adapter
+    path, where ``PgLease.__enter__()`` returns the lease itself, so
     ``lease.connection`` is a ``PgLease`` and every ``.cursor()`` raises.
     """
     if target is None:
         return None, None
-    if isinstance(target, PgPool):
+    if isinstance(target, (PgPool, DeadlinePoolView)):
         return target, None
     return None, target
 

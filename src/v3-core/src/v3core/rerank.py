@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import logging
+import math
 from typing import Any
 
 import requests
@@ -28,6 +29,8 @@ def rerank(
     query: str,
     documents: list[str],
     rerank_cfg: dict | None = None,
+    *,
+    on_result: Any = None,
 ) -> list[float] | None:
     """调 cross-encoder rerank API，返回 relevance_score 列表。
 
@@ -35,6 +38,9 @@ def rerank(
         query: 用户查询
         documents: 候选文档列表（简短文本，如 title / content_preview）
         rerank_cfg: 配置字典 {endpoint, apiKey/api_key, proxy, timeout}
+        on_result: optional read-only observer called with the provider's
+            validated ``(index, relevance_score)`` pairs in response order.
+            Observer failures are ignored and never alter rerank behavior.
 
     Returns:
         list[float] | None: 与 documents 一一对应的分数; 失败/未配置返 None
@@ -70,13 +76,53 @@ def rerank(
         resp.raise_for_status()
         data = resp.json()
         results = data.get("results", [])
-        if len(results) != len(documents):
+        if not isinstance(results, list) or len(results) != len(documents):
+            result_count = len(results) if isinstance(results, list) else 0
             logger.warning(
                 "rerank 返 %d 分, 期待 %d — 降级",
-                len(results), len(documents),
+                result_count, len(documents),
             )
             return None
-        return [r.get("relevance_score", 0.0) for r in results]
+
+        # The API's result array is ranked, not position-aligned. Preserve
+        # the input-document contract by writing each score back to its index.
+        scores_by_index: list[float | None] = [None] * len(documents)
+        provider_results: list[tuple[int, float]] = []
+        for result in results:
+            if not isinstance(result, dict):
+                logger.warning("rerank returned a malformed result — fallback")
+                return None
+            index = result.get("index")
+            if type(index) is not int or not 0 <= index < len(documents):
+                logger.warning("rerank returned an invalid result index — fallback")
+                return None
+            if scores_by_index[index] is not None:
+                logger.warning("rerank returned a duplicate result index — fallback")
+                return None
+            try:
+                score = float(result["relevance_score"])
+            except (KeyError, TypeError, ValueError):
+                logger.warning("rerank returned an invalid relevance score — fallback")
+                return None
+            if not math.isfinite(score):
+                logger.warning("rerank returned a non-finite relevance score — fallback")
+                return None
+            scores_by_index[index] = score
+            provider_results.append((index, score))
+
+        if any(score is None for score in scores_by_index):
+            logger.warning("rerank omitted a document index — fallback")
+            return None
+        if callable(on_result):
+            # Report only a complete, validated provider response, in the
+            # provider's original ranked-array order. A broken observer must
+            # never turn a successful rerank into a fallback.
+            for index, score in provider_results:
+                try:
+                    on_result(index, score)
+                except Exception:
+                    pass
+        return [score for score in scores_by_index if score is not None]
     except requests.HTTPError as e:
         if e.response.status_code == 403 and not api_key:
             logger.info("rerank 403: 需配置 apiKey (config.yaml storage.rerank.apiKey)")

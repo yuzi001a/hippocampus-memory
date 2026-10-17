@@ -326,6 +326,7 @@ def _doctor(args: argparse.Namespace) -> int:
                  "qa_embedding_chunks.sql", "observation_embedding_chunks.sql",
                  "memory_relations.sql",
                  "derived_memory_invalidations.sql",
+                 "assistant_deliveries.sql",
                  "upgrade_v0_2.sql"):
         try:
             text = _package_sql(name)
@@ -608,7 +609,8 @@ def _doctor_probe_database(explicit_dsn: str | None) -> dict[str, Any]:
                           "topic_entries", "observation_notes",
                           "conversation_stream", "yin_paragraphs",
                           "embedding_failures", "memory_relations",
-                          "derived_memory_invalidations"):
+                          "derived_memory_invalidations",
+                          "assistant_deliveries"):
                 try:
                     cur.execute(
                         "SELECT 1 FROM information_schema.tables "
@@ -1255,6 +1257,8 @@ _UPGRADE_REQUIRED_TABLES: tuple[str, ...] = (
     # upgrade carries it through the same ALPHA_BOOTSTRAP_INCLUDE marker
     # as every other canonical artifact.
     "memory_relations",
+    # P0-C2: required for durable autonomous assistant-delivery recall.
+    "assistant_deliveries",
 )
 # Optional tables the upgrade checks for but never adds directly. The
 # qa_embedding_chunks table is owned by child A; when child A's
@@ -1277,6 +1281,10 @@ _UPGRADE_TABLE_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "topic_entries": ("source_qa_id", "embed_model"),
     "observation_notes": ("embed_model",),
     "yin_paragraphs": ("embed_model",),
+    "assistant_deliveries": (
+        "source_id", "host", "session_id", "trigger_event_id", "trigger_kind",
+        "content", "event_ids", "started_at", "created_at",
+    ),
 }
 
 
@@ -1566,16 +1574,16 @@ def _upgrade_load_combined_sql(
 ) -> tuple[str, dict[str, Any]]:
     """Load and combine the upgrade SQL files into a single body.
 
-    The upgrade body is ``upgrade_v0_2.sql`` (the additive DDL owned by
-    this task) with the ``ALPHA_BOOTSTRAP_INCLUDE`` marker replaced by
-    the packaged ``explicit_memories.sql`` body — same single-source
-    pattern ``_expand_alpha_include`` already uses.
+    The upgrade body is ``upgrade_v0_2.sql`` with every canonical
+    ``ALPHA_BOOTSTRAP_INCLUDE`` marker expanded from its packaged SQL
+    artifact — including the P0-C2 ``assistant_deliveries`` sidecar.
 
     When ``include_qa_chunks_artifact`` is True the optional
     ``qa_embedding_chunks.sql`` artifact (when packaged) is spliced in
     BEFORE the single final ``COMMIT;`` of ``upgrade_v0_2.sql`` so the
-    entire upgrade — schema_versions row, explicit_memories body, the
-    qa_embedding_chunks sidecar, every ADD COLUMN IF NOT EXISTS guard
+    entire upgrade — schema_versions row, canonical sidecars (including
+    assistant_deliveries), the qa_embedding_chunks sidecar, and every
+    ADD COLUMN IF NOT EXISTS guard
     — runs as ONE atomic transaction. The previous implementation
     appended the chunk body AFTER ``COMMIT;``, which silently split
     the upgrade into two transactions; the v0.2 contract is one
@@ -1633,6 +1641,15 @@ def _upgrade_load_combined_sql(
         out["memory_relations_sql_missing"] = True
     else:
         out["memory_relations_sql_sha256"] = relation_sha
+    delivery_present, _delivery_text, delivery_sha = _package_optional_sql(
+        "assistant_deliveries.sql"
+    )
+    out["assistant_deliveries_sql_present"] = bool(delivery_present)
+    if delivery_present and delivery_sha:
+        out["assistant_deliveries_sql_sha256"] = delivery_sha
+    else:
+        out["assistant_deliveries_sql_missing"] = True
+        return (expanded, out)
     if not include_qa_chunks_artifact:
         return (expanded, out)
     present, qa_text, qa_sha = _package_optional_sql(
@@ -1765,6 +1782,9 @@ def _upgrade_build_plan(
                 "observation_embedding_chunks_sql_sha256"
             ),
             "memory_relations.sql": sql_meta.get("memory_relations_sql_sha256"),
+            "assistant_deliveries.sql": sql_meta.get(
+                "assistant_deliveries_sql_sha256"
+            ),
         },
         "combined_sql": {
             "bytes": len(sql_text.encode("utf-8")),
