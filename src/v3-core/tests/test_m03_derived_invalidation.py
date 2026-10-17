@@ -275,6 +275,20 @@ class _FakeCursor:
                         if r["derived_kind"] == p[0] and r["state"] != p[1]]
             elif "DERIVED_KIND = %S" in s:
                 rows = [r for r in rows if r["derived_kind"] == p[0]]
+            if "REPLACEMENT_DERIVED_ID IS NOT NULL" in s:
+                rows = [r for r in rows if r.get("replacement_derived_id") is not None]
+                if "DERIVED_ID = %S" in s:
+                    rows = [r for r in rows if r["derived_id"] == p[1]]
+                if "CORRECTION_ID <> %S" in s:
+                    rows = [r for r in rows if r["correction_id"] != p[2]]
+                ordered = sorted(
+                    rows,
+                    key=lambda r: (str(r.get("created_at")), str(r["invalidation_id"])),
+                    reverse=True,
+                )
+                self._many = [(r["replacement_derived_id"],) for r in ordered]
+                self._one = self._many[0] if self._many else None
+                return
             if "INVALIDATION_ID = ANY(%S)" in s:
                 wanted = {str(x) for x in (p[0] if p else [])}
                 self._many = [(r["invalidation_id"],) for r in rows
@@ -826,6 +840,66 @@ def test_M03_empty_qa_set_discovers_nothing():
     assert _mod().discover_affected(db, []) == {
         "topic": [], "observer_note": [], "yin_paragraph": []
     }
+
+
+def test_M03_later_correction_targets_the_live_replacement_not_the_stale_head():
+    """§31 chain regression.
+
+    After a rebuild records ``replacement_derived_id = D2`` on D1's row, a LATER
+    correction of the memory D2 was rebuilt from must invalidate ``D2`` — the
+    artifact currently in circulation — instead of re-invalidating the already
+    superseded ``D1``. Re-invalidating only ``D1`` leaves ``D2`` (whose content
+    is the superseded derivation) injectable as the current conclusion.
+    """
+    db, seed = _ab_db()
+    seed.topic_entry("t_d1", 42)
+    _propagate(db)
+
+    d1_iid = _mod().invalidation_id("cor_ab", "topic", "t_d1")
+    db.invalidations[d1_iid]["state"] = "rebuilt"
+    db.invalidations[d1_iid]["replacement_derived_id"] = "t_d2"
+
+    assert _mod().discover_affected(db, [42])["topic"] == ["t_d2"], (
+        "the later correction must resolve to the rebuilt replacement"
+    )
+    assert _mod().invalidated_ids(db, "topic") == {"t_d1"}, (
+        "discovery must not lift D1's permanent suppression"
+    )
+
+
+def test_M03_replacement_chain_walk_is_cycle_safe():
+    db, seed = _ab_db()
+    seed.topic_entry("t_d1", 42)
+    _propagate(db)
+
+    d1_iid = _mod().invalidation_id("cor_ab", "topic", "t_d1")
+    db.invalidations[d1_iid]["replacement_derived_id"] = "t_d1"  # self-cycle
+
+    assert _mod().discover_affected(db, [42])["topic"] == ["t_d1"]
+
+
+def test_M03_replacement_hop_recorded_by_the_same_correction_is_not_followed():
+    """Replaying a correction must resolve the same ids as the first pass.
+
+    The rebuild a correction triggers records ``replacement_derived_id`` on that
+    correction's OWN row. Following that hop on replay would move the resolution
+    from D1 to D2 and write a second row for the same correction, so the replay
+    would stop being idempotent.
+    """
+    db, seed = _ab_db()
+    seed.topic_entry("t_d1", 42)
+    _propagate(db)
+
+    d1_iid = _mod().invalidation_id("cor_ab", "topic", "t_d1")
+    db.invalidations[d1_iid]["state"] = "rebuilt"
+    db.invalidations[d1_iid]["replacement_derived_id"] = "t_d2"
+
+    assert _mod()._discover(db, [42], "cor_ab")[0]["topic"] == ["t_d1"], (
+        "replaying cor_ab must not follow the hop cor_ab itself recorded"
+    )
+    assert _mod()._discover(db, [42], "cor_other")[0]["topic"] == ["t_d2"], (
+        "a later correction must follow the hop and target the live replacement"
+    )
 
 
 # ─────────────────────────── the core propagation ─────────────────────────

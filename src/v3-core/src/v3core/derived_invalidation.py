@@ -178,6 +178,9 @@ _RELATION_TABLE = "public.memory_relations"
 _STREAM_TABLE = "public.conversation_stream"
 _QA_TABLE = "public.qa_pairs"
 _TOPIC_ENTRIES_TABLE = "public.topic_entries"
+
+#: Bound on the rebuild-replacement chain walk in :func:`_discover`.
+_REPLACEMENT_CHAIN_MAX_HOPS = 16
 _OBSERVATION_TABLE = "public.observation_notes"
 _TOPICS_TABLE = "public.topics"
 _YIN_TABLE = "public.yin_paragraphs"
@@ -429,7 +432,51 @@ def _exact_source_candidates(
 # ── discovery ─────────────────────────────────────────────────────────────
 
 
-def _discover(pg: Any, qa_ids: Any) -> tuple[dict, set]:
+def _replacement_chain_tail(cur: Any, heads: Any, correction_id: Any = None) -> set:
+    """Walk ``derived_id -> replacement_derived_id`` forward to each tail.
+
+    A rebuild records ``replacement_derived_id = D2`` on D1's row. ``D2`` carries
+    content derived from the same source, so a LATER correction must invalidate
+    ``D2`` — the artifact currently in circulation — instead of re-invalidating
+    the already superseded ``D1`` and letting ``D2`` keep being injected as the
+    current conclusion.
+
+    Hops recorded by ``correction_id`` itself are NOT followed: those are the
+    replacements produced BY the correction being replayed, so following them
+    would make a replay resolve differently from the first pass and stop being
+    idempotent.
+
+    Read-only and bounded (``_REPLACEMENT_CHAIN_MAX_HOPS``). An id with no
+    replacement is its own tail, so a first correction resolves exactly as
+    before.
+    """
+    tails: set = set()
+    for head in heads:
+        current = str(head)
+        seen = {current}
+        for _ in range(_REPLACEMENT_CHAIN_MAX_HOPS):
+            sql = (
+                f"SELECT replacement_derived_id FROM {_INVALIDATION_TABLE} "
+                f"WHERE derived_kind = %s AND derived_id = %s "
+                f"AND replacement_derived_id IS NOT NULL"
+            )
+            params: list = [DERIVED_KIND_TOPIC, current]
+            if correction_id is not None:
+                sql += " AND correction_id <> %s"
+                params.append(correction_id)
+            sql += " ORDER BY created_at DESC, invalidation_id DESC LIMIT 1"
+            cur.execute(sql, tuple(params))
+            row = cur.fetchone()
+            nxt = str(row[0]) if row and row[0] is not None else None
+            if not nxt or nxt in seen:
+                break
+            seen.add(nxt)
+            current = nxt
+        tails.add(current)
+    return tails
+
+
+def _discover(pg: Any, qa_ids: Any, correction_id: Any = None) -> tuple[dict, set]:
     """``(affected, covered_qa_ids)`` — structural discovery only.
 
     ``covered_qa_ids`` is the subset of resolved qa ids for which at least one
@@ -456,7 +503,11 @@ def _discover(pg: Any, qa_ids: Any) -> tuple[dict, set]:
             (ids,),
         )
         affected[DERIVED_KIND_TOPIC] = sorted(
-            {str(r[0]) for r in cur.fetchall() if r and r[0] is not None}
+            _replacement_chain_tail(
+                cur,
+                {str(r[0]) for r in cur.fetchall() if r and r[0] is not None},
+                correction_id,
+            )
         )
         cur.execute(
             f"SELECT DISTINCT source_qa_id FROM {_TOPIC_ENTRIES_TABLE} "
@@ -751,7 +802,7 @@ def propagate_correction(
 
     # 4) structural discovery
     try:
-        affected, covered = _discover(pg, qa_ids)
+        affected, covered = _discover(pg, qa_ids, correction_id)
     except Exception as exc:
         return _receipt(
             status=_classify_db_error(exc), success=False, correction_id=cid,
