@@ -2468,6 +2468,7 @@ def recall_pool(
             _kw_topics = []
             _qa_hits_raw = []  # 2026-08-09: QA 原文命中 (PG 分支填充, 兜底空)
             _qa_boost_sig: dict[str, tuple] = {}  # 2026-08-12 A-1: (min_freq, 低频词数) 保送信号
+            _delivery_boost_sig: dict[str, tuple] = {}  # 2026-10-17 B6: 同一精确命中信号, 用于 assistant delivery
             _term_freq = {}  # 2026-08-09: query 词频 (稀有词加权)
             _rare_bonus = {}  # 2026-08-09: 稀有词命中 QA 的排序提升分 (source_id -> bonus, 0.08 封顶)
             _terms = [t for t in query_terms if len(t) > 1] if query_terms else []
@@ -3147,6 +3148,33 @@ def recall_pool(
                         kind="assistant_delivery",
                         created_at=str(_delivery_ts or ""),
                     )
+                    # B6 (2026-10-17): a delivery is real assistant content matched
+                    # lexically, so an exact-content hit earns the same admission
+                    # signal the QA path already computes — rare term (min_freq<=3)
+                    # or >=2 low-frequency terms co-occurring.  Deliveries enter
+                    # fusion through ONE lexical path at the generic keyword weight
+                    # (0.5), so their ceiling (0.5/(K+1)) sits below any candidate
+                    # holding a full-weight vote; this signal is what lets a
+                    # distinctive match be admitted at all.  Computed only when the
+                    # term-frequency probe succeeded — the same fail-closed rule the
+                    # QA signal uses, so a failed probe can never fake rarity.
+                    try:
+                        _delivery_matched = [
+                            str(_t) for _t in (_delivery_row.get("matched_term_list") or [])
+                        ]
+                        if _term_freq_ok and _delivery_matched:
+                            _delivery_freqs = [
+                                _term_freq.get(_t.lower(), 99) for _t in _delivery_matched
+                            ]
+                            _delivery_boost_sig[_delivery_sid] = (
+                                min(_delivery_freqs),
+                                sum(
+                                    1 for _f in _delivery_freqs
+                                    if _f <= max(3, int(_total_qa * 0.01))
+                                ),
+                            )
+                    except Exception:
+                        pass
             except PrefetchDeadlineExceeded:
                 # A8 (G6B Slice B): record the lane timeout BEFORE the
                 # raise.  Inside the QA scoring block.
@@ -4111,6 +4139,35 @@ def recall_pool(
                         # boost (+0.5) was applied to this hit.
                         try:
                             _probe(trace, 'event', _hit.source_id, 'SCORED', 'exact_qa_boost')
+                        except Exception:
+                            pass
+                        break
+
+        # B6 (2026-10-17): the same admission guarantee, extended to assistant
+        # deliveries under the same evidence rule (rare term, or >=2 low-frequency
+        # terms).  Measured failure this fixes: a natural-language query whose
+        # delivery was the only row holding the answer reached fused position 12
+        # (score 0.007812) against a cut of 0.021952, because eight QA rows that
+        # matched only generic terms ('the'/'what'/'was') each collected two votes
+        # while the delivery collected one half-weight vote.  Capped at ONE
+        # delivery so the two QA guarantees above are never crowded out.
+        if _delivery_boost_sig:
+            _delivery_boost_sids = [
+                _sid for _sid, (_mf, _lc) in _delivery_boost_sig.items()
+                if _mf <= 3 or _lc >= 2
+            ]
+            _delivery_boost_sids.sort(
+                key=lambda _s: (-hits[_s].rrf_score, _stable_sid_key(hits, _s))
+            )
+            for _sid in _delivery_boost_sids[:1]:
+                for _hit in scored:
+                    if _hit.kind == 'assistant_delivery' and _hit.source_id == _sid:
+                        _hit.rrf_score = round(_hit.rrf_score + 0.5, 6)
+                        try:
+                            _probe(
+                                trace, 'event', _hit.source_id, 'SCORED',
+                                'exact_delivery_boost',
+                            )
                         except Exception:
                             pass
                         break
