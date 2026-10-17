@@ -721,3 +721,177 @@ Status: `M01 = DONE`, `M02 = DONE`, `M03 = DONE`.
     `s30_fixture_propagation_needs_no_provider_at_all`) were recorded as
     `DRIVER_EXPECTATION_BUG`: they assumed the real propagation would fail, so with A fixed
     the fixture call became a replay.
+
+## P0-C2 → P0-B status overlay (2026-10-11)
+
+Scope: branch `fix/p0b-recall-correctness`. This overlay does not alter the merged B04
+baseline above. The B5/B6 edits listed here are still uncommitted; the M03 fix below is committed
+and pushed (PR #44) and is listed separately.
+
+### M03 correction propagation — chain-tail fix (2026-10-17)
+
+Status: `COMMITTED + CI GREEN + REAL-MODEL CANARY PASS`. Commits on
+`fix/p0b-recall-correctness`: `61842cfc2ec42ab66176cca0466604491d0dd02e` ("fix(m03): invalidate the
+live rebuilt artifact on a later correction", 2 files, +128/-3) and
+`3f3c25ade552b6b3d66899ca52ea3dff5e5ed4fa` ("fix(p0c): durable metadata-only boundary + M03 lease
+routing for deadline-wrapped pools", 6 files, +121/-12), both on top of
+`883dc31b028f5993ca00e7f64d8f3f7a647ec442`. PR
+https://github.com/yuzi001a/hippocampus-memory/pull/44 — `product-ci (py3.11)` and
+`windows / distribution-packaging smoke` pass on `3f3c25a`.
+
+- **Defect.** `_discover` resolved derived topics only through `topic_entries.source_qa_id`. After
+  a rebuild recorded `replacement_derived_id = D2` on D1's row, a later correction still resolved to
+  the already superseded `D1`: `D1` was re-invalidated while `D2` — the artifact carrying the
+  superseded derivation and actually in circulation — kept being injected as the current
+  conclusion. Observed in the isolated lifecycle as the B→C correction invalidating `T1` instead of
+  the rebuilt `T2`.
+- **Fix.** `_discover` walks each discovered id forward to the tail of its replacement chain
+  (read-only, bounded at `_REPLACEMENT_CHAIN_MAX_HOPS = 16`, cycle-safe, same kind only). Hops
+  recorded by the correction being replayed are not followed, so replay stays idempotent. An id
+  with no replacement is its own tail, so a first correction resolves exactly as before.
+  `discover_affected` keeps its locked public signature
+  (`test_M03_public_api_is_locked`).
+- **Evidence.**
+  - Isolated full lifecycle on Y400 / disposable PG 55433: `result = PASS`,
+    `lifecycle_gaps = []`, 10/10 consumer checks, `propagation_replay.idempotent = true`,
+    report `p0b_m03_lifecycle_run_20261017_r12.json`
+    (remote SHA-256 `F00F179B2DB5E3E1BDB1532228C80020847A424C339303CCD64ECEF6772013B5`).
+  - `tests/test_m03_derived_invalidation.py` on Y400: 50 passed.
+  - The same suite on a clean `git archive` of `61842cf` (no uncommitted files):
+    50 passed — the commit is self-contained.
+  - RED check against the pre-fix module (`671b1b5a…`, CRLF-normalized, matching
+    `p0b-current-full-20261011/source-manifest.json`): the new regression fails with
+    `assert ['t_d1'] == ['t_d2']`.
+  - Full suite on the clean `61842cf` checkout: `20 failed, 2292 passed, 13 skipped in 642.00s`.
+    The failing-id set is **identical** to the known baseline (20/20), zero new regressions.
+  - **The lifecycle proof is mock-based** (deterministic local embedding + local chat mock). It is
+    not a real-model result. Y400 reaches `api.siliconflow.cn:443` and `api.minimaxi.com:443`, so a
+    real-model canary is feasible; it was not executed in this round.
+
+#### Two further defects fixed in the same PR
+
+- **Metadata-only async boundary was dropped before the durable write.** `sync_turn()` skipped
+  any event with empty content *before* reaching the `host_event:ASYNC_BOUNDARY` /
+  `host_event:NEW_ROOT` durable-source branch. The boundary row carries no text by design (P0-C2
+  §5) and is the delivery trigger — the only row the F2 identity
+  `(host, session_id, trigger_event_id)` can resolve — so an empty-content boundary left the
+  autonomous delivery unrecoverable from source. Boundary kinds are now exempt from the
+  empty-content skip. Regression
+  `tests/test_p0c1_host_event_semantics.py::test_c2_metadata_only_boundary_with_empty_content_is_durable_source`
+  (RED on the previous HEAD: `assert 0 == 1`; GREEN here).
+- **M03 lease routing crashed on a deadline-wrapped pool.** `_lease_slots()` routed a
+  `DeadlinePoolView` into the `pg` slot, so `.cursor()` raised whenever the M03 derived
+  invalidation/rebuild plumbing received the observer's wrapped pool (`injector.py` wraps
+  `PgPool` in `DeadlinePoolView`). A view over a pool now keeps the pool-slot lease contract.
+  Regression
+  `tests/test_m03_sql_arity_and_lease_routing.py::test_M03_lease_slots_routes_deadline_pool_view_as_pool_and_yields_dbapi_connection`.
+
+#### Acceptance reclassification (product boundary)
+
+`docs/ARCHITECTURE-OVERVIEW.md` § 3.1 now states the boundary this follows from: Hippocampus is
+memory infrastructure (store / organise / make retrievable), the host agent owns understanding and
+judgement, and a summarising/compressing model must never gate which raw facts reach a future
+model. Applied to the canary:
+
+- **Product gates** (memory infrastructure): raw-record preservation, source identity, version
+  relations, current-vs-history read consistency, derived invalidation + suppression, correction
+  idempotency, and which version the product exposes as *current*.
+- **Answer quality** (model behaviour) is recorded in a separate `answer_quality` section and is
+  **never** a pass/fail gate: a model that also mentions the historical value after a correction is
+  describing history that is legitimately still recallable.
+- No product assertion was removed; the M03 derived-invalidation contract is asserted as before and
+  was not loosened.
+
+#### Real-model canary (Y400, disposable PG 55433) — PASS
+
+Runner `p0b_integrated_canary_runner_20261017_r2.py`, SHA-256
+`aaf2194979ae5448d66457fd0d623dce54ae58b1cfaef63dbd6a45c39f9176dd`; source root
+`C:\hp-testbed\p0b-commit-3f3c25a-20261017` extracted from `git archive` of `3f3c25a`
+(`__init__.py` sha256 `2ec3a076b4c543d783172b2b75bfa8f1bb1fef57e33db7be751f89ba43226ee1` = the
+committed blob; `core.autocrlf=true` normalises line endings, content identical after CRLF
+stripping). Report
+`C:\hp-testbed\p0b-integrated-canary-20261017-r2\reports\p0b_integrated_canary_01950b3d4a4b.json`,
+SHA-256 `4699091c48feaf35da3de428b4a3873d8c33850fc16b05e69753b0316959a7c8`, run_id `01950b3d4a4b`,
+`result = PASS`, `failures = []`, 24 gates, 0 gate failures.
+
+- `P0-C2 = PASS`: metadata-only boundary persisted as durable source, delivery
+  `source_id = delivery/.../evt-...-auto-boundary`, `event_ids` complete, recallable in the source
+  session and in a **new** session, `synthetic_qa_rows = []`.
+- `P0-B = PASS`: real SiliconFlow rerank (`index_mapping_ok = true`, relevant doc at index 1, score
+  `0.9963`), real MiniMax-M3 answer used and cited the delivery fact.
+- `M03 = PASS` on all product gates: `supersedes`/`user_explicit` relation A→B and B→C; version
+  chain `A archived / B archived / C active`; one `topic` invalidation row per correction with
+  `topic_invalidated = true`; the suppression set read from `pg` (not degraded) contains the
+  invalidated topic; an identical A→B replay is `deduplicated` with `1 → 1` invalidations and
+  stable `correction_id` / `relation_id` / `new_memory_id`; `hm_get mode=current` resolves A→B and
+  B→C to the replacement while `mode=history` still returns the original record.
+- `withdraw`: `current` before the withdrawal returned the secret; after it,
+  `{"content": null, "is_current": false, "memory": null}`; `history` still returns the original
+  content and its edge; one `topic` invalidation row (`reason = withdraws`).
+- **Isolation**: each run owns `ROOT/runs/<run_id>` as its file-state root; no injected block
+  contained a token from any earlier run (`a35333d06365`, `76fbc5fd0317`, `a1473fd5906a`).
+- **Answer quality (metric only, 5 real MiniMax-M3 calls, all HTTP 200)**: after A→B the model
+  stated the current value (production) and also mentioned the historical one; after B→C it stated
+  `canary`; in the combined scenario it stated `canary`; after the withdrawal it quoted the
+  withdrawn secret from the `[qa]` channel while `[主动记忆]` no longer offered it, and reported the
+  two channels as conflicting. That is the raw-history channel behaving as designed under the
+  boundary above, not a product correctness failure.
+- **Known limitation, not fixed here** (out of this round's scope): the `[qa]` recall channel has
+  no derived-invalidation suppression, so a corrected or withdrawn value can still be recalled from
+  raw history. Per the boundary, filtering raw history is an agent-side judgement; a QA-level
+  invalidation filter is a separate change and must not be smuggled into M03.
+
+#### Previous canary round (kept as evidence, not overwritten)
+
+`canary_r13.json` — report `p0b_integrated_canary_a1473fd5906a.json`, SHA-256
+`c0b4912331b83dbbff927541e0ece7c8113b2d037b6fbf0bfb787f0b2e69477b`, `result = FAIL` with
+`M03_A_TO_B_SUPPRESSION_NOT_CONSULTED`, `M03_A_TO_B_NOT_IDEMPOTENT`,
+`COMBINED_CURRENT_VERSION_NOT_C`, `COMBINED_HISTORY_A_NOT_PRESERVED`. All four were canary-side
+defects, not product defects, and were fixed in the harness: the suppression read was pointed at
+`core.pg_pool` (None) instead of `core.pg`; a deduplicated correction returns no `derived_receipt`,
+so the readback fell through to an invented event id; and the `COMBINED_*` gates were evaluated
+before they existed, so "not yet measured" became a permanent failure. The product-side values
+behind those four names were correct in that run too.
+
+### B5 / B6 (unchanged, still uncommitted)
+
+Branch edits that remain in the working tree and are **not** part of PR #44: `recall_pool.py`
+(B5 global-decay removal) only. The M03 `DeadlinePoolView` lease routing
+(`active_memory_store.py` + `tests/test_m03_sql_arity_and_lease_routing.py`) and
+`docs/P0C2-AUTONOMOUS-DELIVERY.md` are now committed in `3f3c25a`. The B5/B6 findings below were
+measured on `883dc31b…` and still describe that revision.
+
+- **B5 — `B5_NO_CHANGE_TEMPORAL_RANKING`.** The frozen analysis
+  `p0b5_no_change_report_20261010.json` records temporal gate `false`, non-temporal
+  no-regression gate `true`, and both gates `false`. Its baseline SHA
+  `3a6aec0eade6e0ea139c43c294b034a416107d834f6c5171b91370ecf32feba3` matches the frozen B4
+  full-seed artifact. Of 20 temporal gold pairs, 6 hit, 7 are fusion misses, and 7 are
+  admission misses (not recoverable by reranking). Lifting any reachable fusion miss needs at
+  least `0.006684`, versus a median rank-10/11 gap of `0.000597` (11.2×). No temporal-ranking
+  stage ships. The non-QA global-decay removal remains a separate correctness fix; measured
+  baseline applications were zero.
+- **Full exact rerun, seed 0 — baseline reproducibility only, not a B5 candidate test.** Report:
+  `C:\Users\servi\AppData\Local\hermes\cache\scratch\p0b5_exact_attribution_20261011_b5fullseed0.json`.
+  Scope: 28 queries / 60 target pairs (synthetic 12/28, Astra 12/28, self-source 4/4); two
+  isolated DB clones × two repeats per dataset. Results matched across clones/repeats within
+  this process; retrieval made zero provider calls and no DB writes. Cross-process repeatability
+  was not measured by this run.
+- **B6 — automatic-injection path exercised with a controlled host shim.** A Y400 regression
+  exposed `DeadlinePoolView` being routed as a direct PG store instead of a pool; observer-note
+  suppression then failed open (`PgLease` had no `cursor`). `_lease_slots` now treats
+  `DeadlinePoolView` as a pool. The focused M03 lease-routing file passed **10/10** on Y400.
+- B6 wire-level report:
+  C:/hp-testbed/p0b5-b6-final-20261011/reports/p0b6_real_auto_injection_20261011.json
+
+  (SHA-256 `80b27b8223f06b7a48a74f2a4d72704732d388fa927206e1e65abdf9246b88f6`). Four required
+  synthetic scenarios (current status, historical stable fact, current owner, cumulative
+  progress) placed their expected markers in the final API wire content. The production
+  provider, core, injector, memory manager, turn-context sidecar, and wire-copy stages were
+  each observed five times. DB `p0b6_auto_injection_20261011`, port `55433`, read-only;
+  deterministic fixture query embeddings, no model/API call. Report status:
+  `PASS_WITH_INTEGRATION_GAP`.
+- **B6 current evidence / remaining gates:** the previous controlled-host run proved the four required markers entered the API wire (`PASS_WITH_INTEGRATION_GAP`; report SHA-256 `80b27b8223f06b7a48a74f2a4d72704732d388fa927206e1e65abdf9246b88f6`). A second controlled-host/turn-context-shim run proved the assistant-delivery marker enters the final wire for an exact event-key query; `PASS`, 1/1 marker, all provider → V3Core → injector → Hermes turn-context → wire stages observed, DB `p0b6_auto_injection_20261011` on port 55433 with read-only transactions. Report: `C:/hp-testbed/p0b5-b6-final-20261011/reports/p0b6_delivery_exact_key_20261011.json`, SHA-256 `8f0cdfe77f35dbde6b7bd7d3050d1c63eddd29199f1ab3f367c6eb49ca4ce1e1`. The natural-language delivery diagnostic remains a retrieval-quality miss, not an injection-path failure: lexical helper found the delivery row (1 candidate, source ID present, 4 matched terms), but `recall_pool` returned 8 hits; the delivery was raw keyword rank 4, fused position 12 with contribution `0.0078125`, then dropped `OUTSIDE_LIMIT`. Report SHA-256 `0d3aa53297fd6d05e2c767aa38618cc9132636e84007588223a2d782baf98347`. Do not change ranking weights to make this diagnostic pass without a separately approved gate. The project design resolves scope: assistant deliveries are derived/rebuildable and retrievable through the existing lexical path; no synthetic human question is allowed. Actual one-shot Hermes Agent v0.21.3 CLI is now exercised in an isolated profile: five required markers reached the final API wire and each required `api_content` sidecar hash matches that wire message. The report is `C:/hp-testbed/p0b5-b6-final-20261011/reports/p0b6_real_hermes_cli_api_wire_final_20261011.json` (SHA-256 `4a1166788f5f47025bf249cd450e235caddfe4b8fe02b503bd14d81cc4d4e30f`). This used a loopback-only allowlist proxy, local deterministic chat/embedding mocks, and a disclosed test-only character tokenizer for the synthetic embedding model; no external model API was called. All 24 chat and 31 embedding requests were loopback; proxy blocked 0 non-local requests; DB port 55433 stayed read-only with fixture counts unchanged. The exact-key assistant-delivery case passed; the natural-language diagnostic still misses its marker (rank 12, final limit 8), retained as a non-gate retrieval-quality gap. The real invalidation-row mutation/rebuild lifecycle is still unverified.
+- **Current-source full suite:** Y400 snapshot had 344 source files hash-verified; `pytest exit=1`, **2289 passed / 20 failed / 14 skipped** in `659.41s`. This is a red full-suite result, not a pass. Log `C:/hp-testbed/p0b-current-full-20261011/results/pytest_full_20261011.log`, SHA-256 `ba1209509b275c0dfaefb2a2267c325f7ae9891ea672d365ae63f8606381f107`.
+- **Failure attribution:** replayed the exact 20 failed test IDs on a clean detached checkout of HEAD `883dc31b028f5993ca00e7f64d8f3f7a647ec442`, with 345 source/driver files hash-verified and the same isolated test venv/read-only DB policy. All **20/20** failures reproduced on base; no candidate-only red was observed. This was a 20-test failure-subset replay, **not** a full baseline suite. Baseline log `C:/hp-testbed/p0b-clean-base-20261011/results/pytest_failed_subset_clean_base_20261011.log`, SHA-256 `c4474c31b358f45b8dee475f09293c70e1e6702a0d199b0474cfc2b20dddfe4f`. Existing causes include Windows `core.autocrlf=true` versus LF-only assertions, unavailable Docker, missing declared test dependencies/fixture paths, and a source-snapshot venv-path assumption; remaining same-base failures are not yet individually remediated.
+
+`b5-b6-final` remains **IN_PROGRESS**. B5 stays frozen at `B5_NO_CHANGE_TEMPORAL_RANKING`. The isolated real Hermes Agent v0.21.3 CLI API-wire path is verified with loopback mocks (no external model calls); natural-language assistant-delivery recall remains a diagnostic retrieval gap, and real invalidation-row mutation/rebuild lifecycle is still open. No commit, push, merge, or vault write.
