@@ -3,7 +3,7 @@
 Status: parent-reviewed P0-C2 candidate on `fix/p0c2-autonomous-memory`; focused regressions and
 Y400 disposable-PG verification pass. Base: `5b3a71c25ff2e23446d1cf887ed9347d1f69c50f`.
 P0-C1 owns host-event *classification*; P0-C2 owns the *durability* of autonomous output.
-P0-B is not started.
+P0-B follow-on work is active on `fix/p0b-recall-correctness`; the current B5/B6 status is tracked in the root `CURRENT.md` section `P0-C2 → P0-B status overlay`. This document remains the P0-C2 design/contract, not a live status ledger.
 
 ## 1. Problem
 

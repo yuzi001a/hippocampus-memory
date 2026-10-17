@@ -1147,6 +1147,46 @@ def test_c2_boundary_and_result_reach_durable_source_and_delivery(ctx):
     assert d["source_id"] == AD.delivery_source_id(HOST, session, "c2-async")
 
 
+def test_c2_metadata_only_boundary_with_empty_content_is_durable_source(ctx):
+    """A metadata-only async boundary carries no text by design (P0-C2 §5).
+
+    The boundary row IS the delivery trigger, so it must reach durable source
+    even with empty content: it is the only row the F2 identity
+    (host, session_id, trigger_event_id) can resolve, and a rebuild reads the
+    trigger back from ``conversation_stream``.  Every other C2 test hands the
+    boundary row non-empty text, so the empty-content path was never covered.
+    """
+    session = "sess-p0c2-empty-metadata-boundary"
+    snapshot_messages = [
+        U("e-u1", "Q1: previous human work", TS[0]),
+        A("e-a1", "A1: previous human answer", TS[1]),
+        U("e-meta", "", TS[2], display_kind="async_delegation_complete"),
+        A("e-a-async", "A_async_final: autonomous result", TS[3], turn=""),
+    ]
+    for _ in range(3):
+        sync(ctx, session, snapshot_messages)
+    flush(ctx)
+
+    records = _outbox_records(ctx)
+    boundary = [r for r in records if r.get("msg_id") == "e-meta"]
+    assert len(boundary) == 1, (
+        "P0-C2: an empty-content metadata-only async boundary was dropped by the "
+        "empty-content filter before the durable boundary write, leaving the "
+        "delivery trigger unrecoverable from source")
+    assert boundary[0].get("role") == "host_event:ASYNC_BOUNDARY", boundary[0]
+    assert any(r.get("msg_id") == "e-a-async" and r.get("role") == "assistant"
+               for r in records), "autonomous assistant source event was not durable"
+
+    assert "A_async_final" not in answers_blob(ctx.db, session), (
+        "autonomous output must remain outside the prior human QA")
+
+    dels = _deliveries(ctx, session)
+    assert len(dels) == 1, f"replay x3 must yield one delivery; {dels}"
+    assert dels[0]["trigger_event_id"] == "e-meta"
+    assert dels[0]["event_ids"] == ["e-a-async"]
+    assert dels[0]["source_id"] == AD.delivery_source_id(HOST, session, "e-meta")
+
+
 def test_c2_one_delivery_groups_contiguous_assistant_segments(ctx):
     """ASYNC → A1/A2/A3 ⇒ ONE delivery containing all three in order."""
     s = "sess-p0c2-group"

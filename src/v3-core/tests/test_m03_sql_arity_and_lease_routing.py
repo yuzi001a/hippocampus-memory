@@ -327,3 +327,26 @@ def test_M03_derived_modules_route_their_single_target_through_lease_slots():
         assert "_lease_slots(" in text, (
             f"{name} must route its single target through _lease_slots"
         )
+
+
+def test_M03_lease_slots_routes_deadline_pool_view_as_pool_and_yields_dbapi_connection():
+    """The observer wraps PgPool; the wrapper must retain the pool-slot lease contract."""
+    from v3core._deadline import DeadlinePoolView, PrefetchDeadline
+
+    canonical = importlib.import_module(CANONICAL_MODULE)
+    mod = _mod()
+    pool = _pg_pool_class()(
+        connect=_RecordingConn, max_connections=2, min_connections=0,
+    )
+    view = DeadlinePoolView(pool, PrefetchDeadline(budget_s=5.0))
+    try:
+        assert canonical._lease_slots(view) == (view, None)
+        with mod._lease(view) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            assert cur.rowcount == 1
+    finally:
+        try:
+            pool.shutdown(timeout=1)
+        except Exception:  # pragma: no cover - teardown must not mask result
+            pass

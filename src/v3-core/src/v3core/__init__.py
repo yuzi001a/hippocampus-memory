@@ -3792,8 +3792,13 @@ class V3Core:
                 processed_this_call.add(cursor_key)
                 continue
             content = _content
-            if not content:
-                # empty content — accept as processed (NON-LIVE-SYNC-BY-DESIGN)
+            if not content and _kind not in (HOST_EVENT_ASYNC_BOUNDARY, HOST_EVENT_NEW_ROOT):
+                # empty content — accept as processed (NON-LIVE-SYNC-BY-DESIGN).
+                # A metadata-only async boundary is exempt: its whole point is
+                # that it carries no text, and its durable source row is the
+                # only thing that makes the delivery trigger traceable and the
+                # group rebuildable (P0-C2 §3/§5).  Dropping it here would leave
+                # the trigger unpersisted while the group was already opened.
                 processed_this_call.add(cursor_key)
                 continue
             # ── P0-C1: per-kind behaviour replaces the binary injection skip ──
