@@ -894,4 +894,59 @@ measured on `883dc31b…` and still describe that revision.
 - **Current-source full suite:** Y400 snapshot had 344 source files hash-verified; `pytest exit=1`, **2289 passed / 20 failed / 14 skipped** in `659.41s`. This is a red full-suite result, not a pass. Log `C:/hp-testbed/p0b-current-full-20261011/results/pytest_full_20261011.log`, SHA-256 `ba1209509b275c0dfaefb2a2267c325f7ae9891ea672d365ae63f8606381f107`.
 - **Failure attribution:** replayed the exact 20 failed test IDs on a clean detached checkout of HEAD `883dc31b028f5993ca00e7f64d8f3f7a647ec442`, with 345 source/driver files hash-verified and the same isolated test venv/read-only DB policy. All **20/20** failures reproduced on base; no candidate-only red was observed. This was a 20-test failure-subset replay, **not** a full baseline suite. Baseline log `C:/hp-testbed/p0b-clean-base-20261011/results/pytest_failed_subset_clean_base_20261011.log`, SHA-256 `c4474c31b358f45b8dee475f09293c70e1e6702a0d199b0474cfc2b20dddfe4f`. Existing causes include Windows `core.autocrlf=true` versus LF-only assertions, unavailable Docker, missing declared test dependencies/fixture paths, and a source-snapshot venv-path assumption; remaining same-base failures are not yet individually remediated.
 
-`b5-b6-final` remains **IN_PROGRESS**. B5 stays frozen at `B5_NO_CHANGE_TEMPORAL_RANKING`. The isolated real Hermes Agent v0.21.3 CLI API-wire path is verified with loopback mocks (no external model calls); natural-language assistant-delivery recall remains a diagnostic retrieval gap, and real invalidation-row mutation/rebuild lifecycle is still open. No commit, push, merge, or vault write.
+`b5-b6-final` is **CLOSED**. B5 stays frozen at `B5_NO_CHANGE_TEMPORAL_RANKING`. The isolated real Hermes Agent v0.21.3 CLI API-wire path is verified with loopback mocks (no external model calls); real invalidation-row mutation/rebuild lifecycle is still open. B6's natural-language assistant-delivery retrieval gap was attributed and fixed — see the B6 section below.
+
+## B6 — assistant-delivery admission (CLOSED 2026-10-17)
+
+Status: `B6 = DONE (benefit measured, change shipped)`. B5 stays frozen at
+`B5_NO_CHANGE_TEMPORAL_RANKING` (user decision: no global temporal decay without measured benefit).
+Branch `fix/b6-delivery-exact-match-admission`, commit `00094cd`, PR #45, base `2553d26` (main).
+
+Attribution (source-level, reproduced on the canonical `fd66736` tree — report
+`p0b6_ranking_attribution_20261017.json`):
+
+- Fusion weights are `KW=0.5 / VEC=1.0 / TOPIC=2.0 / QA=1.0` over RRF.
+- An assistant delivery enters fusion through exactly **one** lexical path
+  (`keyword_delivery_candidates`) at the generic keyword weight, so its ceiling `0.5/(K+1)`
+  sits below any candidate holding a full-weight vote. Delivery rows carry an `embedding`
+  column, but the fixture's delivery row has `embedding IS NULL` and the vector lane's
+  candidate set does not include the delivery source — so a purely semantic query cannot
+  reach it either.
+- The QA path already had an exact-hit admission signal (2026-08-12 A-1, `_qa_boost_sig`:
+  rare term `min_freq <= 3`, or `>= 2` low-frequency terms). Deliveries had no equivalent.
+
+Measured failure: a natural-language query for the delivery's content → raw keyword rank 4,
+fused position **12**, contribution `0.0078125`, cut at `limit=8` was `0.021952` → dropped
+`OUTSIDE_LIMIT`. Eight QA rows matching only generic terms (`the`/`what`/`was`) each held two
+full-weight votes while the delivery held one half-weight vote.
+
+Change (no new scoring dimension, no RRF weight change, no tuning):
+
+- `assistant_delivery.keyword_delivery_candidates` now returns `matched_term_list`.
+- `recall_pool` computes the same `(min_freq, low_frequency_count)` signal for delivery
+  candidates under the QA path's fail-closed rule (only when the term-frequency probe
+  succeeded), and admits at most **one** delivery per query.
+
+Controlled comparison — real PG, isolated fixture (`p0b6_auto_injection_20261011`, port 55433),
+8 fixed queries, baseline `fd66736` vs the change, one query per process, 16 frozen per-case
+reports retained on Y400:
+
+| group | baseline | change |
+| --- | --- | --- |
+| gate controls — required marker present | 4/4 | 4/4 |
+| gate controls — injected block sha256 | — | all four byte-identical |
+| delivery queries admitted | 1/4 | 4/4 |
+| boost events | 0 | 1 per delivery case |
+| hit count | 8 | 8 |
+
+Reported case: fused **12 → 1**, score `0.007812 → 0.507812`.
+
+Regression test `test_c2_delivery_exact_match_is_admitted_against_generic_term_qa_hits`:
+RED on baseline (`assert 0 == 1` — delivery absent from the returned set), GREEN with the
+change; the shared fixture was verified unchanged after the run (`qa_pairs=11`,
+`assistant_deliveries=1`, zero leftover rows).
+
+Not measured / not claimed: the fixture holds no QA row that answers the delivery's query, so
+the displacement case (an admitted delivery taking a correct QA hit's slot) is **unmeasured**;
+the bound is one delivery per query and admission still requires a distinctive-term match.
+PR #44's tests, canary and CI were not re-run (user decision).
