@@ -12,6 +12,8 @@
 #   * focused secret-free tests:
 #       - the G5a control-plane contract (config_cli / config_control)
 #       - the A0 explicit-memory opt-in contract (schema + skill + doc)
+#       - the Hermes host-contract adapter (background jobs inherit the
+#         caller's contextvars; summary jobs carry their Runtime generation)
 #       - the existing public-alpha gates that have no PG / no provider
 #         dependency
 #       - the G5b REAL MEMORY EVALUATOR contract (Lane A deterministic
@@ -317,7 +319,9 @@ jobs:
           PYTHONPATH=../v3-core/src \
             python -m pytest -v --no-header \
               -p no:cacheprovider \
-              tests/test_a0_explicit_memory_opt_in_contract.py
+              tests/test_a0_explicit_memory_opt_in_contract.py \
+              tests/test_hermes_host_contract.py \
+              tests/test_plugin_manifest_contract.py
 
       # --- done ---
       - name: summary
