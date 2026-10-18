@@ -24,8 +24,13 @@ provides_tools:
   # ── 健康 (1) ──
   - v3_health
 pip_dependencies:
-  - v3-hermes-plugin>=4.0.0
-  - v3-core>=4.0.0
+  # Must mirror [project].dependencies in pyproject.toml: these are the packages
+  # a manager has to `pip install` for this provider to run. The plugin itself
+  # is NOT one of them -- it is not on PyPI, so listing it here makes any
+  # install path try to fetch a package that cannot exist.
+  - v3-core>=4.0.0,<5.0.0
+  - requests
+  - pyyaml
 requires_env:
   - V3CORE_PG_PASSWORD
 hooks:

@@ -88,9 +88,10 @@ provides_tools:
   - v3_moc_overview
   - v3_moc_get
   - v3_health
-pip_dependencies:
-  - v3-hermes-plugin>=4.0.0
-  - v3-core>=4.0.0
+pip_dependencies:      # mirrors [project].dependencies in pyproject.toml
+  - v3-core>=4.0.0,<5.0.0
+  - requests
+  - pyyaml
 requires_env:
   - V3CORE_PG_PASSWORD
 hooks:
