@@ -92,6 +92,32 @@ _SUMMARY_SHUTDOWN_JOIN_TIMEOUT = 0.25
 _SUMMARY_DURABLE_LOCK = threading.RLock()
 
 
+def _spawn_background_job(target, *, name: str) -> threading.Thread:
+    """Start one provider background job under the CALLER's contextvars.
+
+    HERMES_HOME/profile isolation is carried in a ContextVar, not in
+    ``os.environ`` (``hermes_constants.set_hermes_home_override`` deliberately
+    never mutates the process environment, because one process may serve
+    several profiles).  A plain ``threading.Thread`` starts with an EMPTY
+    context, so a worker spawned that way silently resolves the default
+    profile.  The host's ``spawn_context_thread`` exists precisely for this;
+    every memory-provider background job is required to go through it.
+
+    Older hosts without the API still get a working (unbound) thread rather
+    than a provider that cannot start at all; the loss of isolation is logged
+    instead of being silent.
+    """
+    try:
+        from agent.memory_provider import spawn_context_thread
+    except Exception as exc:  # pragma: no cover - ancient host only
+        logger.warning(
+            "宿主未提供 spawn_context_thread (%s)；后台摘要线程将不继承 "
+            "HERMES_HOME/profile 上下文", _safe_err(exc),
+        )
+        return threading.Thread(target=target, name=name, daemon=True)
+    return spawn_context_thread(target, name=name, daemon=True)
+
+
 class _SummaryPoolGuard:
     """Expose only a generation-valid shared PgPool lease to a summary job."""
 
@@ -626,8 +652,8 @@ class V3HermesProvider(MemoryProvider):
                 lifecycle = context.summary_lifecycle
                 lifecycle["pending"] = int(lifecycle.get("pending", 0)) + 1
             if self._summary_worker is None or not self._summary_worker.is_alive():
-                self._summary_worker = threading.Thread(
-                    target=self._summary_worker_loop, name="v3-summary", daemon=True
+                self._summary_worker = _spawn_background_job(
+                    self._summary_worker_loop, name="v3-summary",
                 )
                 self._summary_worker.start()
             self._summary_enqueued_jobs.add(job_id)
