@@ -263,7 +263,10 @@ jobs:
               tests/test_production_upgrade_contract.py \
               tests/test_f2_source_idempotency.py \
               tests/test_f2_test_mode_isolation.py \
-              tests/test_f2_harness_contract.py
+              tests/test_f2_harness_contract.py \
+              tests/test_m01_memory_correction.py \
+              tests/test_m02_memory_correction_tools.py \
+              tests/test_m04_temporal_read.py
 
       - name: focused-tests-g5b-evaluator
         working-directory: src/v3-core
