@@ -279,6 +279,16 @@ provenance for historical content. M03 only guarantees that a **known** obsolete
 A stops being propagated as the current conclusion by currently supported derived
 paths.
 
+> **Update (M04 landed, point-in-time read only).** The first slice of M04 is now
+> delivered and is documented in `docs/M04-TEMPORAL-READ.md`: `read_version` takes
+> `as_of` + `basis` and returns the version that was current at that instant,
+> reconstructed from the recorded relation timeline (never from today's
+> `archived`/`active` column). Explicitly still out of scope here: **interval
+> queries (M04-2, deferred)**, intent routing (the host Agent chooses the mode;
+> the plugin only validates), cross-project temporal conflict resolution, and any
+> inference about whether an old statement is still *true*. M04 reads history; it
+> does not judge it.
+
 ## Honest reporting requirements
 
 - the mapped / invalidated / unmapped / rebuild-pending / rebuilt counts are

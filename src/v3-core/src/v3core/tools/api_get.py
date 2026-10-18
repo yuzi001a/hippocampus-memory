@@ -70,6 +70,26 @@ V3_GET_SCHEMA = {
                 "type": "boolean",
                 "description": "memory mode: 是否附带完整版本历史 (默认 False)",
             },
+            "as_of": {
+                "type": "string",
+                "description": (
+                    "memory mode 限定: 按某个历史时间点读取——返回该时刻的当前版本。"
+                    "必须是带时区的 ISO-8601 时间戳 (如 2026-03-16T00:00:00+08:00)；"
+                    "无时区或非法值会被拒绝 (不猜时区)。只与 mode='current' 组合，"
+                    "与 mode='history' / include_history=True 同时使用会被拒绝。"
+                    "结果依据版本关系的历史重建，不读今天的 archived/active 状态。"
+                ),
+            },
+            "basis": {
+                "type": "string",
+                "enum": ["recorded", "effective"],
+                "description": (
+                    "配合 as_of 使用的时间依据 (默认 recorded): recorded=按记录时间 "
+                    "(何时写进库)；effective=按用户声明的生效时间。effective 缺该次判定"
+                    "必需的 effective_at 时返回 EFFECTIVE_TIME_INDETERMINATE，"
+                    "不回落 recorded。不给 as_of 却给 basis 会被拒绝。"
+                ),
+            },
         },
         "required": ["target"],
     },
@@ -138,7 +158,7 @@ def _hm_forward(args: dict, source_id: str) -> dict:
     behaviour instead of silently switching to the canonical reader.
     """
     out: dict = {"source_id": source_id}
-    for key in ("mode", "include_history"):
+    for key in ("mode", "include_history", "as_of", "basis"):
         if key in args:
             out[key] = args[key]
     return out

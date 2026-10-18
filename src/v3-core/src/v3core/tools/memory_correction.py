@@ -368,6 +368,39 @@ def _history_requested(args: dict) -> bool:
     return args.get("mode") is not None
 
 
+def _as_of(args: dict) -> Any:
+    """Validate ``as_of``. OMITTED means "no time point".
+
+    An explicitly supplied ``null`` is a caller error: ``null`` is not a
+    timestamp, and collapsing it into the omitted default would silently turn
+    a time-point question into a present-day read.
+    """
+    if "as_of" not in args:
+        return None
+    value = args["as_of"]
+    if value is None:
+        raise _Invalid(
+            "as_of must be an ISO-8601 timestamp with a timezone offset; "
+            "null is not the same as omitting it"
+        )
+    return value
+
+
+def _basis(args: dict) -> Any:
+    """Validate ``basis``. OMITTED means unset (canonical default applies)."""
+    if "basis" not in args:
+        return None
+    value = args["basis"]
+    if value is None:
+        raise _Invalid(
+            "basis must be 'recorded' or 'effective'; null is not the same "
+            "as omitting it"
+        )
+    if not isinstance(value, str):
+        raise _Invalid(f"basis must be a string (got {type(value).__name__})")
+    return value
+
+
 # ── canonical calls ────────────────────────────────────────────────────────
 
 
@@ -669,6 +702,8 @@ def handle_memory_target(args: dict, **kw) -> str:
         memory_id = _required_text(args, "memory_id")
         mode = _read_mode(args)
         include_history = _include_history(args)
+        as_of = _as_of(args)
+        basis = _basis(args)
         pool, pg, cfg = resolve_scope(kw)
     except _Invalid as exc:
         return json.dumps(
@@ -706,6 +741,8 @@ def handle_memory_target(args: dict, **kw) -> str:
             memory_id,
             mode=mode,
             include_history=include_history,
+            as_of=as_of,
+            basis=basis,
             pool=pool,
             pg=pg,
             config=cfg,
