@@ -238,9 +238,7 @@ def test_spawn_background_job_warns_when_the_host_lacks_the_api(monkeypatch, cap
 
     assert isinstance(thread, threading.Thread)
     assert thread.daemon is True
-    assert any("spawn_context_thread" in r.message % r.args if r.args else
-               "spawn_context_thread" in r.message
-               for r in caplog.records)
+    assert any("spawn_context_thread" in r.getMessage() for r in caplog.records)
 
 
 # ── 3. the worker uses the Runtime of its own generation ──────────────────
@@ -265,7 +263,9 @@ def test_summary_item_uses_the_current_runtime_and_pool(monkeypatch):
     with provider._summary_lock:
         provider._summary_generation = 3
 
-    assert provider._run_summary_item("sess-b", [{"role": "user", "content": "hi"}]) is True
+    assert provider._run_summary_item(
+        "sess-b", [{"role": "user", "content": "hi"}], 3
+    ) is True
     assert captured["session_id"] == "sess-b"
     assert captured["config"] == {"profile": "b"}
     # The pool is handed over through the generation guard, never raw.
@@ -289,7 +289,9 @@ def test_stale_generation_never_reaches_the_runtime(monkeypatch):
     with provider._summary_lock:
         provider._summary_generation = 5
 
-    assert provider._run_summary_item("sess", [{"role": "user", "content": "x"}]) is False
+    assert provider._run_summary_item(
+        "sess", [{"role": "user", "content": "x"}], 4
+    ) is False
     assert touched == []
     # And the guard itself refuses a lease once the generation has moved on.
     guard = v3hermes._SummaryPoolGuard(provider, 4, runtime, object())
@@ -297,6 +299,63 @@ def test_stale_generation_never_reaches_the_runtime(monkeypatch):
 
     with pytest.raises(StaleRuntimeError):
         guard.lease()
+
+
+def test_queue_carries_the_generation_the_job_was_accepted_under(monkeypatch):
+    """The staleness check is only real if the value travels WITH the job.
+
+    Reading ``_summary_generation`` inside the runner compares the counter with
+    itself, so the check can never fire.  This pins that the enqueue side
+    captures it.
+    """
+
+    class _NoopThread:
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            pass
+
+    monkeypatch.setattr(
+        v3hermes, "_spawn_background_job", lambda *a, **k: _NoopThread()
+    )
+    provider = _provider(runtime=_runtime())
+    with provider._summary_lock:
+        provider._summary_generation = 7
+
+    provider._submit_summary("sess", [{"role": "user", "content": "x"}])
+
+    session_id, _messages, generation = provider._summary_queue.get_nowait()
+    assert (session_id, generation) == ("sess", 7)
+
+
+def test_job_accepted_before_a_rebind_never_runs_against_the_new_runtime(monkeypatch):
+    """Property 4, end of the story: a rebound Runtime is not the job's Runtime."""
+    import v3core.session_summary as summary_mod
+
+    touched = []
+    monkeypatch.setattr(
+        summary_mod, "summarize_from_messages",
+        lambda *a, **k: touched.append(a),
+    )
+
+    runtime_a = _runtime(config={"profile": "a"})
+    provider = _provider(runtime=runtime_a)
+    with provider._summary_lock:
+        provider._summary_generation = 0
+    queued = ("sess-a", [{"role": "user", "content": "x"}], 0)
+
+    # Rebind to profile B: new Runtime, new generation, same provider instance.
+    with provider._summary_lock:
+        provider._summary_generation = 1
+        provider._runtime = _runtime(config={"profile": "b"})
+
+    session_id, messages, generation = queued
+    assert provider._run_summary_item(session_id, messages, generation) is False
+    assert touched == []
 
 
 def test_draining_runtime_refuses_new_summaries(monkeypatch):
@@ -312,7 +371,9 @@ def test_draining_runtime_refuses_new_summaries(monkeypatch):
     with provider._summary_lock:
         provider._summary_generation = 0
 
-    assert provider._run_summary_item("sess", [{"role": "user", "content": "x"}]) is False
+    assert provider._run_summary_item(
+        "sess", [{"role": "user", "content": "x"}], 0
+    ) is False
     assert touched == []
 
 

@@ -657,16 +657,27 @@ class V3HermesProvider(MemoryProvider):
                 )
                 self._summary_worker.start()
             self._summary_enqueued_jobs.add(job_id)
-            self._summary_queue.put((session_id, messages_snapshot))
+            # Capture the generation HERE, with the job: the worker must be
+            # judged against the Runtime that accepted the job, not against
+            # whatever the provider is bound to by the time it runs.
+            self._summary_queue.put(
+                (session_id, messages_snapshot, self._summary_generation)
+            )
 
-    def _run_summary_item(self, session_id: str, messages: list) -> bool:
-        """Run one summary only while this provider owns its Runtime."""
+    def _run_summary_item(self, session_id: str, messages: list, generation: int) -> bool:
+        """Run one summary only while it still owns the Runtime it was queued under.
+
+        ``generation`` is the value captured when the job was enqueued. Reading
+        it here instead would make the staleness check compare a value against
+        itself and never fire, so a job queued before a rebind would run against
+        the *new* Runtime — i.e. write one profile's summary with another
+        profile's config.
+        """
         job_id = self._summary_job_id(session_id, messages)
         context = self.get_session_context(session_id, create=False)
         with self._summary_lock:
             if not self._summary_accepting:
                 return False
-            generation = self._summary_generation
             runtime = self._runtime if self._runtime_held else None
             core = self._core
         try:
@@ -708,7 +719,7 @@ class V3HermesProvider(MemoryProvider):
         """后台 worker — 顺序处理 session 摘要队列 (FIFO)"""
         while not self._summary_stop.is_set():
             try:
-                session_id, messages = self._summary_queue.get(timeout=0.25)
+                session_id, messages, generation = self._summary_queue.get(timeout=0.25)
             except queue.Empty:
                 continue
             job_id = self._summary_job_id(session_id, messages)
@@ -716,7 +727,7 @@ class V3HermesProvider(MemoryProvider):
                 with self._summary_lock:
                     accepting = self._summary_accepting
                 if accepting:
-                    self._run_summary_item(session_id, messages)
+                    self._run_summary_item(session_id, messages, generation)
             finally:
                 self._summary_queue.task_done()
                 with self._summary_lock:
