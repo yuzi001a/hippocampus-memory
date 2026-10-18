@@ -224,10 +224,8 @@ def test_spawn_background_job_warns_when_the_host_lacks_the_api(monkeypatch, cap
     """An old host must not break the provider — but the loss is not silent."""
     import agent.memory_provider as host
 
-    def _boom(target, **_kw):
-        raise ImportError("no spawn_context_thread here")
-
-    monkeypatch.setattr(host, "spawn_context_thread", _boom)
+    # The real condition is an ABSENT attribute: `from ... import x` fails.
+    monkeypatch.delattr(host, "spawn_context_thread", raising=False)
     caplog.set_level(logging.WARNING, logger="v3hermes")
     thread = v3hermes._spawn_background_job(lambda: None, name="v3-fallback")
 
