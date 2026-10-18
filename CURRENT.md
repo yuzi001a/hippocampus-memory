@@ -900,7 +900,14 @@ measured on `883dc31b…` and still describe that revision.
 
 Status: `B6 = DONE (benefit measured, change shipped)`. B5 stays frozen at
 `B5_NO_CHANGE_TEMPORAL_RANKING` (user decision: no global temporal decay without measured benefit).
-Branch `fix/b6-delivery-exact-match-admission`, commit `00094cd`, PR #45, base `2553d26` (main).
+Branch `fix/b6-delivery-exact-match-admission`, commits `00094cd` (product + test) and `365fbeb`
+(ledger), PR #45, based on `2553d26`. **MERGED** into `main` as
+`fcb8ee8971f72c33d2564cf60585629415ead214` (2026-10-18T05:08:29Z, i.e. 13:08:29 CST); merge parents
+`2553d26` + `365fbeb`, normal merge (no rebase, no force-push). Pre-merge the head was re-read and
+had not changed; both required checks (`product-ci (py3.11)`, `windows / distribution-packaging
+smoke`) were green on that head and the PR was `MERGEABLE`. Post-merge, `main`'s blobs for the three
+changed files are identical to the CI-verified head — `recall_pool.py` `b188d416…`,
+`assistant_delivery.py` `30816fff…`, `test_recall_v2_pg_integration.py` `162c9845…`.
 
 Attribution (source-level, reproduced on the canonical `fd66736` tree — report
 `p0b6_ranking_attribution_20261017.json`):
@@ -946,7 +953,13 @@ RED on baseline (`assert 0 == 1` — delivery absent from the returned set), GRE
 change; the shared fixture was verified unchanged after the run (`qa_pairs=11`,
 `assistant_deliveries=1`, zero leftover rows).
 
-Not measured / not claimed: the fixture holds no QA row that answers the delivery's query, so
-the displacement case (an admitted delivery taking a correct QA hit's slot) is **unmeasured**;
-the bound is one delivery per query and admission still requires a distinctive-term match.
-PR #44's tests, canary and CI were not re-run (user decision).
+Retained limitations at merge (explicitly not widened by this change):
+
+- A purely semantic delivery query with **no lexical overlap** may still fail to recall the
+  delivery — deliveries do not participate in the vector lane. The signal added here is lexical.
+- The **displacement case** (an admitted delivery taking the slot of a *correct* QA hit) has no
+  experimental conclusion: the fixture holds no QA row that answers the delivery's query. The
+  structural bound is one delivery per query, and the second QA guarantee is untouched.
+- **B5 stays `NO_CHANGE`**; the global-decay working-tree patch is not committed (preserved as
+  `p0b_b5_global_decay_WORKTREE_ONLY.patch` outside the repo).
+- PR #44's tests, canary and CI were not re-run (user decision).
