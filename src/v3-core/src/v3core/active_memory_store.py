@@ -144,6 +144,10 @@ ERR_NOT_FOUND = "NOT_FOUND"
 ERR_TARGET_NOT_CURRENT = "TARGET_NOT_CURRENT"
 ERR_MIGRATION_REQUIRED = "MIGRATION_REQUIRED"
 ERR_DURABLE_FAILED = "DURABLE_FAILED"
+# M04: the caller asked for a time-point answer under basis='effective' and the
+# evidence required by *this* determination is absent. It is an explicit
+# "cannot determine from evidence" state — never a guessed answer.
+ERR_EFFECTIVE_TIME_INDETERMINATE = "EFFECTIVE_TIME_INDETERMINATE"
 
 REQUIRED_CORRECTION_AUTHORITY = "user_explicit"
 
@@ -208,6 +212,23 @@ _VERSION_LABEL_CURRENT = "current"
 _VERSION_LABEL_SUPERSEDED = "superseded"
 _VERSION_LABEL_WITHDRAWN = "withdrawn"
 _VERSION_LABEL_ARCHIVED = "archived"
+# M04 time-point reads (as_of). 'recorded' is what the system KNEW at that
+# instant; 'effective' is what the caller DECLARED as taking effect then.
+# effective_at never delays activation — the row is written and active
+# immediately, the column is declaration metadata only.
+AS_OF_BASES = ("recorded", "effective")
+AS_OF_DEFAULT_BASIS = "recorded"
+_AS_OF_LABEL_CURRENT = "current"
+_AS_OF_LABEL_SUPERSEDED = "superseded"
+_AS_OF_LABEL_FUTURE = "future"
+_AS_OF_LABEL_WITHDRAWN = "withdrawn"
+_AS_OF_LABEL_INDETERMINATE = "indeterminate"
+_AS_OF_DECISION_APPLIED = "applied"
+_AS_OF_DECISION_NOT_YET = "not_yet"
+_AS_OF_DECISION_INDETERMINATE = "indeterminate"
+QUERY_STATUS_OK = "OK"
+QUERY_STATUS_INDETERMINATE = "EFFECTIVE_TIME_INDETERMINATE"
+QUERY_STATUS_NO_VERSION = "NO_VERSION_AT_AS_OF"
 _PREVIEW_LEN = 240
 _OK_STATUSES = (DURABLE_COMMITTED, DEDUPLICATED, DERIVED_WARNING)
 
@@ -762,6 +783,83 @@ def _normalize_effective_at(value: Any) -> Optional[str]:
 
 def _correction_error(code: str, message: str) -> dict[str, Any]:
     return {"success": False, "error_code": code, "error": message}
+
+
+def _as_utc_dt(value: Any) -> Optional[datetime]:
+    """Best-effort UTC view of a stored timestamp. ``None`` stays ``None``.
+
+    Used to compare already-recorded values (``recorded_at``, ``effective_at``,
+    ``created_at``) against the caller's ``as_of``. A value that cannot be read
+    as a time returns ``None`` so the caller can treat it as absent evidence
+    rather than silently inventing one.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        # Stored timestamptz values come back timezone-aware; a naive value can
+        # only be a formatting artefact, so it is read as UTC rather than
+        # dropped. Absent evidence (NULL) is handled above and is NOT guessed.
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _same_instant(left: Any, right: Any) -> bool:
+    """Do two timestamp renders denote the SAME instant?
+
+    ``timestamptz`` is returned rendered in the server session's zone, so one
+    instant can arrive as ``2026-03-16T00:00:00+00:00`` from the caller and as
+    ``2026-03-16T08:00:00+08:00`` on readback. Comparing those strings would
+    report a correct commit as a durability failure.
+
+    This only widens equality for values that BOTH parse as timestamps; a
+    genuinely different declared time, and any unparseable value, still fail
+    the strict comparison in the caller.
+    """
+    left_dt = _as_utc_dt(left)
+    right_dt = _as_utc_dt(right)
+    return left_dt is not None and right_dt is not None and left_dt == right_dt
+
+
+def _parse_as_of(value: Any) -> tuple[Optional[datetime], Optional[str]]:
+    """Validate a caller-supplied ``as_of``. Returns ``(utc_dt, error)``.
+
+    A timestamp without an offset is ambiguous (whose "now"?), so it is
+    rejected — the same rule the writer already applies to ``effective_at``.
+    An explicit ``None`` never reaches here: that means "no time point".
+    """
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None, "as_of 不能为空字符串；要时间点读取请给出带时区的 ISO-8601 时间"
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None, f"as_of 不是合法的 ISO-8601 时间戳（收到 {value!r}）"
+    else:
+        return None, (
+            "as_of 必须是 ISO-8601 字符串或 datetime"
+            f"（收到 {type(value).__name__}）"
+        )
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return None, (
+            "as_of 必须带时区偏移；无时区的时间戳含义不明（谁的 now？），"
+            "M04 不会替你猜时区"
+        )
+    return dt.astimezone(timezone.utc), None
 
 
 def _source_prov_declared(prov: Any) -> bool:
@@ -2176,7 +2274,12 @@ class ActiveMemoryWriter:
         for col, expected in expected_edge.items():
             if col == "recorded_at":
                 continue  # server-side; returned AS READ, never fabricated
-            if actual_edge.get(col) != expected:
+            actual = actual_edge.get(col)
+            if col == "effective_at" and _same_instant(actual, expected):
+                # Same instant, different zone rendering: a correct commit, not
+                # a durability failure.
+                continue
+            if actual != expected:
                 return _post_commit_failure(
                     target, new_id, mode,
                     f"纠正已提交但 readback 的关系 {col}="
@@ -2466,6 +2569,25 @@ def _read_version_error(
     }
 
 
+def _transition_view(edge: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """The transition edge that LEAVES a version, if any.
+
+    Deliberately named ``transition``: these times belong to the correction
+    edge, never to the memory version itself. There is no "version effective
+    time" column, and an edge's ``effective_at`` must never be presented as
+    one — it records when *that transition* was declared to take effect.
+    """
+    if not edge:
+        return None
+    return {
+        "relation_id": edge.get("relation_id"),
+        "relation_type": edge.get("relation_type"),
+        "to_memory_id": edge.get("to_memory_id"),
+        "effective_at": edge.get("effective_at"),
+        "recorded_at": edge.get("recorded_at"),
+    }
+
+
 def _relation_row_to_dict(row: Any) -> dict[str, Any]:
     """Normalize one relation row (tuple or mapping) into a plain dict."""
     if isinstance(row, dict):
@@ -2659,6 +2781,8 @@ class ActiveMemoryReader:
         *,
         mode: str = "current",
         include_history: bool = False,
+        as_of: Any = None,
+        basis: Optional[str] = None,
     ) -> dict[str, Any]:
         """Read one memory through its correction chain (M01 public API).
 
@@ -2675,6 +2799,19 @@ class ActiveMemoryReader:
             the full ordered version and edge history — ancestors AND
             descendants — each version labelled ``current`` / ``superseded``
             / ``withdrawn`` / ``archived`` explicitly.
+
+        ``as_of`` (M04)
+            Answers "which version was the chain's current version at that
+            instant" instead. Reconstructed ONLY from the relation timeline:
+            the present-day ``explicit_memories.status`` column is never used
+            to infer the past. ``basis='recorded'`` (default) asks what the
+            system KNEW then; ``basis='effective'`` asks what the caller
+            DECLARED as taking effect then, and reports
+            ``EFFECTIVE_TIME_INDETERMINATE`` when the evidence that decision
+            needs is absent — it never falls back to ``recorded_at``.
+            First version: ``as_of`` is only defined together with
+            ``mode='current'`` and ``include_history=False``. Any other
+            combination is refused instead of being silently reinterpreted.
 
         ``include_history=True`` attaches the history to a current-mode read.
         Payloads are returned in full — a superseded payload is never
@@ -2705,6 +2842,45 @@ class ActiveMemoryReader:
             return _read_version_error(
                 ERR_INVALID_REQUEST, mid, "include_history 必须为 bool",
             )
+
+        # ── M04 parameter contract ────────────────────────────────────────
+        # `as_of` is only defined with mode='current' + include_history=False.
+        # A combination this version cannot answer truthfully is REFUSED, not
+        # silently reinterpreted into something that looks like an answer.
+        as_of_dt: Optional[datetime] = None
+        if as_of is None:
+            if basis is not None:
+                return _read_version_error(
+                    ERR_INVALID_REQUEST, mid,
+                    "basis 必须与 as_of 一起使用；没有时间点就没有时间基准，"
+                    "拒绝静默忽略该参数",
+                )
+        else:
+            as_of_dt, as_of_err = _parse_as_of(as_of)
+            if as_of_err is not None:
+                return _read_version_error(ERR_INVALID_REQUEST, mid, as_of_err)
+            if mode != "current":
+                return _read_version_error(
+                    ERR_INVALID_REQUEST, mid,
+                    "M04 首版 as_of 只支持 mode='current'；"
+                    "mode='history' 语义保持不变，不与 as_of 组合",
+                )
+            if include_history:
+                return _read_version_error(
+                    ERR_INVALID_REQUEST, mid,
+                    "M04 首版 as_of 不支持 include_history=True；"
+                    "该组合未定义，故显式拒绝",
+                )
+            if basis is None:
+                basis = AS_OF_DEFAULT_BASIS
+            elif not isinstance(basis, str) or basis not in AS_OF_BASES:
+                return _read_version_error(
+                    ERR_INVALID_REQUEST, mid,
+                    f"basis 必须为 {list(AS_OF_BASES)} 之一（收到 {basis!r}）",
+                )
+
+        if as_of_dt is not None:
+            return self._read_version_as_of(mid, as_of_dt, str(basis))
 
         want_history = include_history or mode == "history"
 
@@ -2787,6 +2963,252 @@ class ActiveMemoryReader:
             "is_current": current_id == mid,
             "current_status": chain["current_status"],
             "relation": outgoing,
+        }
+
+    # ── M04: time-point read ─────────────────────────────────────────
+
+    def _read_version_as_of(
+        self, mid: str, as_of_dt: datetime, basis: str,
+    ) -> dict[str, Any]:
+        """Answer "which version was the chain's current version at T".
+
+        Reconstructed ONLY from the recorded relation timeline. The present-day
+        ``explicit_memories.status`` column is never consulted: a row that is
+        archived today may well have been the current version then, and a row
+        that is active today says nothing about the past.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            with _read_snapshot(self._pool, self._pg,
+                                deadline=self._deadline) as snap:
+                requested = snap.read_one(mid)
+                if requested is None:
+                    raise _ReadNotFound(mid)
+                chain = snap.read_chain(mid)
+                if chain is None:  # pragma: no cover - read_chain raises
+                    raise _ChainCorrupt(f"{mid} 的版本链为空")
+                built = self._walk_timeline(mid, chain, as_of_dt, basis)
+                resolved_row = (
+                    snap.read_one(built["current_id"])
+                    if built["current_id"] else None
+                )
+        except _ReadNotFound:
+            return _read_version_error(
+                ERR_NOT_FOUND, mid, f"{mid} 不在 public.explicit_memories 中")
+        except _ChainCorrupt as exc:
+            return _read_version_error(ERR_DURABLE_FAILED, mid, str(exc))
+        except Exception as exc:
+            if _is_missing_relation_table(exc):
+                return _read_version_error(
+                    ERR_MIGRATION_REQUIRED, mid,
+                    f"{_RELATION_TABLE} 不存在；请先应用 "
+                    f"schema/memory_relations.sql 迁移（{exc}）",
+                )
+            return _read_version_error(
+                ERR_DURABLE_FAILED, mid,
+                f"读取 {mid} 的时间线失败: {exc!r}",
+            )
+
+        base = {
+            "mode": "current",
+            "memory_id": mid,
+            "requested": requested,
+            "as_of": as_of_dt.isoformat(),
+            "basis": basis,
+            "as_of_future": as_of_dt > now,
+            "is_current": built["current_id"] == mid,
+            "relation": built["requested_edge"],
+            "timeline": {
+                "versions": built["versions"],
+                "edges": built["edges"],
+            },
+            "indeterminate_edge": built["indeterminate_edge"],
+        }
+
+        if built["query_status"] == QUERY_STATUS_INDETERMINATE:
+            # An explicit "cannot determine from evidence" answer. The partial
+            # evidence is still handed back so the host Agent can see exactly
+            # which transition is missing a declared effective time.
+            return {
+                **base,
+                "success": False,
+                "status": QUERY_STATUS_INDETERMINATE,
+                "error_code": ERR_EFFECTIVE_TIME_INDETERMINATE,
+                "error": built["message"],
+                "query_status": QUERY_STATUS_INDETERMINATE,
+                "memory": None,
+                "resolved_memory_id": None,
+                "current_status": "indeterminate",
+            }
+
+        return {
+            **base,
+            "success": True,
+            "status": "OK",
+            "error_code": None,
+            "error": None,
+            "query_status": built["query_status"],
+            "memory": resolved_row,
+            "resolved_memory_id": built["current_id"],
+            "current_status": built["current_status"],
+        }
+
+    @staticmethod
+    def _walk_timeline(
+        mid: str,
+        chain: dict[str, Any],
+        as_of_dt: datetime,
+        basis: str,
+    ) -> dict[str, Any]:
+        """Walk the chain forward and decide each transition against ``as_of``.
+
+        Only the edges this decision actually consumes are read for evidence.
+        Once a transition is known not to have happened yet, the walk stops —
+        so an absent ``effective_at`` on a LATER edge cannot make this answer
+        indeterminate. A single-version chain needs no time evidence at all.
+        """
+        versions = chain.get("versions") or []
+        edges = chain.get("edges") or []
+        if not versions:
+            raise _ChainCorrupt(f"{mid} 的版本链为空")
+        ids = [v.get("memory_id") for v in versions]
+        by_id = {v.get("memory_id"): v for v in versions}
+        edge_by_from = {
+            e.get("from_memory_id"): e for e in edges if e.get("from_memory_id")
+        }
+        requested_edge = edge_by_from.get(mid)
+
+        def _time_of(edge: dict[str, Any]) -> Optional[datetime]:
+            if basis == "effective":
+                return _as_utc_dt(edge.get("effective_at"))
+            return _as_utc_dt(edge.get("recorded_at"))
+
+        def _edge_view(
+            edge: dict[str, Any], decision: str,
+        ) -> dict[str, Any]:
+            return {
+                "relation_id": edge.get("relation_id"),
+                "relation_type": edge.get("relation_type"),
+                "from_memory_id": edge.get("from_memory_id"),
+                "to_memory_id": edge.get("to_memory_id"),
+                "effective_at": edge.get("effective_at"),
+                "recorded_at": edge.get("recorded_at"),
+                "decision": decision,
+            }
+
+        def _labels(label_for) -> list[dict[str, Any]]:
+            return [
+                {
+                    "memory_id": vid,
+                    "label": label_for(idx),
+                    "is_current_at_as_of": False,
+                    "created_at": by_id[vid].get("created_at"),
+                }
+                for idx, vid in enumerate(ids)
+            ]
+
+        # Existence floor: the first version's own recorded creation time. That
+        # is a record fact about when the chain began, not an inference from
+        # anybody's present-day status.
+        head_created = _as_utc_dt(by_id[ids[0]].get("created_at"))
+        if head_created is not None and as_of_dt < head_created:
+            return {
+                "current_id": None,
+                "current_status": "absent",
+                "query_status": QUERY_STATUS_NO_VERSION,
+                "indeterminate_edge": None,
+                "message": None,
+                "requested_edge": requested_edge,
+                "versions": _labels(lambda _i: _AS_OF_LABEL_FUTURE),
+                "edges": [],
+            }
+
+        current_index = 0
+        withdrawn_index: Optional[int] = None
+        indeterminate_edge: Optional[dict[str, Any]] = None
+        consulted: list[dict[str, Any]] = []
+
+        for idx in range(len(ids)):
+            # Every version is a candidate source of an outgoing transition.
+            # The LAST version matters too: it can carry a 'withdraws' edge
+            # (NULL target), which terminates the chain without adding a node.
+            edge = edge_by_from.get(ids[idx])
+            if edge is None:
+                break
+            moment = _time_of(edge)
+            if moment is None:
+                # The evidence THIS decision needs is absent. Never fall back
+                # to recorded_at / created_at / dates written inside content.
+                indeterminate_edge = edge
+                consulted.append(
+                    _edge_view(edge, _AS_OF_DECISION_INDETERMINATE))
+                break
+            if moment <= as_of_dt:
+                consulted.append(_edge_view(edge, _AS_OF_DECISION_APPLIED))
+                if edge.get("relation_type") == RELATION_TYPE_WITHDRAWS:
+                    withdrawn_index = idx
+                    break
+                current_index = idx + 1
+                continue
+            consulted.append(_edge_view(edge, _AS_OF_DECISION_NOT_YET))
+            break
+
+        if indeterminate_edge is not None:
+            missing = (
+                "effective_at" if basis == "effective" else "recorded_at"
+            )
+            return {
+                "current_id": None,
+                "current_status": "indeterminate",
+                "query_status": QUERY_STATUS_INDETERMINATE,
+                "indeterminate_edge": _edge_view(
+                    indeterminate_edge, _AS_OF_DECISION_INDETERMINATE),
+                "message": (
+                    f"basis={basis!r} 判定 {as_of_dt.isoformat()} 时该链的当前版本"
+                    f"需要转换 {indeterminate_edge.get('relation_id')!r} 的 {missing}，"
+                    f"但该证据不存在（NULL）；M04 不会用其他时间字段替代。"
+                ),
+                "requested_edge": requested_edge,
+                "versions": _labels(lambda _i: _AS_OF_LABEL_INDETERMINATE),
+                "edges": consulted,
+            }
+
+        if withdrawn_index is not None:
+            current_status = "withdrawn"
+            current_id: Optional[str] = None
+
+            def _label(idx: int) -> str:
+                if idx < withdrawn_index:
+                    return _AS_OF_LABEL_SUPERSEDED
+                if idx == withdrawn_index:
+                    return _AS_OF_LABEL_WITHDRAWN
+                return _AS_OF_LABEL_FUTURE
+        else:
+            current_status = "active"
+            current_id = ids[current_index]
+
+            def _label(idx: int) -> str:  # type: ignore[misc]
+                if idx < current_index:
+                    return _AS_OF_LABEL_SUPERSEDED
+                if idx == current_index:
+                    return _AS_OF_LABEL_CURRENT
+                return _AS_OF_LABEL_FUTURE
+
+        timeline_versions = _labels(_label)
+        for item in timeline_versions:
+            item["is_current_at_as_of"] = (
+                current_id is not None and item["memory_id"] == current_id
+            )
+
+        return {
+            "current_id": current_id,
+            "current_status": current_status,
+            "query_status": QUERY_STATUS_OK,
+            "indeterminate_edge": None,
+            "message": None,
+            "requested_edge": requested_edge,
+            "versions": timeline_versions,
+            "edges": consulted,
         }
 
     # ── M01 reader internals ─────────────────────────────────────────
@@ -3019,6 +3441,11 @@ class _ReadSnapshot:
             current_status = "active"
 
         versions = []
+        edge_by_from = {
+            e.get("from_memory_id"): e
+            for e in edges
+            if e.get("from_memory_id")
+        }
         for vid in chain_ids:
             row = rows[vid]
             is_current = (current_id is not None and vid == current_id)
@@ -3050,6 +3477,9 @@ class _ReadSnapshot:
                 "provenance": row.get("provenance"),
                 "created_at": row.get("created_at"),
                 "updated_at": row.get("updated_at"),
+                # M04-3: the transition that leaves this version, if any. The
+                # times here are the EDGE's, not this version's own.
+                "transition": _transition_view(edge_by_from.get(vid)),
             })
 
         return {

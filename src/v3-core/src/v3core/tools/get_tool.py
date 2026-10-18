@@ -43,11 +43,18 @@ class _Invalid(ValueError):
 def _explicit_history_requested(args: dict) -> bool:
     """Did the caller explicitly ask for version-history semantics?
 
-    Only these two parameters count. A caller that supplies neither is
+    Only these parameters count. A caller that supplies none of them is
     asking for the legacy plain read, and that path must stay unchanged
     for every non-corrected active memory.
+
+    ``as_of`` / ``basis`` count too (M04): a time-point question must never
+    be answered by the legacy raw payload, which carries the present-day row
+    and no timeline at all. Without this, passing ``as_of`` on an active row
+    would silently degrade into a present-day read.
     """
     if args.get("include_history"):
+        return True
+    if args.get("as_of") is not None:
         return True
     return args.get("mode") is not None
 
@@ -95,7 +102,9 @@ def _canonical_explicit_read(source_id: str, args: dict, core, kw: dict) -> str:
     never a silent fall back to the archived raw payload.
     """
     from .memory_correction import (
+        _as_of,
         _as_result,
+        _basis,
         read_version,
         render_canonical_for_source,
         resolve_scope,
@@ -103,6 +112,8 @@ def _canonical_explicit_read(source_id: str, args: dict, core, kw: dict) -> str:
 
     try:
         mode, include_history = _read_parameters(args)
+        as_of = _as_of(args)
+        basis = _basis(args)
     except _Invalid as exc:
         return json.dumps(
             {
@@ -141,6 +152,8 @@ def _canonical_explicit_read(source_id: str, args: dict, core, kw: dict) -> str:
             source_id,
             mode=mode,
             include_history=include_history,
+            as_of=as_of,
+            basis=basis,
             pool=pool,
             pg=pg,
             config=cfg,

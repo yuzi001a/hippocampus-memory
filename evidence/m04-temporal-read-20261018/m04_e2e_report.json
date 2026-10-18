@@ -1,0 +1,200 @@
+{
+  "suite": "M04 temporal read",
+  "db": "m04_temporal_e2e",
+  "port": 55433,
+  "checks_total": 36,
+  "checks_failed": 0,
+  "verdict": "PASS",
+  "failures": [],
+  "checks": [
+    {
+      "check": "database_created_and_schema_applied",
+      "ok": true,
+      "detail": "m04_temporal_e2e"
+    },
+    {
+      "check": "writer_correction_a_to_b",
+      "ok": true,
+      "detail": "{'code': None, 'error': None}"
+    },
+    {
+      "check": "writer_correction_b_to_c",
+      "ok": true
+    },
+    {
+      "check": "floor_before_chain_is_absent",
+      "ok": true,
+      "detail": "NO_VERSION_AT_AS_OF"
+    },
+    {
+      "check": "window_1_before_first_correction_resolves_a",
+      "ok": true,
+      "detail": "m04_a"
+    },
+    {
+      "check": "window_2_between_corrections_resolves_b",
+      "ok": true,
+      "detail": "mem_bb7a57484db3423404c0385d258b005c4c0d915a14b2571a4fe05e83eda4b69c"
+    },
+    {
+      "check": "window_2_payload_is_b",
+      "ok": true
+    },
+    {
+      "check": "window_3_after_second_correction_resolves_c",
+      "ok": true,
+      "detail": "mem_a74057c22f3e01e01d8c6b7d49edb051c2c628dbf5bde8f5fd9a2d2865bad3c2"
+    },
+    {
+      "check": "today_status_is_archived_for_b",
+      "ok": true,
+      "detail": "archived"
+    },
+    {
+      "check": "as_of_status_ignores_todays_column",
+      "ok": true
+    },
+    {
+      "check": "basis_defaults_to_recorded_and_is_echoed",
+      "ok": true,
+      "detail": "recorded"
+    },
+    {
+      "check": "as_of_not_flagged_future",
+      "ok": true
+    },
+    {
+      "check": "effective_basis_uses_declared_time",
+      "ok": true,
+      "detail": "{'effective': 'm04_a', 'recorded': 'mem_bb7a57484db3423404c0385d258b005c4c0d915a14b2571a4fe05e83eda4b69c'}"
+    },
+    {
+      "check": "effective_missing_reports_indeterminate",
+      "ok": true,
+      "detail": "EFFECTIVE_TIME_INDETERMINATE"
+    },
+    {
+      "check": "indeterminate_exposes_the_missing_edge",
+      "ok": true,
+      "detail": "{'relation_id': 'rel_64c20d7ec796e9a21a95fdef6d508234d2be9f0f72122a69722cfa6a837530b5', 'relation_type': 'supersedes', 'from_memory_id': 'm04_n1', 'to_memory_id': 'mem_ef91cb1e452732ad02df609f47c55b0fa21ae4968592e811ba672f3287545ebe', 'effective_at': None, 'recorded_at': '2026-03-11T08:00:00+08:00', 'decision': 'indeterminate'}"
+    },
+    {
+      "check": "same_chain_is_answerable_under_recorded_basis",
+      "ok": true,
+      "detail": "mem_ef91cb1e452732ad02df609f47c55b0fa21ae4968592e811ba672f3287545ebe"
+    },
+    {
+      "check": "writer_withdraw_succeeded",
+      "ok": true
+    },
+    {
+      "check": "withdrawal_before_returns_old_version",
+      "ok": true,
+      "detail": "mem_0747540515b1c03f8298a394f68e6768d370364afc0e8b4765b9a992304b4191"
+    },
+    {
+      "check": "withdrawal_after_returns_nothing",
+      "ok": true,
+      "detail": "withdrawn"
+    },
+    {
+      "check": "as_of_plus_history_mode",
+      "ok": true,
+      "detail": "INVALID_REQUEST"
+    },
+    {
+      "check": "as_of_plus_include_history",
+      "ok": true,
+      "detail": "INVALID_REQUEST"
+    },
+    {
+      "check": "basis_without_as_of",
+      "ok": true,
+      "detail": "INVALID_REQUEST"
+    },
+    {
+      "check": "as_of_naive",
+      "ok": true,
+      "detail": "INVALID_REQUEST"
+    },
+    {
+      "check": "as_of_garbage",
+      "ok": true,
+      "detail": "INVALID_REQUEST"
+    },
+    {
+      "check": "as_of_empty",
+      "ok": true,
+      "detail": "INVALID_REQUEST"
+    },
+    {
+      "check": "basis_unknown",
+      "ok": true,
+      "detail": "INVALID_REQUEST"
+    },
+    {
+      "check": "future_as_of_returns_present_and_flags_itself",
+      "ok": true,
+      "detail": "{'resolved': 'mem_a74057c22f3e01e01d8c6b7d49edb051c2c628dbf5bde8f5fd9a2d2865bad3c2', 'future': True}"
+    },
+    {
+      "check": "as_of_none_keeps_exact_shape",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "check": "as_of_none_still_resolves_current",
+      "ok": true
+    },
+    {
+      "check": "history_mode_unchanged",
+      "ok": true
+    },
+    {
+      "check": "history_labels_unchanged",
+      "ok": true,
+      "detail": "['superseded', 'superseded', 'current']"
+    },
+    {
+      "check": "m04_3_head_has_outgoing_transition",
+      "ok": true,
+      "detail": "{'relation_id': 'rel_65703f173c6c29d067a70e54a88b1698eb45e0c404db62c5ac2ba7a263618354', 'relation_type': 'supersedes', 'to_memory_id': 'mem_bb7a57484db3423404c0385d258b005c4c0d915a14b2571a4fe05e83eda4b69c', 'effective_at': '2026-03-16T08:00:00+08:00', 'recorded_at': '2026-03-11T08:00:00+08:00'}"
+    },
+    {
+      "check": "m04_3_terminal_has_no_transition",
+      "ok": true
+    },
+    {
+      "check": "cycle_fails_closed_under_as_of",
+      "ok": true,
+      "detail": "DURABLE_FAILED"
+    },
+    {
+      "check": "unknown_id_is_not_found",
+      "ok": true,
+      "detail": "NOT_FOUND"
+    },
+    {
+      "check": "concurrent_reads_are_self_consistent",
+      "ok": true,
+      "detail": "{'reads': 25, 'torn': 0, 'writer_errors': []}"
+    }
+  ],
+  "notes": [
+    "correct(a->b) receipt error: None",
+    "Concurrency is a stress probe: it can only *observe* torn reads, not prove their absence. The structural guarantee is that one as_of read uses exactly ONE READ ONLY REPEATABLE READ snapshot (asserted in the unit suite), so a writer committing mid-read cannot mix two states."
+  ],
+  "scenarios": {
+    "chain": {
+      "a": "m04_a",
+      "b": "mem_bb7a57484db3423404c0385d258b005c4c0d915a14b2571a4fe05e83eda4b69c",
+      "c": "mem_a74057c22f3e01e01d8c6b7d49edb051c2c628dbf5bde8f5fd9a2d2865bad3c2"
+    },
+    "timeline": {
+      "T0": "2026-03-01T00:00:00+00:00",
+      "T1": "2026-03-11T00:00:00+00:00",
+      "T2": "2026-03-21T00:00:00+00:00",
+      "T3": "2026-03-31T00:00:00+00:00"
+    }
+  }
+}

@@ -257,10 +257,16 @@ def test_no_new_independent_correction_tool_is_registered():
 
 
 def test_effective_at_is_audit_valid_from_only_not_scheduling():
-    """M01 does not schedule future activation or implement as-of reasoning.
+    """M01 records a declared effective time; it never schedules activation.
+
+    The tool layer still must not create any activation machinery: no future
+    activation, no timer, no queue, no daemon. ``as_of`` is deliberately NOT
+    in the banned list as of M04 — it is a READ parameter the tool layer only
+    forwards, and that boundary is pinned positively by
+    ``test_tool_layer_only_forwards_as_of_and_basis`` below.
 
     Only executable code is scanned: the module docstring *documents* that
-    these are out of scope, so a naive whole-file substring scan would
+    scheduling is out of scope, so a naive whole-file substring scan would
     flag the disclaimer itself.
     """
     import ast
@@ -288,9 +294,49 @@ def test_effective_at_is_audit_valid_from_only_not_scheduling():
         and id(node) not in docstring_ids
     ]
     code_only = " ".join(literals).lower()
-    for banned in ("as_of", "future_activation", "activate_at", "scheduler",
+    for banned in ("future_activation", "activate_at", "scheduler",
                    "cron", "sleep", "while true"):
         assert banned not in code_only, f"tool layer must not implement {banned!r}"
+
+
+def test_tool_layer_only_forwards_as_of_and_basis():
+    """M04: the tool layer forwards the time-point parameters verbatim.
+
+    The host Agent chooses the query mode; the plugin validates and executes.
+    So the tool layer must pass ``as_of``/``basis`` through unchanged and must
+    not interpret, default, coerce or compare them itself — and an explicit
+    ``null`` must stay a caller error rather than collapsing into "omitted".
+    """
+    from v3core.tools import memory_correction as mc
+
+    stamp = "2026-01-01T00:00:00+00:00"
+    assert mc._as_of({"as_of": stamp}) == stamp
+    assert mc._as_of({}) is None
+    assert mc._basis({"basis": "effective"}) == "effective"
+    assert mc._basis({}) is None
+    with pytest.raises(mc._Invalid):
+        mc._as_of({"as_of": None})
+    with pytest.raises(mc._Invalid):
+        mc._basis({"basis": None})
+
+    seen: dict = {}
+
+    class _Reader:
+        @staticmethod
+        def read_version(memory_id, **kwargs):
+            seen["memory_id"] = memory_id
+            seen.update(kwargs)
+            return {"success": True, "status": "OK", "memory": None}
+
+    original = mc._reader_cls
+    mc._reader_cls = lambda **_kw: _Reader()
+    try:
+        mc.read_version("m1", as_of=stamp, basis="effective")
+    finally:
+        mc._reader_cls = original
+    assert seen["memory_id"] == "m1"
+    assert seen["as_of"] == stamp
+    assert seen["basis"] == "effective"
 
 
 def test_tool_layer_performs_no_dml_against_explicit_memories():
