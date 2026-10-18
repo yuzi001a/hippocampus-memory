@@ -12,14 +12,19 @@ Production is still v0.21.5 and stays that way until the upgrade is run delibera
 | Hermes target release | **v0.22.2** (latest stable) |
 | Tag object | `7b77e29eedd85a8497ce2821448dac7964dc46f6` |
 | Release commit | `d923a5eb487a17c0a68801bba9ef0f56c81040a8` |
-| Hippocampus source HEAD | `80603e4110bf53b1bf615abd9664586e56807eca` (main, after PR #49) |
-| `v3_core-4.0.0-py3-none-any.whl` | sha256 `7fe159884668f779be730e5d2e1236009e773aa2e09845cedadb266959c0f2ad` |
-| `v3_hermes_plugin-4.0.0-py3-none-any.whl` | sha256 `08ba2de4da60d71d71191e45e040ffe5ca967c6cabd02955e22c4d28172c1762` |
+| Hippocampus source HEAD | `10df437859f48760d85507a6d5582b730f176c5c` (main, after PR #51) |
+| `v3_core-4.0.1-py3-none-any.whl` | sha256 `f3b2d43e270acec6104e8a36eea458683fdac2d3872a3de14f304c0fec2048fb` |
+| `v3_hermes_plugin-4.0.1-py3-none-any.whl` | sha256 `a3e7049d700a07928ca50db81952231c16f4062b816ce4d3ba2a797875f5104b` |
 | Host Python used for acceptance | 3.14.7 |
 
 Wheels were built by `uv build --wheel` from a `git archive` of **clean main**
 (no working-tree edits), then installed into a fresh venv with the real
 v0.22.2 host. `uv pip check` → "All installed packages are compatible" (103 packages).
+
+> **Hash scope:** the two sha256 values identify the exact files handed over for
+> this upgrade. `uv build` is not bit-reproducible (archive entry timestamps), so
+> a later rebuild from the same commit will produce **different** hashes. Compare
+> against the delivered files; do not re-derive them from a fresh build.
 
 **Production baseline being upgraded from:** Hermes v0.21.5 (2026.9.24),
 upstream `24b9f0f8`, Python 3.11.16, **install method: git** (not pip), venv at
@@ -29,13 +34,28 @@ upstream `24b9f0f8`, Python 3.11.16, **install method: git** (not pip), venv at
 
 ## 2. What changed in this cycle
 
-Three defects, each with a targeted regression test, merged in PR #49.
+Four defects, each with a targeted regression test. The first three merged in
+PR #49; the fourth (MCP) merged in PR #51 and is the reason the wheels are 4.0.1.
 
 | # | Defect | Effect if unfixed on v0.22.2 |
 |---|---|---|
 | 1 | Summary worker started with a bare `threading.Thread` | Background jobs start with an empty context, so `HERMES_HOME`/profile resolves to the **default** profile: another profile's data, or the wrong data directory |
 | 2 | Staleness guard re-read `_summary_generation` instead of the queued value | A job queued before a Runtime rebind runs against the **new** Runtime — the guard can never fire |
 | 3 | `plugin.yaml` listed the plugin itself as a pip dependency (not on PyPI), missing `requests`/`pyyaml` | A manager acting on the manifest tries to fetch a package that cannot exist, and reports the provider unavailable for the wrong reason |
+| 4 | `v3-core` declared `mcp>=1.0,<2` as a **core** requirement, though only the standalone `v3-core mcp` server imports it | Hermes v0.22.2 pins `mcp==2.0.0`, so the plugin manager's dependency merge is unsatisfiable and the provider is evicted at admission |
+
+### MCP is now an optional extra
+
+`v3-core` no longer requires the MCP SDK. It lives in the `mcp` extra:
+
+```bash
+pip install 'v3-core[mcp]'   # only for the standalone stdio MCP server
+```
+
+The plugin path (the 13 tools, hooks, prefetch/ingest) never imports `mcp`, so a
+host that pins another MCP major is unaffected. If you run the standalone server,
+give it its **own** venv — the same one the DSH client points at — rather than
+the host's environment.
 
 `spawn_context_thread` is used when the host provides it; older hosts (v0.21.5)
 still get a working thread, so **the new wheels are backward compatible** — they
@@ -51,8 +71,8 @@ try to fetch them from an index.
 ```powershell
 $py = 'C:\Users\servi\AppData\Local\hermes\hermes-agent\venv\Scripts\python.exe'
 uv pip install --python $py `
-  .\v3_core-4.0.0-py3-none-any.whl `
-  .\v3_hermes_plugin-4.0.0-py3-none-any.whl
+  .\v3_core-4.0.1-py3-none-any.whl `
+  .\v3_hermes_plugin-4.0.1-py3-none-any.whl
 uv pip check --python $py
 ```
 
@@ -78,7 +98,7 @@ must print `Plugin: installed`, `Status: available`, and `deep_memory_v3 … act
 3. **Hermes home** — `~/AppData/Local/hermes/config.yaml`, `profiles/`, `.env`
    (secrets stay where they are; do not copy them into the workspace).
 4. **venv freeze** — `uv pip freeze --python <venv>\Scripts\python.exe > <backup>\freeze-0.21.5.txt`.
-5. **Current wheels** — keep the 4.0.0 pair, or rebuild them from the current tag.
+5. **Current wheels** — keep the 4.0.1 pair (the 4.0.0 core wheel must not be installed on v0.22.2).
 6. **Production git commit** — `24b9f0f8` is the rollback target for the host itself.
 
 ---
@@ -117,7 +137,7 @@ These write to production and should only run once, deliberately:
 
 ```powershell
 uv pip uninstall --python $py v3-hermes-plugin v3-core
-uv pip install --python $py .\v3_core-4.0.0-py3-none-any.whl .\v3_hermes_plugin-4.0.0-py3-none-any.whl
+uv pip install --python $py .\v3_core-4.0.1-py3-none-any.whl .\v3_hermes_plugin-4.0.1-py3-none-any.whl
 hermes memory status
 ```
 
