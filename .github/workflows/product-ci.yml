@@ -268,7 +268,8 @@ jobs:
               tests/test_f2_harness_contract.py \
               tests/test_m01_memory_correction.py \
               tests/test_m02_memory_correction_tools.py \
-              tests/test_m04_temporal_read.py
+              tests/test_m04_temporal_read.py \
+              tests/test_b02_mcp_packaging_contract.py
 
       - name: focused-tests-g5b-evaluator
         working-directory: src/v3-core
