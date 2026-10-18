@@ -663,6 +663,110 @@ class TestPgIntegration:
             f"source_id, got sids={sids}, source_ids={source_ids}"
         )
 
+    def test_c2_delivery_exact_match_is_admitted_against_generic_term_qa_hits(
+        self, pg_pool: PgPool, pg_store: PgEmbedStore
+    ) -> None:
+        """B6: a delivery matched by a distinctive term must not lose to generic matches.
+
+        Measured failure this pins (real PG, isolated fixture): the delivery held one
+        half-weight keyword vote (0.5/(K+4) = 0.007812) while eight QA rows matching
+        only generic terms ('the'/'what'/'was') held two full-weight votes each, so the
+        cut at limit=8 was 0.021952 and the delivery was dropped OUTSIDE_LIMIT at fused
+        position 12.  Deliveries enter fusion through one lexical path only, so no rank
+        inside that lane can ever reach a full-weight vote; the exact-hit admission
+        signal the QA path already used (rare term, or >=2 low-frequency terms) is now
+        computed for deliveries as well, capped at one delivery per query.
+        """
+        import uuid
+
+        suffix = uuid.uuid4().hex[:12]
+        needle = f"p0b6deliveryneedle{suffix}"
+        delivery_source = f"delivery/p0b6-testhost/g6b_test_b6_{suffix}/evt_{suffix}"
+        qa_prefix = f"g6b_test_b6_{suffix}"
+        generic = "what was the status of the record"
+
+        with pg_pool.lease() as lease:
+            conn = lease.connection
+            with conn.cursor() as cur:
+                for index in range(10):
+                    cur.execute(
+                        """
+                        INSERT INTO public.qa_pairs
+                            (source_id, session_id, turn_id, question, answer,
+                             timestamp, source, tool_calls, tool_results,
+                             embedding, embed_model)
+                        VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s::jsonb, %s::jsonb,
+                                %s::vector, %s)
+                        ON CONFLICT (source_id) DO NOTHING
+                        """,
+                        (
+                            f"{qa_prefix}_qa{index}",
+                            f"{qa_prefix}_session",
+                            1,
+                            f"{generic} {index}?",
+                            f"generic answer {index}",
+                            "g6b-test",
+                            json.dumps([]),
+                            json.dumps([]),
+                            # Embedding + model stay consistent (the module's own
+                            # convention).  The query below passes q_emb=None, so the
+                            # vector lane never runs and these rows compete through
+                            # keyword only — which is the point of the test.
+                            _dim_vector(f"{qa_prefix}_qa{index}"),
+                            "bge-m3",
+                        ),
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO public.assistant_deliveries
+                        (source_id, host, session_id, trigger_event_id, trigger_kind,
+                         content, event_ids, started_at, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, NOW(), NOW())
+                    ON CONFLICT (source_id) DO NOTHING
+                    """,
+                    (
+                        delivery_source,
+                        "p0b6-testhost",
+                        f"g6b_test_b6_{suffix}",
+                        f"evt_{suffix}",
+                        "ASYNC_BOUNDARY",
+                        f"{needle} final result is the canary marker",
+                        json.dumps([]),
+                    ),
+                )
+            conn.commit()
+
+        try:
+            hits, _ = recall_pool.recall_pool(
+                f"what was the final result of {needle}?",
+                card_index={}, pg=pg_store, q_emb=None,
+                include_keyword=True, include_card_vector=False,
+                include_message_vector=False, include_effective=False,
+                include_topic=False, include_yin=False, include_notes=False,
+                rerank_top_n=None, rerank_cfg=None, limit=8,
+                pg_was_connected=True, config=_production_config(),
+                sqlite_store=None, core=None, deadline=None,
+            )
+            delivery_hits = [hit for hit in hits if hit.source_id == delivery_source]
+            assert len(delivery_hits) == 1, [hit.source_id for hit in hits]
+            hit = delivery_hits[0]
+            assert hit.kind == "assistant_delivery"
+            assert hit.rrf_score is not None and hit.rrf_score >= 0.5, hit.rrf_score
+            assert hits[0].source_id == delivery_source, [h.source_id for h in hits[:3]]
+        finally:
+            with pg_pool.lease() as lease:
+                conn = lease.connection
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM public.assistant_deliveries WHERE source_id = %s",
+                        (delivery_source,),
+                    )
+                    cur.execute(
+                        "DELETE FROM public.qa_pairs WHERE source_id LIKE %s",
+                        (f"{qa_prefix}%",),
+                    )
+                conn.commit()
+
     def test_c2_delivery_rebuilds_and_enters_existing_qa_recall_lane(
         self, pg_pool: PgPool, pg_store: PgEmbedStore
     ) -> None:

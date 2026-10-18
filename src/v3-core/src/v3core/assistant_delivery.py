@@ -518,12 +518,18 @@ def keyword_delivery_candidates(cursor, terms: Sequence[str], *,
     cursor.execute(sql, [*patterns, *patterns, cap])
     candidates: list[dict] = []
     for row in cursor.fetchall() or []:
+        content = str(row[2] or "")
+        folded = content.casefold()
         candidates.append({
             "source_id": str(row[0] or ""),
             "trigger_kind": str(row[1] or ""),
-            "content": str(row[2] or ""),
+            "content": content,
             "created_at": row[3],
             "matched_terms": int(row[4] or 0),
+            # Which of the normalized query terms the content actually contains.
+            # The SQL above already counts them; exposing the list lets the caller
+            # weigh distinctiveness (rare vs generic terms) without a second query.
+            "matched_term_list": [t for t in normalized if t.casefold() in folded],
         })
     return candidates
 
