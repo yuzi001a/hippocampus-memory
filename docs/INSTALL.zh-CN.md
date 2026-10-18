@@ -155,7 +155,7 @@ uv pip check
   `pyyaml`、`numpy`、`requests`、`openai`、`jieba`、
   `pyahocorasick>=2.3.0`）。
 - 从 wheel 安装 `v3-hermes-plugin`（声明
-  `v3-core>=4.0.0,<5.0.0`、`requests`、`pyyaml`）。
+  `v3-core>=4.0.1,<5.0.0`、`requests`、`pyyaml`）。
 - 安装两个 `v3-core` 控制台脚本：
   - `v3-core`——原样保留（例如 `v3-core info`）。
   - `hippocampus`——分发面向控制台（Gate 2）。提供

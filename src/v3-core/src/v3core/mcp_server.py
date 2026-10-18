@@ -130,8 +130,9 @@ def _build_mcp_server(core):
         from mcp.server.fastmcp import FastMCP
     except ImportError as e:  # pragma: no cover
         raise RuntimeError(
-            "未安装官方 mcp SDK 1.x (mcp>=1.0,<2). "
-            "请在 venv 里: pip install 'mcp>=1.0,<2'"
+            "未安装官方 mcp SDK 1.x。MCP stdio 服务依赖它且只在独立环境里需要: "
+            "pip install 'v3-core[mcp]' （该 extra 锁 mcp>=1.0,<2；"
+            "若宿主固定了别的 MCP 大版本, 请把本服务装到独立 venv 运行）"
         ) from e
 
     mcp = FastMCP("v3-memory")

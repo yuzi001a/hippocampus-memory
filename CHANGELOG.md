@@ -7,6 +7,31 @@
 
 ---
 
+## [4.0.1] — MCP SDK demoted to an optional extra
+
+> **Scope:** one compatibility defect found while preparing Hippocampus for
+> Hermes v0.22.2. No memory behaviour changes.
+
+### Fixed
+- **`v3-core` no longer declares the MCP SDK as a core requirement.** Only the
+  standalone stdio server (`v3-core mcp`) imports it, and it uses the FastMCP
+  1.x API; every other install of the engine carried a `mcp<2` pin for nothing.
+  Hermes v0.22.2 pins `mcp==2.0.0`, so the plugin's dependency member was
+  unsatisfiable inside the plugin manager's workspace and the plugin was
+  disabled at admission. The SDK now lives in the `mcp` extra
+  (`pip install 'v3-core[mcp]'`) for the dedicated stdio environment.
+- The server's own import error now names that extra instead of asking the
+  operator to install a bare pin.
+- `v3-hermes-plugin` requires `v3-core>=4.0.1` so a fixed plugin cannot be
+  paired with a core that still carries the old core-level pin.
+
+### Not changed
+- Decode/recall/QA/observer/RRF paths, M03 and M04 semantics, and the tool
+  surface. The stdio server still exposes the same 13 tools when the extra is
+  installed.
+
+---
+
 ## [0.2.5] — tool-level profile scoping completed
 
 > **Scope:** finish what 0.2.4 started. 0.2.4 fixed the *dispatch* layer; this

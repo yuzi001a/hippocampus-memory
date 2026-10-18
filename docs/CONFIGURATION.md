@@ -151,7 +151,7 @@ provides_tools: [v3_add, v3_get, v3_update, v3_manage,
                   v3_topic_correct, v3_moc_overview, v3_moc_get,
                   v3_health]
 pip_dependencies:      # mirrors [project].dependencies in pyproject.toml
-  - v3-core>=4.0.0,<5.0.0
+  - v3-core>=4.0.1,<5.0.0
   - requests
   - pyyaml
 requires_env:
