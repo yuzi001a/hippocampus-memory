@@ -55,7 +55,7 @@ per-provider health report.
 pip install ./src/v3-hermes-plugin
 ```
 
-This pulls in `v3-core>=4.0.0` as a dependency. The intended install
+This pulls in `v3-core>=4.0.1` as a dependency. The intended install
 path is local-source `pip install` from this repo; see
 [`docs/INSTALL.md`](../../docs/INSTALL.md) for the full bring-up recipe.
 
@@ -89,7 +89,7 @@ provides_tools:
   - v3_moc_get
   - v3_health
 pip_dependencies:      # mirrors [project].dependencies in pyproject.toml
-  - v3-core>=4.0.0,<5.0.0
+  - v3-core>=4.0.1,<5.0.0
   - requests
   - pyyaml
 requires_env:

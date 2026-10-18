@@ -24,6 +24,15 @@ at the bottom). Older releases list the 13 tools and then fail on the first real
 
 ## Exact MCP configuration
 
+The stdio server runs from its own environment, because the SDK it needs
+(`mcp` 1.x, the FastMCP API) is not a core requirement of the engine — a host
+like Hermes may pin a different MCP major. Create that environment with the
+extra:
+
+```bash
+pip install 'v3-core[mcp]'
+```
+
 DSH loads a patch file; the MCP server is the installed console script and the profile
 is selected by `--profile`:
 
