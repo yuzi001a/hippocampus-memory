@@ -89,11 +89,6 @@ import v3hermes  # noqa: E402  (import after the host surface exists)
 from v3core.runtime import RuntimeState  # noqa: E402
 
 
-def _fresh_logger_records(caplog):
-    caplog.set_level(logging.WARNING, logger="v3hermes")
-    return caplog
-
-
 # ── fakes ──────────────────────────────────────────────────────────────────
 
 def _runtime(*, state=RuntimeState.ACTIVE, config=None, pool=None):
@@ -233,8 +228,8 @@ def test_spawn_background_job_warns_when_the_host_lacks_the_api(monkeypatch, cap
         raise ImportError("no spawn_context_thread here")
 
     monkeypatch.setattr(host, "spawn_context_thread", _boom)
-    with _fresh_logger_records(caplog):
-        thread = v3hermes._spawn_background_job(lambda: None, name="v3-fallback")
+    caplog.set_level(logging.WARNING, logger="v3hermes")
+    thread = v3hermes._spawn_background_job(lambda: None, name="v3-fallback")
 
     assert isinstance(thread, threading.Thread)
     assert thread.daemon is True
