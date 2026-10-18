@@ -963,3 +963,62 @@ Retained limitations at merge (explicitly not widened by this change):
 - **B5 stays `NO_CHANGE`**; the global-decay working-tree patch is not committed (preserved as
   `p0b_b5_global_decay_WORKTREE_ONLY.patch` outside the repo).
 - PR #44's tests, canary and CI were not re-run (user decision).
+
+## M04 — point-in-time read (`as_of`) (DELIVERED 2026-10-18)
+
+Status: `M04 = DONE (time-point read shipped; interval queries deferred)`. Contract
+`docs/M04-TEMPORAL-READ.md`; branch `feature/m04-temporal-read`, commits `a5a7761` (product,
+tests, contract, evidence) and `7030980` (CI gate), PR #47, based on `c8d8185`. **MERGED** into
+`main` as `756e12bd5a81621dc961661209537d034b99bcbb` (2026-10-18T08:30:45Z, i.e. 16:30:45 CST),
+normal merge (no rebase, no force-push). Pre-merge the head was re-read (`7030980` unchanged),
+both required checks (`product-ci (py3.11)`, `windows / distribution-packaging smoke`) were green
+on that head and the PR was `MERGEABLE` / `CLEAN`. Post-merge, all **12** changed files on `main`
+are byte-identical to the CI-verified head (12/12 blob comparison, no exceptions) — including
+`active_memory_store.py` `d0a42aec…` and `test_m04_temporal_read.py` `10dc045c…`.
+
+What the read now answers: `read_version(id, as_of=T)` returns the version current at T, rebuilt
+from the recorded relation timeline. `basis='recorded'` (default, always echoed with `as_of`) walks
+edges by `recorded_at`; `basis='effective'` walks by the caller-declared `effective_at` and, when
+the transition **this decision actually needs** has no declared time, returns
+`EFFECTIVE_TIME_INDETERMINATE` — never falling back to `recorded_at`, `created_at` or a date inside
+the content. The judgement is scoped to the transitions the walk consumes: a NULL on a later
+transition than the walk reached does not poison a determinate answer, and a single-version chain
+needs no time evidence at all. Today's `explicit_memories.status` is never consulted — the
+isolated-PG run proves a version archived **today** still resolves `active` in its own past window.
+M04-3 adds `versions[].transition` (the edge leaving that version) kept separate from the version's
+own timestamps, at zero extra query cost since the chain read already loads edges.
+
+Undefined combinations are refused, not reinterpreted: `as_of` with `mode='history'`, `as_of` with
+`include_history=True`, `basis` without `as_of`, naive timestamps, unparseable values, unknown
+`basis`. `as_of=None` keeps the previous response byte for byte.
+
+Verification (no re-run of PR #44/#45 acceptance): 291 pre-existing tests unchanged + 33 new =
+**324 passed** locally; isolated real-PostgreSQL acceptance **36/36, 0 failed** (edges produced by
+the real writer, only the clock controlled; throwaway database, production port and non-loopback
+hosts refused before any statement); the same suite on a tree **without** M04 → 291 passed, 0 failed.
+
+CI gate widened in the same branch: the focused list contained none of the memory-correction
+suites, so before this round CI could not have failed on a broken time-point read — it would have
+been green by absence. `test_m01_*`, `test_m02_*` and `test_m04_*` are now in it (in-memory only;
+the P0-A conftest hard-blocks `psycopg2.connect`, and the live-database acceptance stays a separate
+harness). The gated run reports **745 passed, 6 skipped**.
+
+One **pre-existing** defect fixed in passing, declared in contract §9 rather than folded into the
+M04 scope: post-commit verification compared `effective_at` as **strings**, while `timestamptz`
+comes back rendered in the server session's zone, so a caller passing `+00:00` read back `+08:00`
+and a committed, correct correction was reported `DURABLE_FAILED`. Equality is now instant-based
+(`_same_instant`) and widened only when both sides parse as timestamps; a genuinely different
+declaration still fails.
+
+Deferred / not done, by decision:
+
+- **Interval queries (M04-2) are not implemented.**
+- No judgement about whether an old statement is still *true*; no intent routing (the host Agent
+  chooses the mode, the plugin validates only); no cross-project temporal conflict resolution.
+- No index added (no performance evidence); no performance claim made in either direction.
+- The concurrency check is a **stress probe** — it can observe a torn read but cannot prove the
+  absence of one. The structural guarantee ("one `as_of` read uses exactly one READ ONLY
+  REPEATABLE READ snapshot") is pinned deterministically in the unit suite instead.
+- QA recall, RRF, topic cards, Observer and the M03 boundaries are untouched; no SQL migration.
+- The known failures of the full pre-existing suite are outside this round's scope; only the
+  memory-correction and time-point read suites were run.
