@@ -13,6 +13,8 @@ from .card_store import DeepStore
 from .config import resolve_config, _resolve_prompt as _cfg_prompt
 from .generated_context_contract import (
     GeneratedContextError,
+    _IDENTITY_MAX_BYTES,
+    _IDENTITY_MAX_CHARS,
     validate_identity_block,
     validate_situation_overview,
 )
@@ -143,6 +145,64 @@ def _get_cfg_pg_conn_compat(config: Any = None, pool: Any = None) -> Optional[An
     if pool is None:
         return _get_cfg_pg_conn(config)
     return _get_cfg_pg_conn(config, pool=pool)
+
+
+class _E1DualWriteError(RuntimeError):
+    """E1's local yin file was saved, but its required PostgreSQL copy failed."""
+
+
+def _pg_target_configured(config: Any, pool: Any = None) -> bool:
+    """Whether this E1 run explicitly expects PostgreSQL persistence."""
+    if pool is not None:
+        return True
+    if isinstance(config, dict):
+        pg_cfg = config.get("pg")
+        if pg_cfg is None:
+            storage_cfg = config.get("storage") or {}
+            pg_cfg = storage_cfg.get("pg") if isinstance(storage_cfg, dict) else None
+        return bool(pg_cfg)
+    return getattr(config, "pg", None) is not None
+
+
+def _ensure_yin_tables(cur: Any) -> None:
+    """Idempotently create full-text yin tables before E1's PostgreSQL write.
+
+    The canonical bootstrap carries the same DDL. E1 also ensures these tables
+    so it can dual-write on a fresh database before alpha bootstrap runs.
+    """
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS public.yin (
+            id BIGSERIAL PRIMARY KEY,
+            version TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            is_current BOOLEAN NOT NULL DEFAULT FALSE
+        )"""
+    )
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS public.yin_history (
+            id BIGSERIAL PRIMARY KEY,
+            version TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            is_current BOOLEAN NOT NULL DEFAULT FALSE
+        )"""
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS yin_version_idx ON public.yin (version)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS yin_is_current_idx "
+        "ON public.yin (id DESC) WHERE is_current = TRUE"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS yin_history_version_idx "
+        "ON public.yin_history (version)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS yin_history_is_current_idx "
+        "ON public.yin_history (id DESC) WHERE is_current = TRUE"
+    )
 
 
 def _legacy_config(config: Any | None = None) -> dict[str, Any]:
@@ -705,44 +765,81 @@ def synthesize_yin(
         # ── PG 双写 ──
         try:
             pg_conn = _get_cfg_pg_conn_compat(cfg, pool)
-            if pg_conn:
-                try:
-                    with pg_conn.cursor() as cur:
-                        # 旧版 is_current 清 false
-                        cur.execute("UPDATE yin SET is_current=false WHERE is_current=true")
-                        # 新版本写入
-                        version_str = ts  # e.g. "2026-07-14_141119"
-                        title_line = ""
-                        for line in y_content.split("\n"):
-                            if line.startswith("# "):
-                                title_line = line[2:].strip()
-                                break
-                        cur.execute(
-                            "INSERT INTO yin (version, title, content, created_at, is_current) "
-                            "VALUES (%s, %s, %s, %s, true) "
-                            "ON CONFLICT DO NOTHING",
-                            (version_str, title_line, y_content, now)
-                        )
-                        # 也写 yin_history
-                        cur.execute(
-                            "INSERT INTO yin_history (version, title, content, created_at, is_current) "
-                            "VALUES (%s, %s, %s, %s, true) ON CONFLICT DO NOTHING",
-                            (version_str, title_line, y_content, now)
-                        )
-                    pg_conn.commit()
-                    logger.info("[e1] yin 双写 PG: version=%s", version_str)
-                finally:
-                    try:
-                        pg_conn.close()
-                    except Exception:
-                        pass
         except Exception as pg_e:
-            logger.warning("[e1] yin PG 双写失败（文件已存，不阻塞）: %s", str(pg_e)[:150])
+            detail = _safe_err(pg_e, 300)
+            message = (
+                f"E1 yin 双写失败: file={target.name} "
+                f"tables=public.yin,public.yin_history error={detail}"
+            )
+            logger.error("[e1] yin PG 双写失败（印文件已保留）: %s", message)
+            raise _E1DualWriteError(message) from pg_e
+
+        if pg_conn is None:
+            if _pg_target_configured(cfg, pool):
+                message = (
+                    f"E1 yin 双写失败: file={target.name} "
+                    "tables=public.yin,public.yin_history "
+                    "error=PostgreSQL connection unavailable"
+                )
+                logger.error("[e1] yin PG 双写失败（印文件已保留）: %s", message)
+                raise _E1DualWriteError(message)
+        else:
+            try:
+                with pg_conn.cursor() as cur:
+                    # Fresh-install guard: use the same idempotent table shape as
+                    # alpha_bootstrap.sql before either write touches the tables.
+                    _ensure_yin_tables(cur)
+                    cur.execute(
+                        "UPDATE public.yin SET is_current=false WHERE is_current=true"
+                    )
+                    version_str = ts  # e.g. "2026-07-14_141119"
+                    title_line = ""
+                    for line in y_content.split("\n"):
+                        if line.startswith("# "):
+                            title_line = line[2:].strip()
+                            break
+                    cur.execute(
+                        "INSERT INTO public.yin "
+                        "(version, title, content, created_at, is_current) "
+                        "VALUES (%s, %s, %s, %s, true) ON CONFLICT DO NOTHING",
+                        (version_str, title_line, y_content, now),
+                    )
+                    cur.execute(
+                        "INSERT INTO public.yin_history "
+                        "(version, title, content, created_at, is_current) "
+                        "VALUES (%s, %s, %s, %s, true) ON CONFLICT DO NOTHING",
+                        (version_str, title_line, y_content, now),
+                    )
+                pg_conn.commit()
+                logger.info("[e1] yin 双写 PG: version=%s file=%s", version_str, target.name)
+            except Exception as pg_e:
+                try:
+                    pg_conn.rollback()
+                except Exception:
+                    pass
+                detail = _safe_err(pg_e, 300)
+                message = (
+                    f"E1 yin 双写失败: file={target.name} "
+                    f"tables=public.yin,public.yin_history error={detail}"
+                )
+                logger.error("[e1] yin PG 双写失败（印文件已保留）: %s", message)
+                raise _E1DualWriteError(message) from pg_e
+            finally:
+                try:
+                    pg_conn.close()
+                except Exception:
+                    pass
+    except _E1DualWriteError:
+        # The local file was already written; propagate the explicit durable
+        # failure instead of returning a successful E1 completion message.
+        raise
     except Exception as e:
         return f"E1 写文件失败: {_safe_err(e)}"
 
     # ── 写时生成身份短板 ──
     # 印已成功写文件并尝试 PG 双写；身份提炼失败不能回滚或阻塞 E1 主流程。
+    identity_block_state: str | None = None
+    identity_block_reason: str | None = None
     try:
         identity_content = client.chat(identity_short_prompt, [
             # 2026-08-09: 去掉 [:4000] 截断 — 完整印喂身份提炼 (用户红线: 禁止默认截断)
@@ -752,31 +849,100 @@ def synthesize_yin(
         if not identity_content:
             raise ValueError("LLM 返回空身份块")
 
-        # ── 输出契约闸门（P0, 2026-09-21）──
-        # 与态势总览同级的注入面：identity_block.md 被逐字注入每个新 session。
-        # 此前写路径唯一的闸门同样是"非空"，坏候选经 os.replace 原子覆盖上一份
-        # 好文件。现在在任何文件写入之前做**整体**校验：失败 = 整体丢弃候选，
-        # 绝不截断、绝不保留"开头看起来还行"的前缀；上一份已验证文件保持不变
-        # （不存在则继续保持不存在）。校验器与读/注入侧共用同一份实现。
+        # ── 输出契约闸门 + LENGTH_TOO_LONG 单次重试 ──
+        # Identity text remains untrusted. A retry is a fresh generation with a
+        # stricter prompt; never trim or write a rejected candidate.
         try:
             identity_content = validate_identity_block(identity_content)
-        except GeneratedContextError as _id_contract_e:
-            # 只记元信息（类别/长度/sha256 前缀/模型/原因），绝不落盘被拒产物。
-            logger.error(
-                "[e1] 身份核心被输出契约拒绝，整体丢弃且不写文件: reason=%s "
-                "chars=%d bytes=%d sha256_prefix=%s model=%s provider=%s detail=%s",
-                _id_contract_e.reason,
-                len(identity_content),
-                len(identity_content.encode("utf-8", errors="replace")),
-                hashlib.sha256(
-                    identity_content.encode("utf-8", errors="replace")
-                ).hexdigest()[:16],
-                getattr(client, "model", "") or "?",
-                getattr(client, "provider", "") or "?",
-                _id_contract_e.detail,
+        except GeneratedContextError as _first_contract_e:
+            _first_chars = len(identity_content)
+            _first_bytes = len(identity_content.encode("utf-8", errors="replace"))
+            _identity_model = getattr(client, "model", "") or "?"
+            _identity_provider = getattr(client, "provider", "") or "?"
+            if _first_contract_e.reason != "LENGTH_TOO_LONG":
+                logger.error(
+                    "[e1] 身份核心被输出契约拒绝，整体丢弃且不写文件: reason=%s "
+                    "chars=%d bytes=%d sha256_prefix=%s model=%s provider=%s detail=%s",
+                    _first_contract_e.reason,
+                    _first_chars,
+                    _first_bytes,
+                    hashlib.sha256(
+                        identity_content.encode("utf-8", errors="replace")
+                    ).hexdigest()[:16],
+                    _identity_model,
+                    _identity_provider,
+                    _first_contract_e.detail,
+                )
+                raise
+
+            logger.warning(
+                "[e1] 身份核心超出长度上限，重试一次: chars=%d bytes=%d "
+                "max_chars=%d max_bytes=%d model=%s provider=%s",
+                _first_chars,
+                _first_bytes,
+                _IDENTITY_MAX_CHARS,
+                _IDENTITY_MAX_BYTES,
+                _identity_model,
+                _identity_provider,
             )
-            # 交给外层 except 记录并继续（不阻塞 E1 主流程）。
-            raise
+            _identity_retry_prompt = (
+                identity_short_prompt.rstrip()
+                + "\n\n【长度重试硬约束】身份核心正文严格不超过 "
+                + f"{_IDENTITY_MAX_CHARS} 个字符，且 UTF-8 字节数不超过 "
+                + f"{_IDENTITY_MAX_BYTES}；超过任一上限将被整块丢弃。只输出正文。"
+            )
+            _retry_candidate = ""
+            try:
+                _retry_raw = client.chat(
+                    _identity_retry_prompt,
+                    [{"role": "user", "content": y_content}],
+                    temperature=0.3,
+                    max_output_tokens=IDENTITY_BLOCK_MAX_OUTPUT_TOKENS,
+                )
+                _retry_candidate = _THINK_BLOCK_RE.sub("", _retry_raw).strip()
+                identity_content = validate_identity_block(_retry_candidate)
+            except GeneratedContextError as _retry_contract_e:
+                _retry_chars = len(_retry_candidate)
+                _retry_bytes = len(_retry_candidate.encode("utf-8", errors="replace"))
+                identity_block_state = "degraded"
+                identity_block_reason = (
+                    f"retry failed: reason={_retry_contract_e.reason}; "
+                    f"chars={_retry_chars}; bytes={_retry_bytes}; "
+                    f"max_chars={_IDENTITY_MAX_CHARS}; max_bytes={_IDENTITY_MAX_BYTES}"
+                )
+                logger.error(
+                    "[e1] 身份核心重试仍未通过契约，整体丢弃且不写文件: "
+                    "reason=%s chars=%d bytes=%d max_chars=%d max_bytes=%d "
+                    "first_chars=%d model=%s provider=%s detail=%s",
+                    _retry_contract_e.reason,
+                    _retry_chars,
+                    _retry_bytes,
+                    _IDENTITY_MAX_CHARS,
+                    _IDENTITY_MAX_BYTES,
+                    _first_chars,
+                    _identity_model,
+                    _identity_provider,
+                    _retry_contract_e.detail,
+                )
+                raise
+            except Exception as _retry_call_e:
+                _retry_error = _safe_err(_retry_call_e, 300)
+                identity_block_state = "degraded"
+                identity_block_reason = (
+                    f"retry generation failed: first_chars={_first_chars}; "
+                    f"max_chars={_IDENTITY_MAX_CHARS}; "
+                    f"error_type={type(_retry_call_e).__name__}"
+                )
+                logger.error(
+                    "[e1] 身份核心长度重试调用失败，整体丢弃且不写文件: "
+                    "first_chars=%d max_chars=%d model=%s provider=%s error=%s",
+                    _first_chars,
+                    _IDENTITY_MAX_CHARS,
+                    _identity_model,
+                    _identity_provider,
+                    _retry_error,
+                )
+                raise
 
         identity_path = base_path / "identity_block.md"
         identity_tmp_path = base_path / "identity_block.md.tmp"
@@ -786,8 +952,17 @@ def synthesize_yin(
         finally:
             if identity_tmp_path.exists():
                 identity_tmp_path.unlink()
+        identity_block_state = "ready"
+        identity_block_reason = None
         logger.info("[e1] 身份短板已原子写入 (%d 字)", len(identity_content))
     except Exception as identity_e:
+        if identity_block_state is None:
+            identity_block_state = "degraded"
+            identity_block_reason = (
+                identity_e.reason
+                if isinstance(identity_e, GeneratedContextError)
+                else type(identity_e).__name__
+            )
         logger.warning("[e1] 身份短板生成失败（印已存，不阻塞）: %s", str(identity_e)[:200])
 
     # ── 手帐机制 B：写时生成系统态势总览 ──
@@ -893,6 +1068,12 @@ def synthesize_yin(
         state.setdefault("processed", {})["lastE1Run"] = (
             (sim_now or datetime.now(timezone.utc)).isoformat()  # 2026-08-24 G1A-R: 回放时写模拟时钟
         )
+        if identity_block_state is not None:
+            state["identity_block"] = identity_block_state
+            if identity_block_reason:
+                state["identity_block_reason"] = identity_block_reason
+            else:
+                state.pop("identity_block_reason", None)
         state_file.write_text(
             json.dumps(state, ensure_ascii=False, indent=2),
             encoding="utf-8",
