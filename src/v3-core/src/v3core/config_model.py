@@ -118,6 +118,8 @@ class LLMConfig:
     # got rejected by SiliconFlow with "exceeded max_seq_len").
     thinking: bool | None = None
     max_tokens: int | None = None
+    thinking_mode: str = "auto"
+    timeout: int = 600
 
     def __repr__(self):
         return f"LLMConfig(provider={self.provider!r}, model={self.model!r}, api_key='***')"
@@ -369,7 +371,9 @@ def from_legacy_dict(src: dict | None) -> V3Config:
         api_key=str(llm_raw.get("api_key", "") or llm_raw.get("apiKey", "")),
         base_url=str(llm_raw.get("base_url", "") or llm_raw.get("baseUrl", "") or ""),
         thinking=(bool(llm_raw["thinking"]) if "thinking" in llm_raw else None),
+        thinking_mode=str(llm_raw.get("thinking_mode", "auto") or "auto").strip().lower(),
         max_tokens=_llm_max_tokens,
+        timeout=_coerce_int(llm_raw.get("timeout"), 600),
     )
 
     # -- PG --
@@ -493,6 +497,9 @@ def validate_config(cfg: V3Config) -> list[str]:
     这些警告适合注入到 status prompt, 让运维一眼看到系统缺口.
     """
     warnings: list[str] = []
+
+    if cfg.llm.thinking_mode not in ("auto", "enabled", "disabled"):
+        warnings.append("llm.thinking_mode 应为 auto/enabled/disabled")
 
     if cfg.mode not in ("cloud", "local"):
         warnings.append(f"未知 mode '{cfg.mode}'，默认 cloud")
