@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .pg_pool import DEFAULT_LEASE_TIMEOUT
+from .vector_recall import configure_connection_recall, query_with_exact_fallback
 
 
 try:
@@ -209,6 +210,7 @@ class PgEmbedStore:
                 connect_timeout=5,
             )
             self._conn.autocommit = True
+            configure_connection_recall(self._conn)
             self._connected = True
             self._ensure_schema()
             return self._conn
@@ -304,9 +306,12 @@ class PgEmbedStore:
                 tsc=_psql.Identifier(_ts_col),
                 tbl=_psql.Identifier(table),
             )
-            cur.execute(_stmt, (emb_str, emb_str, limit))
+            rows, _ = query_with_exact_fallback(
+                cur, _stmt, (emb_str, emb_str, limit),
+                table=table, context=f"pg_store.search.{kind}",
+            )
             results = []
-            for row in cur.fetchall():
+            for row in rows:
                 results.append({
                     "source_id": row[0],
                     "title": row[1],
@@ -1205,6 +1210,7 @@ class PgEmbedStore:
                 return []
             emb_str = "[" + ",".join(str(x) for x in query_emb) + "]"
             with conn.cursor() as cur:
+                exact_table = None
                 if pool_role == "yin_segment":
                     # M03: expose the paragraph ``id`` so the injection layer can
                     # suppress an invalidated paragraph (additive column only —
@@ -1217,6 +1223,7 @@ class PgEmbedStore:
                     params = [emb_str, emb_str]
                     sql += "ORDER BY embedding <=> %s::vector LIMIT %s"
                     params.append(limit)
+                    exact_table = "yin_paragraphs"
                 elif pool_role:
                     sql = (
                         "SELECT version, COALESCE(links->>'title', ''), content, "
@@ -1226,6 +1233,7 @@ class PgEmbedStore:
                     params = [emb_str, emb_str]
                     sql += "ORDER BY embedding <=> %s::vector LIMIT %s"
                     params.append(limit)
+                    exact_table = "observation_notes"
                 else:
                     sql = (
                         "SELECT source_id, title, content, cosine FROM ("
@@ -1239,9 +1247,16 @@ class PgEmbedStore:
                         ") effective ORDER BY cosine DESC LIMIT %s"
                     )
                     params = [emb_str, emb_str, limit]
-                cur.execute(sql, params)
+                if exact_table is not None:
+                    rows, _ = query_with_exact_fallback(
+                        cur, sql, params, table=exact_table,
+                        context="pg_store.search_effective",
+                    )
+                else:
+                    cur.execute(sql, params)
+                    rows = cur.fetchall()
                 out = []
-                for r in cur.fetchall():
+                for r in rows:
                     item = {
                         "source_id": r[0],
                         "title": r[1],

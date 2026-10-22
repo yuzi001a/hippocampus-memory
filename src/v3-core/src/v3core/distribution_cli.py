@@ -2856,6 +2856,7 @@ def _build_import_pool():
 
         from v3core.config import resolve_config
         from v3core.pg_pool import PgPool
+        from v3core.vector_recall import with_recall_configuration
 
         cfg = resolve_config()
         # V3Config exposes flat attributes (pg / embed / rerank / llm); the
@@ -2872,7 +2873,7 @@ def _build_import_pool():
                 user=pg.user, password=password, connect_timeout=10,
             )
 
-        return PgPool(connect=_connect, max_connections=4), None
+        return PgPool(connect=with_recall_configuration(_connect), max_connections=4), None
     except Exception as exc:  # noqa: BLE001
         return None, (
             f"could not construct a database pool for the import: "

@@ -1317,6 +1317,7 @@ def smoke_write_recall(
     # Build an ActiveMemoryWriter.
     try:
         from v3core.pg_pool import PgPool
+        from v3core.vector_recall import with_recall_configuration
         from v3core.active_memory_store import ActiveMemoryWriter
     except Exception as e:
         result["error"] = f"v3core writer import failed: {e}"
@@ -1335,7 +1336,7 @@ def smoke_write_recall(
     def _connect():
         return psycopg2.connect(**connect_kwargs)
 
-    pool = PgPool(connect=_connect, max_connections=2, min_connections=0,
+    pool = PgPool(connect=with_recall_configuration(_connect), max_connections=2, min_connections=0,
                   connect_timeout=5)
 
     # Embedder — the install smoke must exercise the same real provider path
