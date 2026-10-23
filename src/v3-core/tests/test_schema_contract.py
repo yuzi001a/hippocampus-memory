@@ -258,6 +258,26 @@ def test_probe_failure_never_blocks_writes():
     assert "connection lost" in status.probe_error
 
 
+def test_no_sql_keyword_is_parsed_as_a_column():
+    """A multi-line CHECK clause must not contribute columns.
+
+    ``explicit_memories`` ends with a CHECK whose continuation line starts with
+    ``AND``; recording that as a column makes every install look permanently
+    un-migrated.
+    """
+    contract = sc.load_contract()
+    keywords = {"AND", "OR", "NOT", "CHECK", "CONSTRAINT", "PRIMARY", "UNIQUE",
+                "FOREIGN", "REFERENCES", "DEFAULT"}
+    offenders = [
+        (table, column)
+        for table, spec in contract.tables.items()
+        for column in spec.columns
+        if column.upper() in keywords
+    ]
+    assert not offenders, offenders
+    assert "embed_model" in contract.required_columns()["explicit_memories"]
+
+
 def test_contract_manifest_matches_the_contract():
     manifest = sc.contract_manifest()
     contract = sc.load_contract()

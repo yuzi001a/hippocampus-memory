@@ -158,17 +158,27 @@ def _expand_includes(text: str, *, _depth: int = 0) -> str:
 
 
 def _column_names(body: str) -> list[str]:
-    """Column names from one CREATE TABLE body (comments/constraints skipped)."""
+    """Column names from one CREATE TABLE body.
+
+    A column definition starts at the beginning of the body or immediately
+    after a line ending in `,`. Everything else is a continuation — a
+    multi-line ``CHECK (...)`` clause starts its second line with ``AND``, which
+    a naive "first token is an identifier" rule would record as a column.
+    """
     out: list[str] = []
+    starts_a_definition = True
     for raw in body.splitlines():
         line = raw.strip()
         if not line or line.startswith("--"):
             continue
-        if _NON_COLUMN_LINE_RE.match(line):
-            continue
-        first = line.split()[0].rstrip(",")
-        if _IDENT_RE.match(first):
-            out.append(first)
+        first = line.split()[0]
+        if (
+            starts_a_definition
+            and _IDENT_RE.match(first)
+            and not _NON_COLUMN_LINE_RE.match(line)
+        ):
+            out.append(first.rstrip(","))
+        starts_a_definition = line.rstrip().endswith(",")
     return out
 
 
