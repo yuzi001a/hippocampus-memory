@@ -176,7 +176,7 @@ What this does:
   `pgvector`, `pyyaml`, `numpy`, `requests`, `openai`, `jieba`,
   `pyahocorasick>=2.3.0`).
 - Installs `v3-hermes-plugin` from the wheel (declares
-  `v3-core>=4.0.1,<5.0.0`, `requests`, `pyyaml`).
+  `v3-core>=4.0.2,<5.0.0`, `requests`, `pyyaml`).
 - Installs two `v3-core` console scripts:
   - `v3-core` — preserved verbatim (e.g. `v3-core info`).
   - `hippocampus` — distribution-facing console (Gate 2). Provides

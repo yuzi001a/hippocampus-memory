@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "v3-core"
-version = "4.0.1"
+version = "4.0.2"
 description = "v3 memory core engine — PostgreSQL/pgvector source ingest and explicit-memory storage"
 readme = "README.md"
 requires-python = ">=3.10"

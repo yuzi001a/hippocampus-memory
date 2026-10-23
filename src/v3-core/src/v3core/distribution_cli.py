@@ -1246,20 +1246,19 @@ def _bootstrap(args: argparse.Namespace) -> int:
 # statement in upgrade_v0_2.sql.
 
 # Canonical additive objects the upgrade is expected to bring to an
-# existing install. The dry-run report keys off this list.
-_UPGRADE_REQUIRED_TABLES: tuple[str, ...] = (
-    "explicit_memories",
-    "schema_versions",
-    # M01 memory-correction relation sidecar. It is REQUIRED, not optional:
-    # a v0.2 install without public.memory_relations cannot serve any
-    # correction, and the canonical writer/reader report a truthful
-    # migration-required failure rather than a hidden fallback. The
-    # upgrade carries it through the same ALPHA_BOOTSTRAP_INCLUDE marker
-    # as every other canonical artifact.
-    "memory_relations",
-    # P0-C2: required for durable autonomous assistant-delivery recall.
-    "assistant_deliveries",
-)
+# existing install. Derived from the shipped DDL through
+# ``v3core.schema_contract`` — the same module the doctor, the health check and
+# the runtime write gate read — so this surface cannot describe a different
+# schema than the writer requires. (Before v0.4 this was a hand-written tuple
+# that had drifted: it omitted ``derived_memory_invalidations`` and
+# ``embedding_failures``.)
+try:
+    from . import schema_contract as _schema_contract  # noqa: E402
+except ImportError:  # loaded as a single file (packaging smoke, doctor self-check)
+    from v3core import schema_contract as _schema_contract  # noqa: E402,F401
+
+_UPGRADE_CONTRACT = _schema_contract.load_contract()
+_UPGRADE_REQUIRED_TABLES: tuple[str, ...] = _UPGRADE_CONTRACT.required_tables()
 # Optional tables the upgrade checks for but never adds directly. The
 # qa_embedding_chunks table is owned by child A; when child A's
 # artifact (v3core.schema.qa_embedding_chunks.sql) is packaged, the
@@ -1271,21 +1270,12 @@ _UPGRADE_OPTIONAL_TABLES: tuple[str, ...] = (
 )
 # Column-level requirements the dry-run diff emits so the operator can
 # see exactly what `bootstrap` would (re-)add via the same ALTER ADD
-# COLUMN IF NOT EXISTS guards.
-_UPGRADE_TABLE_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
-    "qa_pairs": (
-        "source_id", "turn_id", "source", "tool_calls", "tool_results",
-        "embed_model", "created_at",
-    ),
-    "topics": ("note_ref", "last_observer_ts", "embed_model"),
-    "topic_entries": ("source_qa_id", "embed_model"),
-    "observation_notes": ("embed_model",),
-    "yin_paragraphs": ("embed_model",),
-    "assistant_deliveries": (
-        "source_id", "host", "session_id", "trigger_event_id", "trigger_kind",
-        "content", "event_ids", "started_at", "created_at",
-    ),
-}
+# COLUMN IF NOT EXISTS guards. Contract-derived, never hand-maintained:
+# an omission here is how ``qa_pairs.merged_event_ids`` went unreported
+# while every production flush failed with 42703.
+_UPGRADE_TABLE_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = (
+    _UPGRADE_CONTRACT.required_columns()
+)
 
 
 def _package_optional_sql(name: str) -> tuple[bool, str | None, str | None]:
@@ -1369,6 +1359,55 @@ def _upgrade_required_column_diff(
         except Exception:  # noqa: BLE001
             pass
     return missing
+
+
+def _upgrade_schema_status(parsed: dict[str, Any]):
+    """Probe the target against the schema contract. Never raises.
+
+    An unprobeable target reports ``ready=False`` with the error, and never
+    ``write_blocked`` — the dry-run describes the database, it does not block
+    anything, and "could not look" must not read as "must not write".
+    """
+
+    def _unknown(reason: str):
+        return _schema_contract.SchemaStatus(
+            ready=False,
+            contract_version=_UPGRADE_CONTRACT.version,
+            missing_tables=(),
+            missing_columns={},
+            write_blocked=False,
+            blocked_write_columns={},
+            ledger_versions=(),
+            missing_ledger_versions=_UPGRADE_CONTRACT.ledger_versions,
+            ledger_table_present=False,
+            probe_error=reason,
+        )
+
+    try:
+        import psycopg2  # type: ignore
+    except ImportError:
+        return _unknown("psycopg2 unavailable")
+    password = parsed.get("password") or os.environ.get(
+        "V3CORE_PG_PASSWORD", ""
+    ) or os.environ.get("PGPASSWORD", "") or ""
+    try:
+        conn = psycopg2.connect(
+            host=parsed.get("host", ""),
+            port=int(parsed.get("port") or 0),
+            database=parsed.get("database", ""),
+            user=parsed.get("user", ""),
+            password=password or "",
+            connect_timeout=5,
+        )
+    except Exception as e:  # noqa: BLE001
+        return _unknown(f"{type(e).__name__}: {e}")
+    try:
+        return _schema_contract.probe(conn, contract=_UPGRADE_CONTRACT)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _upgrade_table_presence(parsed: dict[str, Any]) -> dict[str, bool]:
@@ -1757,6 +1796,9 @@ def _upgrade_build_plan(
             table_presence.get("memory_relations")
         ),
         "schema_versions_v0_2": _upgrade_schema_version_row(parsed),
+        # Contract-level verdict in the operator's own units: what a running
+        # install would need right now, not just what this upgrade would add.
+        "schema_contract": _upgrade_schema_status(parsed).as_dict(),
     }
     plan: dict[str, Any] = {
         "plan_version": 1,
@@ -1765,6 +1807,9 @@ def _upgrade_build_plan(
             if expected["schema_versions_rows"]
             else None
         ),
+        # The cumulative revision this upgrade brings the target to. Distinct
+        # from schema_upgrade_version (the artifact's legacy v0.2 marker).
+        "schema_contract_version": _UPGRADE_CONTRACT.version,
         "target": _normalize_plan_target(parsed),
         "distribution": {
             "name": "v3-core",
