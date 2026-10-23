@@ -352,7 +352,7 @@ def _apply_via_cli(old_install):
         ]
     )
     assert code == 0, applied
-    assert applied["applied"] is True
+    assert applied["result"]["applied"] is True, applied
     return 0
 
 
