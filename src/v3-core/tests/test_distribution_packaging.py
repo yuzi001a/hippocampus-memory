@@ -391,7 +391,7 @@ def test_v3_core_pyproject_declares_hippocampus_console_and_v3_core_pin():
     assert "schema/alpha_bootstrap.sql" in text
     assert "schema/explicit_memories.sql" in text
     # Version 4.0.2 — must match the Gate 0/1 frozen contract.
-    assert re.search(r'version\s*=\s*"4\.0\.1"', text)
+    assert re.search(r'version\s*=\s*"4\.0\.2"', text)
 
 
 def test_distributions_agree_on_version_and_core_floor():
