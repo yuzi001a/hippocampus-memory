@@ -367,14 +367,14 @@ def test_v3_hermes_plugin_pyproject_declares_entry_point_and_pin():
     # Frozen entry-point contract from Gate 0/1.
     assert '[project.entry-points."hermes_agent.memory_providers"]' in text
     assert 'deep_memory_v3 = "v3hermes:register"' in text
-    # v3-core dependency pin must be >=4.0.1,<5.0.0
+    # v3-core dependency pin must be >=4.0.2,<5.0.0
     import tomllib
 
     data = tomllib.loads(text)
     pin = next(
         dep for dep in data["project"]["dependencies"] if dep.startswith("v3-core")
     )
-    assert ">=4.0.1" in pin
+    assert ">=4.0.2" in pin
     assert "<5.0.0" in pin
     # package data must include plugin.yaml
     assert '"v3hermes"' in text
@@ -390,7 +390,7 @@ def test_v3_core_pyproject_declares_hippocampus_console_and_v3_core_pin():
     # Package data covers the SQL resources.
     assert "schema/alpha_bootstrap.sql" in text
     assert "schema/explicit_memories.sql" in text
-    # Version 4.0.1 — must match the Gate 0/1 frozen contract.
+    # Version 4.0.2 — must match the Gate 0/1 frozen contract.
     assert re.search(r'version\s*=\s*"4\.0\.1"', text)
 
 
@@ -422,7 +422,7 @@ def test_v3_core_pyproject_metadata_block_is_well_formed():
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     proj = data["project"]
     assert proj["name"] == "v3-core"
-    assert proj["version"] == "4.0.1"
+    assert proj["version"] == "4.0.2"
     assert "readme" in proj
     assert "classifiers" in proj and len(proj["classifiers"]) >= 3
     assert "urls" in proj
@@ -451,14 +451,14 @@ def test_v3_hermes_plugin_pyproject_metadata_block_is_well_formed():
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     proj = data["project"]
     assert proj["name"] == "v3-hermes-plugin"
-    assert proj["version"] == "4.0.1"
+    assert proj["version"] == "4.0.2"
     assert "classifiers" in proj
     assert "urls" in proj
     eps = proj["entry-points"]["hermes_agent.memory_providers"]
     assert eps["deep_memory_v3"] == "v3hermes:register"
     deps = proj["dependencies"]
     pin = next(d for d in deps if d.startswith("v3-core"))
-    assert ">=4.0.1" in pin
+    assert ">=4.0.2" in pin
     assert "<5.0.0" in pin
     pkg_data = data["tool"]["setuptools"]["package-data"]["v3hermes"]
     assert "plugin.yaml" in pkg_data

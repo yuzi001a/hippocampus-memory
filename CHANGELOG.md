@@ -7,6 +7,39 @@
 
 ---
 
+## [4.0.2] — one runtime schema contract, and an upgrade gate that cannot be bypassed
+
+> **Scope:** the 2026-10-19 existing-install compatibility incident. The engine
+> wrote a column the database never had; the diagnostics said everything was
+> fine. No recall/QA/observer behaviour changes.
+
+### Fixed
+- **One schema contract.** `v3core/schema_contract.py` derives tables, columns,
+  indexes and ledger versions from the packaged DDL, and the upgrader, `doctor`,
+  `health`, `v3_status` and the runtime write gate all read it. Before, each of
+  the four kept its own hand-written list; the writer's list had
+  `qa_pairs.merged_event_ids`, the doctor's and health's did not.
+- **The upgrade path can deliver what the writer needs.** `upgrade_v0_2.sql` now
+  adds `qa_pairs.chars`, includes `embedding_failures.sql`, and records `v0.4`
+  in the ledger only after the whole script commits.
+- **`doctor` fails on drift it used to call healthy.** A missing column or a
+  ledger behind the installed contract is `fail`, not `ok`.
+- **`health` checks columns, not just table names.** New `ST06_schema_columns`;
+  `ST03` compares against every required ledger version.
+- **The runtime refuses a write it cannot store — cheaply.** `_flush_pending_qa`
+  probes before embedding (no wasted provider call, no attempt-counter bump),
+  leaves the pending marker in place, and logs one actionable line instead of
+  126 identical `42703` errors.
+- **A structural quarantine is no longer terminal.** Markers poisoned by
+  `UndefinedColumn`/`UndefinedTable` are revived once the contract probes clean;
+  a missing column is our fault, not the user's data.
+
+### Not changed
+- Recall, prefetch, topic cards, observer notes, M03/M04 semantics and the tool
+  surface. The gate only blocks writes the database provably cannot accept.
+
+---
+
 ## [4.0.1] — MCP SDK demoted to an optional extra
 
 > **Scope:** one compatibility defect found while preparing Hippocampus for
