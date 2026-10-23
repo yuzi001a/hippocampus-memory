@@ -1252,7 +1252,10 @@ def _bootstrap(args: argparse.Namespace) -> int:
 # schema than the writer requires. (Before v0.4 this was a hand-written tuple
 # that had drifted: it omitted ``derived_memory_invalidations`` and
 # ``embedding_failures``.)
-from . import schema_contract as _schema_contract  # noqa: E402
+try:
+    from . import schema_contract as _schema_contract  # noqa: E402
+except ImportError:  # loaded as a single file (packaging smoke, doctor self-check)
+    from v3core import schema_contract as _schema_contract  # noqa: E402,F401
 
 _UPGRADE_CONTRACT = _schema_contract.load_contract()
 _UPGRADE_REQUIRED_TABLES: tuple[str, ...] = _UPGRADE_CONTRACT.required_tables()
