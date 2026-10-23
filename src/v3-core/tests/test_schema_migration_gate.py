@@ -272,8 +272,9 @@ def test_flush_does_not_spend_an_embedding_when_the_schema_is_blocked(tmp_path, 
     monkeypatch.setattr(core, "schema_status", lambda **kw: blocked)
 
     calls: list = []
+    import v3core.embedding as emb_mod
     monkeypatch.setattr(v3mod, "safe_embed_cfg", lambda cfg: {"model": "m", "endpoint": "e"})
-    monkeypatch.setattr(v3mod, "embed_batch", lambda *a, **k: calls.append(a) or [[0.1]])
+    monkeypatch.setattr(emb_mod, "embed_batch", lambda *a, **k: calls.append(a) or [[0.1]])
     monkeypatch.setattr(core, "_mark_qa_embedding_started",
                         lambda *a, **k: pytest.fail("must not touch the marker"))
 
