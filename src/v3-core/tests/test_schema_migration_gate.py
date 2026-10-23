@@ -49,6 +49,14 @@ class _Cur:
             self._rows = [(v,) for v in self._conn.ledger]
             return
         if "from information_schema.columns" in norm:
+            if params is None:
+                # health._missing_columns scans every table in one statement.
+                self._rows = [
+                    (table, column)
+                    for table, columns in self._conn.columns.items()
+                    for column in columns
+                ]
+                return
             table = params[0]
             self._rows = [(c,) for c in self._conn.columns.get(table, ())]
             return
