@@ -33,6 +33,17 @@ from urllib.parse import unquote, urlparse
 
 import pytest
 
+# Captured at import time: tests/conftest.py replaces psycopg2.connect with a
+# guard for the whole session, so the real symbol must be kept before that.
+try:
+    import psycopg2 as _psycopg2
+    _ORIGINAL_CONNECT = _psycopg2.connect
+except Exception:  # noqa: BLE001 - psycopg2 is a hard dep, but never mask it
+    _ORIGINAL_CONNECT = None
+if getattr(_ORIGINAL_CONNECT, "__name__", "") == "_blocked":
+    # Collected after another test module already triggered the guard.
+    _ORIGINAL_CONNECT = None
+
 DSN_ENV = "SCHEMA_CONTRACT_PG_DSN"
 DSN = os.environ.get(DSN_ENV, "")
 
@@ -72,9 +83,15 @@ _REJECTION = _rejection(DSN)
 
 
 def _real_connect(**kwargs):
-    """The C-level connect, bypassing the tests-wide psycopg2 guard."""
-    from psycopg2._psycopg import connect as _c_connect  # type: ignore
-    return _c_connect(**kwargs)
+    """The unpatched connect, bypassing the tests-wide psycopg2 guard."""
+    if _ORIGINAL_CONNECT is not None:
+        return _ORIGINAL_CONNECT(**kwargs)
+    try:
+        from psycopg2._psycopg import connect as _c_connect  # type: ignore
+        return _c_connect(**kwargs)
+    except ImportError:
+        from psycopg2._psycopg import _connect as _c_connect  # type: ignore
+        return _c_connect(kwargs)
 
 
 @pytest.fixture()
