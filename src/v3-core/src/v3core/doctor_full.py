@@ -53,6 +53,8 @@ from typing import Any, Callable
 
 import requests
 
+from . import schema_contract as _schema_contract
+
 logger = logging.getLogger("v3core.doctor_full")
 
 # Frozen check-id list — order is the contract.
@@ -649,30 +651,11 @@ def _check_schema_version(parsed_dsn: dict[str, Any] | None,
                     except Exception:  # noqa: BLE001
                         pass
                 if row:
-                    required_columns = {
-                        "qa_pairs": (
-                            "source_id", "session_id", "turn_id", "question",
-                            "answer", "tool_calls", "tool_results", "embedding",
-                            "embed_model", "created_at",
-                        ),
-                        "conversation_stream": ("embedding", "tool_calls", "tool_results"),
-                        "topics": ("note_ref", "last_observer_ts", "embed_model"),
-                        "topic_entries": ("source_qa_id", "embed_model"),
-                        "observation_notes": ("embed_model",),
-                        "yin_paragraphs": ("embed_model",),
-                        "explicit_memories": ("memory_id", "embedding", "embed_model"),
-                        "qa_embedding_chunks": (
-                            "qa_id", "chunk_index", "source_field", "source_start",
-                            "source_end", "source_sha256", "token_count",
-                            "representation_version", "content", "embedding",
-                            "embed_model",
-                        ),
-                        "assistant_deliveries": (
-                            "source_id", "host", "session_id", "trigger_event_id",
-                            "trigger_kind", "content", "event_ids", "started_at",
-                            "created_at",
-                        ),
-                    }
+                    # Contract-derived. This dict used to be hand-written and
+                    # omitted qa_pairs.merged_event_ids, so a database that was
+                    # missing the column the writer requires reported
+                    # "canonical columns present" — the production incident.
+                    required_columns = _schema_contract.load_contract().required_columns()
                     missing_columns: dict[str, list[str]] = {}
                     for table, columns in required_columns.items():
                         cur.execute(
@@ -985,17 +968,52 @@ def _check_migration_state(parsed_dsn: dict[str, Any] | None,
             with conn.cursor() as cur:
                 try:
                     cur.execute(
-                        "SELECT COUNT(*) FROM schema_versions"
+                        "SELECT version FROM schema_versions"
                     )
-                    n = cur.fetchone()
-                    n = int(n[0]) if n and n[0] is not None else 0
+                    present = {str(r[0]) for r in cur.fetchall()}
+                    contract = _schema_contract.load_contract()
+                    missing = [v for v in contract.ledger_versions if v not in present]
+                    if missing:
+                        # A ledger row is not proof of a current schema: the
+                        # production install carried v0.2 while every later
+                        # column was absent. A ledger that stops short of the
+                        # installed contract is a FAILED migration, not a
+                        # successful one.
+                        return {
+                            "id": "migration_state",
+                            "status": "fail",
+                            "detail": (
+                                "schema ledger is behind the installed contract "
+                                f"{contract.version}: missing "
+                                + ", ".join(missing)
+                                + ". Run `hippocampus upgrade --target <DSN> "
+                                  "--dry-run` and apply it on a non-production "
+                                  "target first."
+                            ),
+                            "evidence": {
+                                "applied": sorted(present),
+                                "required": list(contract.ledger_versions),
+                                "missing": missing,
+                            },
+                        }
                     return {
                         "id": "migration_state",
-                        "status": "ok" if n > 0 else "warn",
-                        "detail": f"schema_versions has {n} applied migration(s)",
-                        "evidence": {"applied_count": n},
+                        "status": "ok",
+                        "detail": (
+                            f"schema ledger at {contract.version} "
+                            f"({len(present)} applied migration(s))"
+                        ),
+                        "evidence": {
+                            "applied": sorted(present),
+                            "required": list(contract.ledger_versions),
+                            "applied_count": len(present),
+                        },
                     }
                 except Exception:  # noqa: BLE001
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
                     return {
                         "id": "migration_state",
                         "status": "warn",

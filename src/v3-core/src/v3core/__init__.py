@@ -19,6 +19,7 @@ from typing import Any, Optional
 import psycopg2
 
 from .config import resolve_config, _resolve_prompt
+from . import schema_contract as _schema_contract
 from .card_store import DeepStore
 from .pg_store import PgEmbedStore
 from .embedding import (
@@ -402,6 +403,12 @@ class V3Core:
         # Optional v1.4 anchor table capability.  ``None`` means unknown;
         # False is learned only from an explicit UndefinedTable/42P01 error.
         self._note_segments_available: bool | None = None
+        # Schema contract gate. ``(SchemaStatus, monotonic_ts)`` once probed.
+        # A blocked verdict is re-probed at most once a minute so an operator
+        # who applies the additive upgrade does not need a process restart;
+        # a healthy verdict is cached for the process lifetime.
+        self._schema_status_cache: tuple[Any, float] | None = None
+        self._schema_blocked_logged = False
         # Session-local state belongs to one lightweight context per session.
         self._session_contexts: dict[str, V3SessionContext] = {}
         self._active_session_id: str = ""
@@ -520,6 +527,41 @@ class V3Core:
             if callable(invalidate):
                 self._pg._on_topics_commit = invalidate
         return self._pg
+
+    # ── schema contract gate ──
+
+    def _schema_readiness(self, conn: Any, *, max_age: float = 60.0) -> Any:
+        """Probe (or reuse) the schema contract verdict for this connection.
+
+        Never raises: a probe failure must not stop writes that would work.
+        A healthy verdict is cached for the process lifetime; a blocked one is
+        re-probed at most once per ``max_age`` so applying the additive upgrade
+        unblocks a running process without a restart.
+        """
+        cached = getattr(self, "_schema_status_cache", None)
+        if cached is not None:
+            status, stamped = cached
+            if not status.write_blocked or (time.monotonic() - stamped) < max_age:
+                return status
+        status = _schema_contract.probe(conn)
+        self._schema_status_cache = (status, time.monotonic())
+        return status
+
+    def schema_status(self, *, refresh: bool = False) -> Any:
+        """Public, side-effect-free view of the schema verdict (or None)."""
+        if refresh:
+            self._schema_status_cache = None
+        cached = getattr(self, "_schema_status_cache", None)
+        if cached is not None and not refresh:
+            return cached[0]
+        try:
+            pg = self._pg or self.pg
+            with _lease_pg_store(pg) as conn:
+                if not conn:
+                    return None
+                return self._schema_readiness(conn, max_age=0)
+        except Exception:  # noqa: BLE001
+            return None
 
     @property
     def live_buffer(self) -> LiveBuffer:
@@ -4843,6 +4885,24 @@ class V3Core:
                     return
                 # fence re-check after lease acquired? if fenced, skip PG use
                 if self._is_core_fenced():
+                    return
+                # Schema gate: refuse to attempt an INSERT the database cannot
+                # accept. Without this the flush raises 42703 on every turn
+                # (the 2026-10-19 failure: 126 logged attempts, no row, no
+                # actionable message). The marker is retained, so the pending
+                # QA stays recoverable once the additive upgrade is applied.
+                schema_status = self._schema_readiness(conn)
+                if schema_status is not None and schema_status.write_blocked:
+                    if not self._schema_blocked_logged:
+                        logger.warning(
+                            "_flush_pending_qa blocked by schema gate: %s. "
+                            "Pending QA marker retained; no acknowledgment. "
+                            "Run `hippocampus upgrade --target <DSN> --dry-run` "
+                            "and apply the additive upgrade.",
+                            schema_status.summary(),
+                        )
+                        self._schema_blocked_logged = True
+                    should_ack = False
                     return
                 with conn.cursor() as cur:
                     emb_str = None

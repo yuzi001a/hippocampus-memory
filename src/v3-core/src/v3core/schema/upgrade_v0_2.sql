@@ -146,6 +146,12 @@ ALTER TABLE public.qa_pairs
     ADD COLUMN IF NOT EXISTS embed_model  TEXT NOT NULL DEFAULT '';
 ALTER TABLE public.qa_pairs
     ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW();
+-- Legacy observer row shape column. Nullable, never written by the live path,
+-- but the file-import writer (importers/qa_pairing.emit_qa_pairs) still names
+-- it in its INSERT — an install without it fails every import with 42703.
+-- Additive and nullable, so adding it to a populated table rewrites nothing.
+ALTER TABLE public.qa_pairs
+    ADD COLUMN IF NOT EXISTS chars        INTEGER;
 -- P0-A: per-QA membership ledger of assistant events already merged into the
 -- answer row (same DDL as alpha_bootstrap.sql). Existing rows default to an
 -- empty ledger.
@@ -194,6 +200,17 @@ CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
 
 -- -----------------------------------------------------------------------------
+-- embedding_failures — durable retry ledger for failed embedding writes.
+--
+-- This table is declared by alpha_bootstrap.sql but was missing from the
+-- upgrade path until v0.4: an existing install could never obtain it through
+-- the formal additive upgrade, so `hippocampus upgrade` reported success while
+-- the failure ledger stayed unbuildable. Same single-source marker as the other
+-- sidecars; additive and idempotent (CREATE TABLE / INDEX IF NOT EXISTS only).
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/embedding_failures.sql <<<
+
+-- -----------------------------------------------------------------------------
 -- assistant_deliveries — P0-C2 autonomous/async assistant delivery (derived).
 --
 -- Same single-source-of-truth pattern as the other sidecars: the marker below
@@ -203,6 +220,21 @@ CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
 -- and are left untouched — no backfill, no data rewrite.
 -- -----------------------------------------------------------------------------
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/assistant_deliveries.sql <<<
+
+-- -----------------------------------------------------------------------------
+-- v0.4 — the cumulative schema revision this upgrade brings an existing
+-- install to. Recorded LAST, inside the same transaction, so the row can only
+-- exist if every statement above committed.
+--
+-- Why a new row instead of relying on v0.2: v0.2 does not describe the columns
+-- and tables added after 2026-09-18 (merged_event_ids, the F2 identity
+-- columns, note_ref/last_observer_ts, the sidecars). An install that carries
+-- only v0.2 is NOT current, and the doctor now says so instead of treating any
+-- ledger row as proof of a healthy schema.
+-- -----------------------------------------------------------------------------
+INSERT INTO public.schema_versions (version, description)
+VALUES ('v0.4', 'cumulative existing-install contract: P0-A merged_event_ids + F2 identity columns + qa_pairs.chars + memory_relations/derived_memory_invalidations/assistant_deliveries/embedding_failures sidecars')
+ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
 

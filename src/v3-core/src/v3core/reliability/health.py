@@ -38,6 +38,7 @@ from .failure_reader import (
     STATUS_STALE_PENDING_DB,
     STATUS_UNRESOLVED,
 )
+from .. import schema_contract as _schema_contract
 from .models import (
     CheckResult,
     HealthReport,
@@ -60,17 +61,15 @@ HEALTH_WINDOW_HOURS_DEFAULT = 24
 STALE_MARKER_HOURS = 48
 AUTH_TIMEOUT_SECONDS = 10
 
-CANONICAL_TABLES: tuple[str, ...] = (
-    "conversation_stream", "qa_pairs", "topics", "topic_entries",
-    "observation_notes", "yin_paragraphs", "explicit_memories",
-    "qa_embedding_chunks", "schema_versions",
-)
+CANONICAL_TABLES: tuple[str, ...] = _schema_contract.load_contract().required_tables()
 CANONICAL_INDEXES: tuple[str, ...] = (
     "explicit_memories_embedding_ivfflat", "explicit_memories_status_active_idx",
     "explicit_memories_created_at_idx", "explicit_memories_tags_gin",
     "qa_embedding_chunks_qa_id_idx", "qa_embedding_chunks_embedding_ivfflat",
 )
-EXPECTED_SCHEMA_VERSION = "v0.2"
+#: The ledger revision the installed code expects. Structure is still checked
+#: independently (ST04/ST06): a ledger row alone never makes a schema healthy.
+EXPECTED_SCHEMA_VERSION = _schema_contract.CONTRACT_VERSION
 
 # Provider error classes — kept as a module constant so diagnose / repair
 # can import the same names.
@@ -790,21 +789,35 @@ class HealthService:
                 evidence={"present": True, "version": st02}, duration_ms=0,
             ))
 
-        # ST03 schema_ledger — does the v0.2 row exist?
-        v02_present = _has_schema_version_row(conn, EXPECTED_SCHEMA_VERSION)
-        if v02_present:
+        # ST03 schema_ledger — does the ledger reach the installed contract?
+        # A single v0.2 row is NOT enough: the 2026-10-19 incident had exactly
+        # that row on a database missing every later column.
+        contract = _schema_contract.load_contract()
+        present_versions = [
+            v for v in contract.ledger_versions if _has_schema_version_row(conn, v)
+        ]
+        missing_versions = [
+            v for v in contract.ledger_versions if v not in present_versions
+        ]
+        if not missing_versions:
             checks.append(CheckResult(
                 check_id="ST03_schema_ledger", section="storage",
-                status=STATUS_OK, summary=f"schema_versions row '{EXPECTED_SCHEMA_VERSION}' present",
-                evidence={"expected_version": EXPECTED_SCHEMA_VERSION, "present": True},
+                status=STATUS_OK, summary=f"schema ledger at {contract.version}",
+                evidence={"expected_version": contract.version,
+                          "applied": present_versions, "present": True},
                 duration_ms=0,
             ))
         else:
             checks.append(CheckResult(
                 check_id="ST03_schema_ledger", section="storage",
                 status=STATUS_FAIL,
-                summary=f"schema_versions row '{EXPECTED_SCHEMA_VERSION}' missing",
-                evidence={"expected_version": EXPECTED_SCHEMA_VERSION, "present": False},
+                summary=(
+                    f"schema ledger behind {contract.version}: missing "
+                    + ", ".join(missing_versions)
+                ),
+                evidence={"expected_version": contract.version,
+                          "applied": present_versions,
+                          "missing": missing_versions, "present": False},
                 duration_ms=0,
             ))
 
@@ -849,6 +862,40 @@ class HealthService:
             "missing_tables": list(missing),
             "missing_indexes": list(missing_idx),
         }
+
+        # ST06 schema contract columns — the check whose absence let the
+        # 2026-10-19 incident through: every table was present and the ledger
+        # said v0.2, while qa_pairs lacked the column every INSERT names.
+        missing_cols = _missing_columns(conn, contract.required_columns())
+        if not missing_cols:
+            checks.append(CheckResult(
+                check_id="ST06_schema_columns", section="storage",
+                status=STATUS_OK,
+                summary=(
+                    f"all required columns present for contract "
+                    f"{contract.version}"
+                ),
+                evidence={"missing": {}, "contract_version": contract.version},
+                duration_ms=0,
+            ))
+        else:
+            flat = "; ".join(
+                f"{t}.{c}" for t, cols in sorted(missing_cols.items()) for c in cols
+            )
+            checks.append(CheckResult(
+                check_id="ST06_schema_columns", section="storage",
+                status=STATUS_FAIL,
+                summary=f"missing required columns: {flat}",
+                evidence={
+                    "missing": {t: list(c) for t, c in missing_cols.items()},
+                    "contract_version": contract.version,
+                    "upgrade_command": "hippocampus upgrade --target <DSN> --dry-run",
+                },
+                duration_ms=0,
+            ))
+            sections["storage"]["missing_columns"] = {
+                t: list(c) for t, c in missing_cols.items()
+            }
 
     def _collect_memory_write(
         self,
@@ -1568,6 +1615,44 @@ def _missing_tables(conn: Any, names: tuple[str, ...]) -> list[str]:
         if not present:
             missing.append(n)
     return missing
+
+
+def _missing_columns(
+    conn: Any, required: Mapping[str, tuple[str, ...]]
+) -> dict[str, list[str]]:
+    """Return {table: [missing columns]} for the contract's required columns.
+
+    One information_schema scan for every table, not one query per column: the
+    health check runs against a live database with a statement timeout.
+    A table that does not exist is reported as missing all of its columns here;
+    ST04 already reports the table gap, so this stays additive.
+    """
+    observed: dict[str, set[str]] = {}
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public'"
+            )
+            for table_name, column_name in cur.fetchall():
+                observed.setdefault(table_name, set()).add(column_name)
+        finally:
+            close = getattr(cur, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+    except Exception:
+        return {t: list(cols) for t, cols in required.items()}
+    out: dict[str, list[str]] = {}
+    for table, cols in required.items():
+        present = observed.get(table, set())
+        gap = [c for c in cols if c not in present]
+        if gap:
+            out[table] = gap
+    return out
 
 
 def _missing_indexes(conn: Any, names: tuple[str, ...]) -> list[str]:
