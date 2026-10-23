@@ -106,6 +106,9 @@ def old_install(monkeypatch):
     conn = _real_connect(
         host=parsed["host"], port=parsed["port"], dbname=parsed["database"],
         user=parsed["user"], password=parsed["password"], connect_timeout=5,
+        # Fail fast rather than hang if some other connection still holds a
+        # lock on the fixture schema.
+        options="-c lock_timeout=8000 -c statement_timeout=60000",
     )
     with conn.cursor() as cur:
         cur.execute("SELECT current_database()")
@@ -141,7 +144,8 @@ def old_install(monkeypatch):
             "INSERT INTO public.topics (topic_id, title, summary, body) "
             "VALUES ('t_old', '旧主题', '摘要', '正文')"
         )
-    conn.autocommit = False
+    # Stays in autocommit: an idle read transaction here would hold ACCESS
+    # SHARE on the fixture tables and deadlock the upgrade's ALTER TABLE.
 
     # The tests-wide guard blocks psycopg2.connect; every consumer
     # (schema_contract.probe via doctor / upgrade / health) goes through it.
@@ -280,13 +284,11 @@ def test_only_merged_event_ids_missing_blocks_writes(old_install):
     from v3core import schema_contract as sc
 
     conn = old_install["conn"]
-    conn.autocommit = True
+    # Bring the install to the full contract first, then remove exactly one
+    # write-critical column — the narrowest possible production shape.
+    assert _apply_via_cli(old_install) == 0
     with conn.cursor() as cur:
-        # Bring the install to full contract first, then remove exactly one
-        # write-critical column — the narrowest possible production shape.
-        assert _apply_via_cli(old_install) == 0
         cur.execute("ALTER TABLE public.qa_pairs DROP COLUMN merged_event_ids")
-    conn.autocommit = False
 
     status = _probe(conn)
     assert not status.ready
