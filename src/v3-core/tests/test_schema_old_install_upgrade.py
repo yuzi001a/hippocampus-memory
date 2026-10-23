@@ -344,7 +344,10 @@ def _apply_via_cli(old_install):
     sha = plan["plan_sha256"]
 
     code, applied = _run_cli(
-        ["upgrade", "--target", dsn, "--apply", "--confirm-plan-sha", sha]
+        [
+            "upgrade", "--target", dsn, "--apply",
+            "--allow-production-write", "--confirm-plan-sha", sha,
+        ]
     )
     assert code == 0, applied
     assert applied["applied"] is True
