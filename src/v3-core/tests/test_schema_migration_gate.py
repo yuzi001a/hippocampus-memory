@@ -263,6 +263,27 @@ def test_flush_is_blocked_and_the_marker_is_kept(tmp_path, monkeypatch):
     assert pending["q"] == "项目代号是什么"
 
 
+def test_flush_does_not_spend_an_embedding_when_the_schema_is_blocked(tmp_path, monkeypatch):
+    """A doomed INSERT must not cost an embedding call or an attempt count."""
+    import v3core as v3mod
+
+    core = _make_core(tmp_path)
+    blocked = _blocked_status()
+    monkeypatch.setattr(core, "schema_status", lambda **kw: blocked)
+
+    calls: list = []
+    monkeypatch.setattr(v3mod, "safe_embed_cfg", lambda cfg: {"model": "m", "endpoint": "e"})
+    monkeypatch.setattr(v3mod, "embed_batch", lambda *a, **k: calls.append(a) or [[0.1]])
+    monkeypatch.setattr(core, "_mark_qa_embedding_started",
+                        lambda *a, **k: pytest.fail("must not touch the marker"))
+
+    pending = {"q": "项目代号", "a": "北极星", "q_turn": "T1", "q_msg_id": "m1",
+               "q_ts": "2026-10-23T10:00:00+08:00"}
+    core._flush_pending_qa("sess-early", pending)
+
+    assert calls == [], "no embedding request may be sent for a row we cannot store"
+
+
 def test_gate_caches_a_healthy_verdict_and_reprobes_a_blocked_one(monkeypatch):
     core = _make_core(None)
     calls: list[int] = []
@@ -297,3 +318,107 @@ def test_gate_caches_a_healthy_verdict_and_reprobes_a_blocked_one(monkeypatch):
     third = core._schema_readiness(object(), max_age=60)
     assert third.ready
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# quarantined markers: a missing column is our fault, not the user's
+# ---------------------------------------------------------------------------
+def _blocked_status() -> "sc.SchemaStatus":
+    return sc.SchemaStatus(
+        ready=False, contract_version=sc.CONTRACT_VERSION, missing_tables=(),
+        missing_columns={"qa_pairs": ("merged_event_ids",)},
+        write_blocked=True,
+        blocked_write_columns={"qa_pairs": ("merged_event_ids",)},
+        ledger_versions=("v0.2",), missing_ledger_versions=("v0.3", "v0.4"),
+        ledger_table_present=True,
+    )
+
+
+def _ready_status() -> "sc.SchemaStatus":
+    return sc.SchemaStatus(
+        ready=True, contract_version=sc.CONTRACT_VERSION, missing_tables=(),
+        missing_columns={}, write_blocked=False, blocked_write_columns={},
+        ledger_versions=sc.LEDGER_REQUIRED_VERSIONS, missing_ledger_versions=(),
+        ledger_table_present=True,
+    )
+
+
+def _write_marker(tmp_path, *, error_type: str, status: str = "poisoned",
+                  attempts: int = 3) -> "object":
+    import json
+
+    d = tmp_path / "j" / "pending_qa"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "marker.json"
+    payload = {
+        "version": 1, "job_id": "job-1", "session_id": "sess-q",
+        "pending": {"q": "项目代号是什么", "a": "北极星", "q_turn": "T1",
+                    "q_msg_id": "m1", "q_ts": "2026-10-23T10:00:00+08:00"},
+        "embedding_status": status, "embedding_attempts": attempts,
+        "retryable": True, "error_type": error_type,
+        "error_class": "db_write_failure", "error_phase": "db_write",
+        "failure_count": 2,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _core_with_dir(tmp_path):
+    from v3core import V3Core
+
+    core = V3Core(profile="default")
+    core._config = {"basePath": str(tmp_path)}
+    core._pg = RecordingPg()
+    # The recovery path starts a worker; keep it from doing real work here.
+    core._flush_worker_loop = lambda: None
+    core._flush_queue = __import__("queue").Queue()
+    return core
+
+
+def test_a_structural_poison_is_revived_once_the_schema_is_repaired(tmp_path, monkeypatch):
+    import json
+
+    core = _core_with_dir(tmp_path)
+    path = _write_marker(tmp_path, error_type="UndefinedColumn")
+    monkeypatch.setattr(core, "schema_status", lambda **kw: _ready_status())
+
+    core._recover_pending_qa()
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["embedding_status"] == "failed", "the poison must be cleared"
+    assert data["embedding_attempts"] == 0
+    assert data["embedding_next_retry_at"] is None
+    assert data["revived_from_error_type"] == "UndefinedColumn"
+    assert data["revived_at"]
+    # History is kept: we do not rewrite what happened.
+    assert data["error_type"] == "UndefinedColumn"
+    assert data["failure_count"] == 2
+
+
+def test_a_structural_poison_is_not_revived_while_the_schema_still_blocks(tmp_path, monkeypatch):
+    import json
+
+    core = _core_with_dir(tmp_path)
+    path = _write_marker(tmp_path, error_type="UndefinedTable")
+    monkeypatch.setattr(core, "schema_status", lambda **kw: _blocked_status())
+
+    core._recover_pending_qa()
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["embedding_status"] == "poisoned"
+    assert data["embedding_attempts"] == 3
+    assert "revived_at" not in data
+
+
+def test_a_non_structural_poison_stays_quarantined_even_when_the_schema_is_healthy(tmp_path, monkeypatch):
+    import json
+
+    core = _core_with_dir(tmp_path)
+    path = _write_marker(tmp_path, error_type="DataError")
+    monkeypatch.setattr(core, "schema_status", lambda **kw: _ready_status())
+
+    core._recover_pending_qa()
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["embedding_status"] == "poisoned"
+    assert "revived_at" not in data
