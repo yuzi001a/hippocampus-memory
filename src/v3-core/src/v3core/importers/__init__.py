@@ -115,6 +115,7 @@ class ImportStats:
     # I01 additive counters:
     identity_derived: int = 0  # event_id generated as 'derived:…'
     qa_pairs_derived: int = 0  # qa_pairs rows derived from raw history
+    nul_sanitized: int = 0  # rows whose text contained NUL (0x00) and was cleaned
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -192,6 +193,20 @@ class Importer(abc.ABC):
 
 
 _NUMBER_RE = re.compile(r"-?\d")
+
+
+def sanitize_nul(text: str) -> tuple[str, int]:
+    """PostgreSQL ``text`` cannot store NUL (0x00).
+
+    A single NUL byte in a session body makes the whole INSERT fail — with
+    the batched writer that means an entire 500-row batch (and its QA
+    pairs) is rolled back. Stripping the byte keeps the remaining text
+    verbatim and makes the loss visible through ``stats.nul_sanitized``
+    instead of turning into a silent gap.
+    """
+    if not text or "\x00" not in text:
+        return text, 0
+    return text.replace("\x00", ""), 1
 
 
 def _to_iso8601(value: Any) -> str | None:
@@ -352,6 +367,11 @@ def _emit_raw_messages(
     Connection contract: ``pool`` is any object that yields an object with
     ``.cursor()``, ``.commit()``, and ``.close()`` (a real PgPool lease, or
     a hermetic fake — same surface as v3core.pg_pool.PgPool.lease()).
+
+    This is the per-row-commit path kept for the legacy single-source
+    import. Full-history rebuilds use ``_emit_raw_messages_bulk`` (one
+    lease + one commit per batch) so a 10^5-10^6 row corpus does not pay a
+    transaction per message.
     """
     sessions_seen: set[str] = set()
     oldest_ts: str | None = None
@@ -362,6 +382,8 @@ def _emit_raw_messages(
             continue
         if not it.text:
             continue
+        text, nul = sanitize_nul(it.text)
+        stats.nul_sanitized += nul
         ts = _to_iso8601(it.occurred_at)
         if ts:
             oldest_ts = ts if oldest_ts is None or ts < oldest_ts else oldest_ts
@@ -398,7 +420,7 @@ def _emit_raw_messages(
                 cur.execute(
                     _RAW_DEDUPE_SQL_F2,
                     (
-                        sess, role, it.text, turn_id, ts, source_tag,
+                        sess, role, text, turn_id, ts, source_tag,
                         tool_calls, tool_results, host, event_id,
                         host, sess, event_id,
                     ),
@@ -407,7 +429,7 @@ def _emit_raw_messages(
                 cur.execute(
                     _RAW_DEDUPE_SQL,
                     (
-                        sess, role, it.text, turn_id, ts, source_tag,
+                        sess, role, text, turn_id, ts, source_tag,
                         tool_calls, tool_results,
                         sess, role, ts,
                     ),
@@ -415,7 +437,7 @@ def _emit_raw_messages(
             else:
                 cur.execute(
                     _RAW_DEDUPE_SQL_NO_TS,
-                    (sess, role, it.text, turn_id, source_tag,
+                    (sess, role, text, turn_id, source_tag,
                      tool_calls, tool_results),
                 )
             inserted = bool(getattr(cur, "rowcount", 0))
@@ -436,6 +458,137 @@ def _emit_raw_messages(
                 lease.close()
             except Exception:
                 pass
+
+    stats.sessions = max(stats.sessions, len(sessions_seen))
+    if oldest_ts is not None:
+        stats.oldest = oldest_ts
+    if newest_ts is not None:
+        stats.newest = newest_ts
+
+
+def _raw_params(it: ImportItem, *, idx: int, source_tag: str):
+    """Build the bound parameters for one raw item (shared by both writers)."""
+    ts = _to_iso8601(it.occurred_at)
+    role = (it.role or "").strip()
+    sess = (it.source_ref or "").strip() or "imported"
+    prov = it.provenance or {}
+    tool_calls = "[]"
+    tool_results = "[]"
+    if isinstance(prov.get("tool_calls"), (list, dict)):
+        tool_calls = json.dumps(prov["tool_calls"], ensure_ascii=False)
+    if isinstance(prov.get("tool_results"), (list, dict)):
+        tool_results = json.dumps(prov["tool_results"], ensure_ascii=False)
+    turn_id = prov.get("turn_id")
+    try:
+        turn_id = int(turn_id) if turn_id is not None else None
+    except (TypeError, ValueError):
+        turn_id = None
+    host = (it.host or "").strip() or None
+    event_id = (it.event_id or "").strip() or None
+    derived = False
+    if host and not event_id:
+        event_id = f"derived:{host}:{sess}:{idx}"
+        derived = True
+    return {
+        "ts": ts,
+        "role": role,
+        "sess": sess,
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "turn_id": turn_id,
+        "host": host,
+        "event_id": event_id,
+        "derived": derived,
+        "source_tag": source_tag,
+    }
+
+
+def _emit_raw_messages_bulk(
+    *,
+    pool: Any,
+    items: list[ImportItem],
+    source_tag: str,
+    stats: ImportStats,
+    batch_size: int = 500,
+) -> None:
+    """Batched F2-identity raw writer (one lease + one commit per batch).
+
+    Semantics are identical to ``_emit_raw_messages`` — same dedupe
+    predicate, same counters — but a full-history rebuild no longer pays a
+    transaction per message. A failing batch is rolled back as a unit and
+    every item in it is recorded in ``stats.errors`` (never silently lost).
+    """
+    sessions_seen: set[str] = set()
+    oldest_ts: str | None = None
+    newest_ts: str | None = None
+    batch: list[ImportItem] = []
+
+    def _flush(chunk: list[ImportItem]) -> None:
+        nonlocal oldest_ts, newest_ts
+        if not chunk:
+            return
+        lease = pool.lease(timeout=10.0)
+        try:
+            cur = lease.connection.cursor()
+            inserted_total = 0
+            for offset, it in enumerate(chunk):
+                idx = offset + 1
+                p = _raw_params(it, idx=idx, source_tag=source_tag)
+                text, nul = sanitize_nul(it.text)
+                stats.nul_sanitized += nul
+                if p["ts"]:
+                    oldest_ts = p["ts"] if oldest_ts is None or p["ts"] < oldest_ts else oldest_ts
+                    newest_ts = p["ts"] if newest_ts is None or p["ts"] > newest_ts else newest_ts
+                sessions_seen.add(p["sess"])
+                if p["derived"]:
+                    stats.identity_derived += 1
+                if p["host"] and p["event_id"]:
+                    cur.execute(
+                        _RAW_DEDUPE_SQL_F2,
+                        (p["sess"], p["role"], text, p["turn_id"], p["ts"], source_tag,
+                         p["tool_calls"], p["tool_results"], p["host"], p["event_id"],
+                         p["host"], p["sess"], p["event_id"]),
+                    )
+                elif p["ts"]:
+                    cur.execute(
+                        _RAW_DEDUPE_SQL,
+                        (p["sess"], p["role"], text, p["turn_id"], p["ts"], source_tag,
+                         p["tool_calls"], p["tool_results"], p["sess"], p["role"], p["ts"]),
+                    )
+                else:
+                    cur.execute(
+                        _RAW_DEDUPE_SQL_NO_TS,
+                        (p["sess"], p["role"], text, p["turn_id"], source_tag,
+                         p["tool_calls"], p["tool_results"]),
+                    )
+                inserted_total += 1 if getattr(cur, "rowcount", 0) else 0
+            lease.connection.commit()
+            stats.raw_messages += inserted_total
+            stats.deduped += len(chunk) - inserted_total
+        except Exception as exc:
+            try:
+                lease.connection.rollback()
+            except Exception:
+                pass
+            stats.skipped += len(chunk)
+            first = chunk[0]
+            stats.errors.append(
+                f"raw batch failed ({len(chunk)} items, first {first.source_ref}/{first.role}): {exc!r}"
+            )
+        finally:
+            try:
+                lease.close()
+            except Exception:
+                pass
+
+    for it in items:
+        if it.kind != KIND_RAW or not it.text:
+            continue
+        batch.append(it)
+        if len(batch) >= batch_size:
+            _flush(batch)
+            batch = []
+    _flush(batch)
 
     stats.sessions = max(stats.sessions, len(sessions_seen))
     if oldest_ts is not None:

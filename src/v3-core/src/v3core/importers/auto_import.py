@@ -23,13 +23,8 @@ from pathlib import Path
 from typing import Mapping
 
 from . import (
-    KIND_CURATED,
-    KIND_LEGACY,
     KIND_RAW,
     _current_pool,
-    _emit_curated_or_legacy,
-    _emit_raw_messages,
-    _resolve_writer,
     get_importer,
 )
 from . import discovery as _discovery
@@ -55,6 +50,8 @@ def import_auto(
     platform: str | None = None,
     dry_run: bool = False,
     profile_dir: Path | None = None,
+    batch_size: int = 500,
+    on_session=None,
     out=None,
 ) -> dict:
     """Run discovery + import for every requested host. Returns the report."""
@@ -86,7 +83,15 @@ def import_auto(
             requested, overrides=overrides, env=env, platform=platform
         )
         for src in detected:
-            sources.append(_process_source(src, pool=pool, dry_run=dry_run))
+            sources.append(
+                _process_source(
+                    src,
+                    pool=pool,
+                    dry_run=dry_run,
+                    batch_size=batch_size,
+                    on_session=on_session,
+                )
+            )
 
     totals = _totals(sources)
     duration = round(time.monotonic() - started, 3)
@@ -130,7 +135,7 @@ def import_auto(
 # ── per-source pipeline ───────────────────────────────────────────────
 
 
-def _process_source(src, *, pool, dry_run: bool) -> dict:
+def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_session=None) -> dict:
     entry: dict = {
         "host": src.host,
         "root": str(src.root) if src.root is not None else None,
@@ -152,6 +157,7 @@ def _process_source(src, *, pool, dry_run: bool) -> dict:
         "newest": src.newest,
         "recall_ready": False,
         "errors": [],
+        "reopened_sessions": 0,
     }
 
     if not src.found:
@@ -160,69 +166,99 @@ def _process_source(src, *, pool, dry_run: bool) -> dict:
     imp = get_importer(src.host)
     imp.reset_excluded_counts()
 
-    parsed = []
+    from . import qa_pairing as _qa
+
+    stats = _Stats()
+    pending: dict[str, list] = {}
+    order: list[str] = []
+    reopened = 0
+    seen_sessions: set[str] = set()
+    items_seen = 0
+    pairs_seen = 0
+    # A rebuild must not hold the whole corpus in memory. At most
+    # ``max_open_sessions`` sessions stay buffered; a session is only
+    # buffered until it has been flushed once, so the working set is one
+    # (or a few interleaved) session(s), not 10^5-10^6 messages.
+    max_open_sessions = 3
+
+    def _flush_session(sid: str) -> None:
+        nonlocal pairs_seen
+        items = pending.pop(sid, [])
+        if not items:
+            return
+        pairs = _qa.pair_items(items)
+        pairs_seen += len(pairs)
+        if not dry_run:
+            from . import _emit_raw_messages_bulk
+
+            _emit_raw_messages_bulk(
+                pool=pool,
+                items=items,
+                source_tag=f"import:{imp.name}",
+                stats=stats,
+                batch_size=batch_size,
+            )
+            if pairs:
+                _qa.emit_qa_pairs_bulk(
+                    pool=pool, pairs=pairs, stats=stats, batch_size=batch_size
+                )
+        if on_session is not None:
+            try:
+                on_session(sid, len(items), len(pairs))
+            except Exception:  # progress callbacks never break an import
+                pass
+
     for artifact in src.artifacts:
         try:
-            for item in imp.parse(artifact):
-                parsed.append(item)
+            for it in imp.parse(artifact):
+                if it.kind != KIND_RAW:
+                    continue
+                if not (it.text or "").strip():
+                    continue
+                sid = (it.source_ref or "").strip() or "imported"
+                items_seen += 1
+                if sid not in pending:
+                    if sid in seen_sessions:
+                        reopened += 1
+                    seen_sessions.add(sid)
+                    while len(pending) >= max_open_sessions and order:
+                        _flush_session(order.pop(0))
+                    pending[sid] = []
+                    order.append(sid)
+                pending[sid].append(it)
         except Exception as exc:
             entry["errors"].append(f"{artifact.name}: {exc!r}")
 
-    raw_items = [it for it in parsed if it.kind == KIND_RAW and (it.text or "").strip()]
-    curated_items = [it for it in parsed if it.kind in (KIND_CURATED, KIND_LEGACY)]
+    for sid in list(order):
+        _flush_session(sid)
 
-    entry["messages"] = len(raw_items)
+    entry["reopened_sessions"] = reopened
+    if reopened:
+        # A session that shows up again after being flushed can only mean the
+        # source is not session-contiguous; its QA pairs may be incomplete.
+        # Surface it as an error instead of letting the count shrink silently.
+        entry["errors"].append(
+            f"{reopened} session(s) reappeared after flush — QA pairs for those "
+            "sessions may be incomplete (source not session-contiguous)"
+        )
+    entry["messages"] = items_seen
     entry["skipped"] = dict(imp.excluded_counts)
     entry["unsupported_skipped"] = sum(imp.excluded_counts.values())
 
-    # deterministic recall-ready derivation (no LLM — §9/§10)
-    from . import qa_pairing as _qa
-
-    pairs = _qa.pair_items(raw_items)
-
-    # oldest/newest from raw items when discovery could not fill them
-    occurred = [it.occurred_at for it in raw_items if it.occurred_at]
-    if occurred:
-        entry["oldest"] = entry["oldest"] or min(occurred)
-        entry["newest"] = entry["newest"] or max(occurred)
-
+    entry["qa_pairs_derived"] = pairs_seen if dry_run else stats.qa_pairs_derived
     if dry_run:
-        entry["qa_pairs_derived"] = len(pairs)
-        entry["recall_ready"] = bool(raw_items) and bool(pairs)
+        entry["recall_ready"] = bool(items_seen) and bool(pairs_seen)
         return entry
 
-    # ── live writes ────────────────────────────────────────────────────
-    stats = _Stats()
-    if raw_items:
-        _emit_raw_messages(
-            pool=pool,
-            items=raw_items,
-            source_tag=f"import:{imp.name}",
-            stats=stats,
-        )
-        if pairs:
-            _qa.emit_qa_pairs(pool=pool, pairs=pairs, stats=stats)
-        for e in stats.errors:
-            entry["errors"].append(e)
-
-    if curated_items:
-        writer = _resolve_writer(pool=pool)
-        if writer is not None:
-            _emit_curated_or_legacy(
-                writer=writer,
-                items=curated_items,
-                imported_at=_now_iso(),
-                stats=stats,
-            )
-        else:
-            entry["errors"].append(
-                "curated write skipped: explicit-memory writer unavailable"
-            )
-
     entry["raw_imported"] = stats.raw_messages
-    entry["qa_pairs_derived"] = stats.qa_pairs_derived
     entry["duplicates_skipped"] = stats.deduped
-    entry["user_curated_imported"] = stats.user_curated + stats.legacy_derived
+    entry["nul_sanitized"] = stats.nul_sanitized
+    entry["user_curated_imported"] = 0
+    for e in stats.errors:
+        entry["errors"].append(e)
+
+    entry["oldest"] = stats.oldest or entry["oldest"]
+    entry["newest"] = stats.newest or entry["newest"]
     entry["recall_ready"] = stats.raw_messages > 0 and stats.qa_pairs_derived > 0
     return entry
 
@@ -243,6 +279,7 @@ class _Stats:
         self.dry_run = False
         self.identity_derived = 0
         self.qa_pairs_derived = 0
+        self.nul_sanitized = 0
         self.errors: list[str] = []
 
 

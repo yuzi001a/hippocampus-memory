@@ -116,6 +116,13 @@ def _pair_session(
     return out
 
 
+def _clean_nul(text: str) -> tuple[str, int]:
+    """Strip NUL (0x00) — PostgreSQL text cannot store it (see v3core.importers.sanitize_nul)."""
+    if not text or "\x00" not in text:
+        return text, 0
+    return text.replace("\x00", ""), 1
+
+
 def emit_qa_pairs(*, pool, pairs: list[QAPair], stats, source_tag: str = "import") -> None:
     """Write QA pairs with ``qa_pairs.source_id`` idempotency.
 
@@ -139,15 +146,19 @@ def emit_qa_pairs(*, pool, pairs: list[QAPair], stats, source_tag: str = "import
         lease = pool.lease(timeout=5.0)
         try:
             cur = lease.connection.cursor()
+            q, qn = _clean_nul(pair.question)
+            a, an = _clean_nul(pair.answer)
+            if qn or an:
+                stats.nul_sanitized += 1
             cur.execute(
                 sql,
                 (
                     pair.source_id,
                     pair.session_id,
                     pair.turn_id,
-                    pair.question,
-                    pair.answer,
-                    len(pair.question) + len(pair.answer),
+                    q,
+                    a,
+                    len(q) + len(a),
                     _iso_or_none(pair.occurred_at),
                     source_tag,
                     pair.source_id,
@@ -179,4 +190,71 @@ def _iso_or_none(value: str | None):
     return value
 
 
-__all__ = ["QAPair", "pair_items", "emit_qa_pairs", "QA_SOURCE_PREFIX"]
+_QA_INSERT_SQL = """
+        INSERT INTO public.qa_pairs
+            (source_id, session_id, turn_id, question, answer, chars, timestamp,
+             source, tool_calls, tool_results)
+        SELECT %s, %s, %s, %s, %s, %s, COALESCE(%s::timestamptz, NOW()), %s,
+               '[]'::jsonb, '[]'::jsonb
+        WHERE NOT EXISTS (
+            SELECT 1 FROM public.qa_pairs WHERE source_id = %s
+        )
+    """
+
+
+def emit_qa_pairs_bulk(*, pool, pairs: list[QAPair], stats, source_tag: str = "import",
+                       batch_size: int = 500) -> None:
+    """Batched QA writer — one lease and one commit per batch.
+
+    Same SQL and same ``source_id`` idempotency as ``emit_qa_pairs``; only
+    the transaction granularity changes. A failing batch is rolled back as
+    a unit and reported, never dropped silently.
+    """
+    for start in range(0, len(pairs), batch_size):
+        chunk = pairs[start:start + batch_size]
+        if not chunk:
+            continue
+        lease = pool.lease(timeout=10.0)
+        inserted = 0
+        try:
+            cur = lease.connection.cursor()
+            for pair in chunk:
+                q, qn = _clean_nul(pair.question)
+                a, an = _clean_nul(pair.answer)
+                if qn or an:
+                    stats.nul_sanitized += 1
+                cur.execute(
+                    _QA_INSERT_SQL,
+                    (
+                        pair.source_id,
+                        pair.session_id,
+                        pair.turn_id,
+                        q,
+                        a,
+                        len(q) + len(a),
+                        _iso_or_none(pair.occurred_at),
+                        source_tag,
+                        pair.source_id,
+                    ),
+                )
+                inserted += 1 if getattr(cur, "rowcount", 0) else 0
+            lease.connection.commit()
+            stats.qa_pairs_derived += inserted
+            stats.deduped += len(chunk) - inserted
+        except Exception as exc:
+            try:
+                lease.connection.rollback()
+            except Exception:
+                pass
+            stats.skipped += len(chunk)
+            stats.errors.append(
+                f"qa batch failed ({len(chunk)} pairs, first {chunk[0].source_id}): {exc!r}"
+            )
+        finally:
+            try:
+                lease.close()
+            except Exception:
+                pass
+
+
+__all__ = ["QAPair", "pair_items", "emit_qa_pairs", "emit_qa_pairs_bulk", "QA_SOURCE_PREFIX"]

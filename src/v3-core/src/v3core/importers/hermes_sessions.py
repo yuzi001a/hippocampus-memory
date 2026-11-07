@@ -204,7 +204,19 @@ class HermesSessionImporter(Importer):
             if dk_col:
                 select_cols.append(dk_col)
 
-            order_clause = f"ORDER BY {id_col}" if id_col else ""
+            # Session-contiguous ordering is a hard requirement of the streaming
+            # import pipeline: it pairs QA per session and flushes a session as
+            # soon as the next one starts, so the working set stays bounded.
+            # Real Hermes state.db files interleave sessions heavily in id order
+            # (110k switches over 3.6k sessions on the 2026-10-19 corpus), so
+            # ordering by id alone would split a session across flushes and
+            # silently drop QA pairs. `id` remains the tiebreak inside a session.
+            if id_col and sess_id_col:
+                order_clause = f"ORDER BY {sess_id_col}, {id_col}"
+            elif id_col:
+                order_clause = f"ORDER BY {id_col}"
+            else:
+                order_clause = ""
             sql = (
                 f"SELECT {', '.join(select_cols)} "
                 f"FROM {msg_table} {order_clause}"
