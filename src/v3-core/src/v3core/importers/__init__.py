@@ -703,6 +703,7 @@ def _build_registry() -> dict[str, type[Importer]]:
     # Imported lazily so a half-installed environment still imports
     # cleanly (the cost is one extra import per .Importer subclass).
     from .hermes_sessions import HermesSessionImporter
+    from .legacy_sources import LegacySourcesImporter
     from .memory_md import MemoryMarkdownImporter
     from .openclaw import OpenClawImporter
     from .hindsight import HindsightImporter
@@ -714,6 +715,7 @@ def _build_registry() -> dict[str, type[Importer]]:
     # submodules explicitly.
     globals().update({
         "HermesSessionImporter": HermesSessionImporter,
+        "LegacySourcesImporter": LegacySourcesImporter,
         "MemoryMarkdownImporter": MemoryMarkdownImporter,
         "OpenClawImporter": OpenClawImporter,
         "HindsightImporter": HindsightImporter,
@@ -722,6 +724,7 @@ def _build_registry() -> dict[str, type[Importer]]:
     })
     return {
         "hermes": HermesSessionImporter,
+        "legacy_sources": LegacySourcesImporter,
         "memory-md": MemoryMarkdownImporter,
         "openclaw": OpenClawImporter,
         "hindsight": HindsightImporter,

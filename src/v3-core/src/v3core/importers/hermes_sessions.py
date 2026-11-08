@@ -132,6 +132,12 @@ class HermesSessionImporter(Importer):
         suffix = path.suffix.lower()
         if suffix == ".db" or path.name in _STATE_DB_NAMES:
             yield from self._parse_state_db(path)
+        elif self._is_sqlite_state_store(path):
+            # Renamed backups (``state.db.bak-20260920-092212``,
+            # ``*.pre-optimize*.bak``) keep the suffix of the rename, so the
+            # filename check above misses them. Sniff the content instead of
+            # refusing a perfectly importable store.
+            yield from self._parse_state_db(path)
         elif suffix in _JSONL_NAMES:
             yield from self._parse_jsonl(path)
         elif suffix in _JSON_NAMES:
@@ -283,6 +289,34 @@ class HermesSessionImporter(Importer):
                 )
         finally:
             conn.close()
+
+    @staticmethod
+    def _is_sqlite_state_store(path: Path) -> bool:
+        """True when ``path`` is a SQLite file shaped like a Hermes state.db.
+
+        Backups are routinely renamed (``state.db.bak-2026…``,
+        ``state.db.pre-optimize-….bak``), so dispatch cannot rely on the
+        filename. Opening the file only reads the header + schema.
+        """
+        if not path.is_file():
+            return False
+        try:
+            with open(path, "rb") as fh:
+                if fh.read(16) != b"SQLite format 3\x00":
+                    return False
+        except OSError:
+            return False
+        try:
+            conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return False
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+        except sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+        return {"session_id", "role", "content"} <= cols
 
     def _locate_messages_table(
         self, conn: sqlite3.Connection, tables: set[str]
