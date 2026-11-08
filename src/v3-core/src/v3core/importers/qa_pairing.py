@@ -23,6 +23,8 @@ qa_pairs → conversation_stream → native event is greppable.
 """
 from __future__ import annotations
 
+import re
+
 import logging
 from dataclasses import dataclass
 from typing import Iterable
@@ -65,6 +67,10 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
         bucket = groups.setdefault((host_key, sess_key), [])
         if bucket and bucket[-1].role == role and (bucket[-1].text or "").strip() == (it.text or "").strip():
             continue
+        # 上下文压缩摘要是宿主塞进来的元文本，不是任何一方说的话。
+        # 实测 71 条以 assistant 落库（最长 6.7 万字符），有 6 条混成了答案。
+        if _COMPACTION_RE.match((it.text or "").lstrip()):
+            continue
         host = (it.host or it.source_system or "").strip() or "unknown"
         sid = (it.source_ref or "").strip() or "imported"
         groups.setdefault((host, sid), []).append(it)
@@ -74,6 +80,12 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
         ordered = sorted(group, key=lambda x: (x.occurred_at or ""))
         pairs.extend(_pair_session(ordered, host=host, session_id=sid))
     return pairs
+
+
+# 宿主压缩产物：胶水标记，来源固定，非对话内容
+_COMPACTION_RE = re.compile(
+    r"^\[(?:PRIOR CONTEXT|CONTEXT COMPACTION|END OF PRIOR CONTEXT)"
+)
 
 
 def _final_answer(assts: list[ImportItem]) -> str:

@@ -66,6 +66,19 @@ def test_adjacent_duplicate_rows_collapse():
     assert pairs[0].answer == "做完了。"
 
 
+def test_compaction_summaries_never_become_answers():
+    """压缩摘要是宿主元文本（实测 71 条、最长 6.7 万字符），不能当回答。"""
+    items = [
+        _item("user", "继续", eid="1", ts="2026-11-08T10:00:00+00:00"),
+        _item("assistant", "[PRIOR CONTEXT — for reference only; not a new message] 早前上下文……",
+              eid="2", ts="2026-11-08T10:00:05+00:00"),
+        _item("assistant", "真正做完了，结果在上面。", eid="3", ts="2026-11-08T10:00:09+00:00"),
+    ]
+    pairs = pair_items(items)
+    assert len(pairs) == 1
+    assert pairs[0].answer == "真正做完了，结果在上面。"
+
+
 def test_non_adjacent_repeats_are_real_turns():
     """非相邻的重复是真实的第二次发言（「继续」说两遍），不能折叠。"""
     items = [
