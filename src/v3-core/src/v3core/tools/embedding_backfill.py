@@ -101,6 +101,7 @@ class BackfillStats:
     failed_retryable: int = 0
     failed_permanent: int = 0
     skipped_nonretryable: int = 0
+    deferred_oversized: int = 0
     sidecar_written: int = 0
     plans: list[dict] = field(default_factory=list)
     elapsed_s: float = 0.0
@@ -206,7 +207,8 @@ def _row_text(table: str, row: dict) -> str:
     raise KeyError(table)
 
 
-def _select_sql(spec: dict, include_nonretryable: bool, table: str) -> str:
+def _select_sql(spec: dict, include_nonretryable: bool, table: str,
+                max_chars: int | None = None) -> str:
     """Rows that still need a vector and are worth attempting.
 
     A row whose previous attempt failed permanently (bad config, unsupported input) is
@@ -221,15 +223,27 @@ def _select_sql(spec: dict, include_nonretryable: bool, table: str) -> str:
                 AND f2.retryable = FALSE
                 AND f2.resolved_at IS NULL)
     """.format(pk=spec["pk"])
+    # max_chars defers rows whose canonical text exceeds the budget for THIS pass.
+    # They stay NULL (visible, countable) instead of silently getting a truncated
+    # vector that disagrees with the live writer.
+    too_long = ""
+    if max_chars is not None:
+        # qa_pairs embeds question AND answer (chunked), so the size gate must see both;
+        # filtering on `question` alone lets 16k-char answers through a 8k gate.
+        len_expr = ("length(COALESCE(t.question, '')) + length(COALESCE(t.answer, ''))"
+                    if table == "qa_pairs"
+                    else "length(COALESCE(t.{txt}, ''))".format(txt=spec["text_col"]))
+        too_long = "AND {expr} <= %(max_chars)s".format(expr=len_expr)
     return """
         SELECT t.* FROM public.{table} t
          WHERE t.{vec} IS NULL
            AND COALESCE(btrim(t.{txt}), '') <> ''
            {skip}
+           {too_long}
          ORDER BY t.{pk}
          LIMIT %(limit)s
     """.format(table=table, vec=spec["vec_col"], txt=spec["text_col"],
-               pk=spec["pk"], skip=skip)
+               pk=spec["pk"], skip=skip, too_long=too_long)
 
 
 def _observation_ledger_state(conn, entity_id: object) -> dict:
@@ -297,7 +311,8 @@ def _observation_plan_metadata(conn, row: dict, embed_cfg: dict) -> dict:
 
 
 def backfill_table(conn, table: str, *, embed_cfg: dict, apply: bool,
-                   limit: int | None, include_nonretryable: bool = False) -> BackfillStats:
+                   limit: int | None, include_nonretryable: bool = False,
+                   max_chars: int | None = None) -> BackfillStats:
     from v3core.embed_failures import embed_for_write, resolve_embedding_failures_for_entity
 
     if table not in CANONICAL_TABLES:
@@ -310,14 +325,28 @@ def backfill_table(conn, table: str, *, embed_cfg: dict, apply: bool,
     st = BackfillStats(table=table)
     t0 = time.time()
 
-    sql = _select_sql(spec, include_nonretryable, table)
-    params: dict = {"table_literal": table, "limit": limit or 100000}
+    sql = _select_sql(spec, include_nonretryable, table, max_chars=max_chars)
+    params: dict = {"table_literal": table, "limit": limit or 100000,
+                    "max_chars": max_chars if max_chars is not None else 0}
     with conn.cursor() as cur:
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     st.selected = len(rows)
     print(f"  selected {st.selected} NULL row(s) in {table} (mode={spec['mode']})")
+    if max_chars is not None:
+        with conn.cursor() as cur:
+            len_expr = ("length(COALESCE(question, '')) + length(COALESCE(answer, ''))"
+                        if table == "qa_pairs"
+                        else f"length(COALESCE({spec['text_col']}, ''))")
+            cur.execute(
+                f"SELECT count(*) FROM public.{table} "
+                f"WHERE {spec['vec_col']} IS NULL AND {len_expr} > %s",
+                (max_chars,),
+            )
+            st.deferred_oversized = int(cur.fetchone()[0])
+        print(f"  deferred {st.deferred_oversized} row(s) longer than {max_chars} chars "
+              f"(left NULL on purpose, not truncated)")
     if not rows:
         st.elapsed_s = time.time() - t0
         return st
@@ -662,6 +691,9 @@ def main(argv=None) -> int:
     ap.add_argument("--apply", action="store_true",
                     help="actually write. Without it this is a dry run.")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--max-chars", type=int, default=None,
+                    help="defer rows whose canonical text is longer than this instead of "
+                         "chunking them in this pass (they stay NULL and are counted)")
     ap.add_argument("--include-nonretryable", action="store_true",
                     help="also retry rows that previously failed permanently")
     ap.add_argument("--out", default=None, help="write stats JSON here")
@@ -704,7 +736,8 @@ def main(argv=None) -> int:
             print(f"backfill table={args.table} apply={args.apply} limit={args.limit}")
             st = backfill_table(conn, args.table, embed_cfg=embed_cfg, apply=args.apply,
                                 limit=args.limit,
-                                include_nonretryable=args.include_nonretryable)
+                                include_nonretryable=args.include_nonretryable,
+                                max_chars=args.max_chars)
     finally:
         try:
             pg.close()

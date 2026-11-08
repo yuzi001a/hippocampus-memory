@@ -58,6 +58,13 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
         role = (it.role or "").strip().lower()
         if role not in ("user", "assistant"):
             continue
+        host_key = (it.host or it.source_system or "").strip() or "unknown"
+        sess_key = (it.source_ref or "").strip() or "imported"
+        # 同一 session 内相邻的完全相同消息 = 宿主重复落库（实测占 23%），
+        # 不是用户又说了一遍。折叠掉，否则答案被复制几十遍。
+        bucket = groups.setdefault((host_key, sess_key), [])
+        if bucket and bucket[-1].role == role and (bucket[-1].text or "").strip() == (it.text or "").strip():
+            continue
         host = (it.host or it.source_system or "").strip() or "unknown"
         sid = (it.source_ref or "").strip() or "imported"
         groups.setdefault((host, sid), []).append(it)
@@ -67,6 +74,30 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
         ordered = sorted(group, key=lambda x: (x.occurred_at or ""))
         pairs.extend(_pair_session(ordered, host=host, session_id=sid))
     return pairs
+
+
+def _final_answer(assts: list[ImportItem]) -> str:
+    """长链任务里 assistant 行是「过程」，只有最后一轮是「结论」。
+
+    判据是结构性的：中间行带 tool_calls（工具调用前的旁白），最后一轮通常
+    是纯文本总结。除非没有任何纯文本收尾，否则只保留最后那条纯文本行。
+    没有 tool_calls 的多行 = 同一条回复被宿主拆段，照旧合并。
+    """
+    texts = [a.text.strip() for a in assts if (a.text or "").strip()]
+    if not texts:
+        return ""
+    if len(assts) == 1:
+        return texts[0]
+    def _has_tools(item: ImportItem) -> bool:
+        prov = item.provenance or {}
+        tc = prov.get("tool_calls")
+        return bool(tc) and tc not in ("[]", "null")
+    if not any(_has_tools(a) for a in assts):
+        return _SEP.join(texts)
+    for a in reversed(assts):
+        if (a.text or "").strip() and not _has_tools(a):
+            return a.text.strip()
+    return texts[-1]
 
 
 def _pair_session(
@@ -90,7 +121,7 @@ def _pair_session(
                     host=host,
                     session_id=session_id,
                     question=_SEP.join(u.text.strip() for u in users),
-                    answer=_SEP.join(a.text.strip() for a in assts),
+                    answer=_final_answer(assts),
                     q_event_id=qid,
                     turn_id=len(out) + 1,
                     occurred_at=q0.occurred_at,
