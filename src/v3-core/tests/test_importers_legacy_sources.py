@@ -290,6 +290,21 @@ def test_classify_noise(text: str, reason: str):
     assert is_noise and got == reason
 
 
+def test_chinese_keywords_alone_do_not_drop_real_turns():
+    """子代理 / 心跳 are ordinary vocabulary here — keyword-only matches must not
+    delete a real turn (measured: 24 false positives in lcm.db, 11 in Honcho)."""
+    for text in (
+        "自然吸收即可。ignoreSessionPatterns [] 忽略自动存档的会话（定时任务 / 子代理）",
+        "收到。VERIFY-CHECK-1357 已记。……你这串数字，是定时心跳还是真在测什么？",
+    ):
+        assert classify_noise("user", text) == (False, None)
+
+
+def test_bare_tool_json_is_noise_but_real_json_is_not():
+    assert classify_noise("assistant", '{"action": "none"}') == (True, "tool_json")
+    assert classify_noise("assistant", '{"name": "Alice", "age": 3}') == (False, None)
+
+
 def test_parse_ts_variants():
     assert parse_ts(1780000000) is not None
     assert parse_ts("1780000000") is not None

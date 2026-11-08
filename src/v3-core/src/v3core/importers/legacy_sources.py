@@ -59,10 +59,17 @@ _CRON_RE = re.compile(r"\[cron[:[]")
 _HEARTBEAT_RE = re.compile(
     r"心跳|HEARTBEAT|HEARTBEAT_OK|heartbeat poll|OpenClaw heartbeat", re.I
 )
+# Structural injection markers only. Bare Chinese words such as 子代理 / 心跳 are
+# ordinary vocabulary in this user's conversations — dropping on those alone
+# deletes real turns (measured: 24 false positives in lcm.db, 11 in the Honcho
+# dump). Keyword-only matches must never drop a message.
 _SUBAGENT_RE = re.compile(
-    r"Subagent Context|子代理|ASYNC DELEGATION|\[IMPORTANT|OPENCLAW_INTERNAL_CONTEXT"
-    r"|BEGIN_OPENCLAW_INTERNAL_CONTEXT|Inter-session message|Agent-to-agent|auto-cron"
+    r"Subagent Context|You are running as a subagent|ASYNC DELEGATION"
+    r"|OPENCLAW_INTERNAL_CONTEXT|BEGIN_OPENCLAW_INTERNAL_CONTEXT"
+    r"|Inter-session message|Agent-to-agent|auto-cron"
 )
+# Heartbeat markers must be explicit, not the Chinese word on its own.
+_HEARTBEAT_STRICT_RE = re.compile(r"HEARTBEAT(?:_OK)?|OpenClaw heartbeat", re.I)
 _INJECTION_RE = re.compile(
     r"^\[?(?:\d{1,2}\s+\w{3}\s+\d{4}|\w{3}\s+\d{1,2}|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2})?"
     r"\s*\]?\s*\[(?:IMPORTANT|ASYNC DELEGATION|Subagent Context|OUT-OF-BAND|【IMPORTANT|【ASYNC)"
@@ -102,17 +109,33 @@ def classify_noise(role: str, content: str) -> tuple[bool, str | None]:
     c = content.strip()
     if _CRON_RE.search(c):
         return True, "cron"
-    if _HEARTBEAT_RE.search(c):
-        return True, "heartbeat"
+    # Structural markers before keyword heuristics.
     c2 = strip_ts_prefix(c).strip()
     if _INJECTION_RE.match(c) or _SUBAGENT_RE.search(c) or _SYSTEM_INJECT_RE.match(c2):
         return True, "subagent"
+    if _HEARTBEAT_STRICT_RE.search(c):
+        return True, "heartbeat"
+    # A bare "心跳" only counts when the whole message is just that word.
+    if re.fullmatch(r"[（(\[]?心跳[)）\]!！。.…]*", c):
+        return True, "heartbeat"
     if role in ("system", "tool", "function", "tool_call", "tool_result"):
         return True, "system" if role == "system" else "tool"
     if c.startswith("HEARTBEAT_OK"):
         return True, "heartbeat"
     if _IMAGE_DESC_RE.search(c[:200]):
         return True, "image_desc"
+    # Bare tool/agent payloads: an assistant turn that is *only* a JSON object
+    # with control keys carries no conversation ("{""action"": ""none""}").
+    if c.startswith("{") and c.endswith("}") and len(c) <= 400:
+        try:
+            obj = json.loads(c)
+        except (json.JSONDecodeError, ValueError):
+            obj = None
+        if isinstance(obj, dict) and obj and set(obj) <= {
+            "action", "tool", "function", "tool_calls", "args", "arguments",
+            "result", "status", "ok", "error", "reason", "reply",
+        }:
+            return True, "tool_json"
     return False, None
 
 
