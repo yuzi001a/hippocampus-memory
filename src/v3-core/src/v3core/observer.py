@@ -809,6 +809,24 @@ def _observer_resolve_api_key() -> tuple[str, str | None]:
 # M3 调用 — 复制 phase0_m3_length_test.py 的 call_m3 (参数已实验定案)
 # ────────────────────────────────────────────────────────────
 
+def _m3_thinking_payload(model: str, thinking: str) -> dict[str, Any] | None:
+    """Observer 的 thinking 决策 — 与 ``llm._thinking_payload`` 同一模型感知规则。
+
+    MiniMax M3.1 家族拒绝 ``thinking.type="disabled"``（HTTP 400:
+    ``model "MiniMax-M3.1-Flash" requires adaptive thinking``），因此 disabled
+    模式下直接省略该字段；其余模型保持历史行为 ``{"type": thinking}``。
+
+    这条路径是 observer 自己的 HTTP 调用（不经 ``llm.LLMClient``），历史上漏了
+    同一处模型感知判断 —— Y400 全量重建时派生层第一轮就撞上 400，30 条 QA
+    落 adaptive 状态、游标不推进，表现为「派生层跑不动」。
+    """
+    mode = str(thinking or "disabled").strip().lower()
+    requires_adaptive = "m3.1" in str(model).lower()
+    if mode == "disabled" and requires_adaptive:
+        return None
+    return {"type": mode}
+
+
 def call_m3(
     cfg: dict[str, Any],
     api_key: str,
@@ -823,7 +841,8 @@ def call_m3(
 
     实验定案参数 (phase0_m3_length_test.py L95 + phase0e 验证):
     - max_completion_tokens=16384 (旧 max_tokens 已弃用)
-    - thinking={"type": "disabled"} — 跳过思考直接答
+    - thinking={"type": "disabled"} — 跳过思考直接答（M3.1 家族改为省略该字段，
+      见 ``_m3_thinking_payload``）
     - reasoning_split=True — thinking 拆到 reasoning_content, 不进 content
     """
     import requests
@@ -839,22 +858,33 @@ def call_m3(
         "messages": [{"role": "user", "content": prompt}],
         "temperature": cfg.get("temperature", 0.3),
         "max_completion_tokens": max_completion_tokens,
-        "thinking": {"type": thinking},
         "reasoning_split": reasoning_split,
     }
+    _thinking_field = _m3_thinking_payload(model, thinking)
+    if _thinking_field is not None:
+        payload["thinking"] = _thinking_field
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+
+    def _post(body: dict[str, Any]):
+        return requests.post(url, json=body, headers=headers, timeout=timeout, proxies=proxies)
+
     t0 = time.time()
     try:
-        if proxy:
-            resp = requests.post(
-                url, json=payload, headers=headers, timeout=timeout,
-                proxies={"http": proxy, "https": proxy},
+        resp = _post(payload)
+        # 服务端口径再次变化时的一次有界重试（与 llm.LLMClient 的 fallback 同义）：
+        # 只有明确要求 adaptive thinking 时才去掉该字段重发，不重试其他 4xx。
+        if (resp.status_code == 400
+                and "requires adaptive thinking" in (resp.text or "").lower()
+                and "thinking" in payload):
+            logger.warning(
+                "observer: M3 拒绝 thinking 参数(requires adaptive thinking), 去掉该字段重试一次 model=%s",
+                model,
             )
-        else:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            resp = _post({k: v for k, v in payload.items() if k != "thinking"})
         latency = time.time() - t0
     except Exception as e:
         return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
