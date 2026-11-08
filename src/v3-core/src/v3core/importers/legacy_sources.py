@@ -208,6 +208,10 @@ def parse_ts(value: Any) -> datetime | None:
     return None
 
 
+# OpenClaw daily backups: "<session>.checkpoint.<uuid>.jsonl"
+_CHECKPOINT_SUFFIX_RE = re.compile(r"\.checkpoint\.[0-9a-f]{8}-?[0-9a-f-]*$", re.I)
+
+
 def _stable_id(session: str, dt: datetime | None, text: str, idx: int = 0) -> str:
     """Content-addressed event id: identical across repeated daily snapshots."""
     digest = hashlib.sha1(f"{session}|{text}".encode("utf-8", "ignore")).hexdigest()[:16]
@@ -586,7 +590,11 @@ class LegacySourcesImporter(Importer):
     # ── OpenClaw v3 session event stream ───────────────────────────────
 
     def _parse_openclaw_jsonl(self, path: Path, dropped: _Dropped) -> Iterator[ImportItem]:
-        session = path.stem
+        # Daily backups snapshot the same session over and over; the file name
+        # carries a checkpoint uuid that is not part of the session identity.
+        # Strip it, or every snapshot becomes a brand new session (measured:
+        # 3,897 files -> 2,856 "sessions" for ~10k unique messages).
+        session = _CHECKPOINT_SUFFIX_RE.sub("", path.stem)
         idx = 0
         for ev in self._iter_jsonl(path):
             if ev.get("type") != "message":
@@ -610,13 +618,19 @@ class LegacySourcesImporter(Importer):
                 dropped.add(reason)
                 continue
             idx += 1
+            dt = parse_ts(ev.get("timestamp") or msg.get("timestamp") or ev.get("ts"))
+            sess = _CHECKPOINT_SUFFIX_RE.sub(
+                "", str(ev.get("sessionId") or msg.get("sessionId") or session)
+            )
             yield _make_item(
                 host="openclaw_jsonl",
-                session=str(ev.get("sessionId") or msg.get("sessionId") or session),
-                event_id=msg.get("id") or ev.get("id") or f"{path.stem}:{idx}",
+                session=sess,
+                # No native id in these snapshots: derive a content-addressed
+                # one so the same message in another checkpoint dedupes.
+                event_id=msg.get("id") or ev.get("id") or _stable_id(sess, dt, text, idx),
                 text=text,
                 role=role or "other",
-                dt=parse_ts(ev.get("timestamp") or msg.get("timestamp") or ev.get("ts")),
+                dt=dt,
             )
 
     # ── Honcho CSV export ──────────────────────────────────────────────

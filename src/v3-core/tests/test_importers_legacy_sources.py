@@ -193,6 +193,35 @@ def test_openclaw_v3_jsonl(tmp_path: Path):
     assert items[1].host == "openclaw_jsonl"
 
 
+def test_openclaw_checkpoint_snapshots_share_identity(tmp_path: Path):
+    """每日备份把同一 session 反复快照，文件名带 checkpoint uuid。
+
+    不去掉后缀 = 每个快照都是新 session（实测 3,897 文件 → 2,856 个"新" session）；
+    去掉后同一句话在两个快照里必须落到同一个 (session, event_id)，否则去重失效。
+    """
+    events = [
+        {"type": "message", "timestamp": "2026-05-08T01:00:00Z",
+         "message": {"role": "user", "content": [{"type": "text", "text": "在吗"}]}},
+        {"type": "message", "timestamp": "2026-05-08T01:00:05Z",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "在"}]}},
+    ]
+    names = [
+        "abc123.checkpoint.11111111-2222-3333-4444-555555555555.jsonl",
+        "abc123.checkpoint.99999999-8888-7777-6666-555555555555.jsonl",
+    ]
+    got = []
+    for n in names:
+        p = tmp_path / n
+        with open(p, "w", encoding="utf-8") as fh:
+            for e in events:
+                fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+        got.append(_items(p))
+
+    assert {i.source_ref for i in got[0]} == {i.source_ref for i in got[1]} == {"openclaw_jsonl:abc123"}
+    assert [i.event_id for i in got[0]] == [i.event_id for i in got[1]]
+    assert len(set(i.event_id for i in got[0])) == 2
+
+
 # ── honcho CSV ────────────────────────────────────────────────────────────
 
 
