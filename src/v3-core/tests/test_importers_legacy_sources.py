@@ -142,6 +142,25 @@ def test_trajectory_jsonl(tmp_path: Path):
     assert all(i.host == "trajectory" for i in items)
 
 
+def test_trajectory_ids_stable_across_daily_snapshots(tmp_path: Path):
+    """daily_backups 是同一批 session 的每日快照 — 同一事件必须拿到同一个 id，
+    否则 (host, session, event_id) 去重会把它当成新消息重复入库。"""
+    events = [
+        {"type": "session.started", "data": {"sessionKey": "agent:main:dm:owner"}, "ts": "2026-05-24T02:00:00Z"},
+        {"type": "prompt.submitted", "data": {"prompt": "[Sun 2026-05-24 10:00 GMT+8] 今天干嘛"},
+         "ts": "2026-05-24T02:00:01Z"},
+        {"type": "model.completed", "data": {"assistantTexts": ["跑重建"]}, "ts": "2026-05-24T02:00:05Z"},
+    ]
+    body = "\n".join(json.dumps(e, ensure_ascii=False) for e in events)
+    a = _write(tmp_path / "snap_a.trajectory.jsonl", body)
+    b = _write(tmp_path / "snap_b.trajectory.jsonl", body)   # 同一内容，不同文件名
+
+    ids_a = [(i.role, i.event_id) for i in _items(a)]
+    ids_b = [(i.role, i.event_id) for i in _items(b)]
+    assert ids_a == ids_b
+    assert len({eid for _, eid in ids_a}) == len(ids_a)  # 文件内也不撞车
+
+
 def test_trajectory_cron_session_is_skipped(tmp_path: Path):
     p = tmp_path / "cron.trajectory.jsonl"
     events = [
@@ -175,6 +194,24 @@ def test_openclaw_v3_jsonl(tmp_path: Path):
 
 
 # ── honcho CSV ────────────────────────────────────────────────────────────
+
+
+def test_honcho_host_aliases_unify_for_dedupe(tmp_path: Path):
+    """同一个 Honcho 消息可能来自 CSV / pg_dump / PG 导出 — 三条路径必须落在同一
+    个 host，否则 (host, session, event_id) 去重失效，同一句会被导入三遍。"""
+    csv_p = _write(
+        tmp_path / "honcho.csv",
+        "id,public_id,content,created_at,peer_name,session_name,seq_in_session\n"
+        "9,p9,同一句,2026-04-22T01:20:00Z,owner,s1,1\n",
+    )
+    norm_p = tmp_path / "honcho_dump.jsonl"
+    norm_p.write_text(json.dumps({"host": "honcho_dump", "session_id": "honcho:s1", "event_id": "9",
+                                  "ts": "2026-04-22T01:20:00Z", "role": "user", "content": "同一句"},
+                                 ensure_ascii=False) + "\n", encoding="utf-8")
+    a, b = _items(csv_p), _items(norm_p)
+    assert a[0].host == b[0].host == "honcho"
+    assert a[0].source_ref == b[0].source_ref == "honcho:s1"
+    assert a[0].event_id == b[0].event_id == "9"
 
 
 def test_honcho_csv(tmp_path: Path):
@@ -300,7 +337,28 @@ def test_chinese_keywords_alone_do_not_drop_real_turns():
         assert classify_noise("user", text) == (False, None)
 
 
-def test_bare_tool_json_is_noise_but_real_json_is_not():
+def test_machine_cron_preambles_are_noise_but_mentions_are_not():
+    """Hermes 把定时任务/后台通知包成 role=user 注入；这些是机器生成的，
+    不是对话。但用户自己提到「cron job」的正常句子必须保留。"""
+    from v3core.importers.legacy_sources import classify_noise
+
+    for prefix in (
+        "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: ...",
+        "[Your active task list was preserved across context compaction]",
+        "[IMPORTANT: Background process proc_abc completed (exit code 0).",
+        "You've reached the maximum number of tool-call iterations.",
+        "Review transcript for durable skill updates.",
+    ):
+        assert classify_noise("user", prefix)[0] is True, prefix
+
+    for real in (
+        "这个 scheduled cron job 到底该不该停掉？",
+        "你上次跑的那个后台进程完成了吗",
+    ):
+        assert classify_noise("user", real)[0] is False, real
+
+
+def test_bare_tool_json_is_noise_but_real_json_is_not(tmp_path: Path):
     assert classify_noise("assistant", '{"action": "none"}') == (True, "tool_json")
     assert classify_noise("assistant", '{"name": "Alice", "age": 3}') == (False, None)
 

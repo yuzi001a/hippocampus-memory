@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
 import json
 import logging
 import re
@@ -74,6 +75,16 @@ _INJECTION_RE = re.compile(
     r"^\[?(?:\d{1,2}\s+\w{3}\s+\d{4}|\w{3}\s+\d{1,2}|\d{1,2}:\d{2}|\d{4}-\d{2}-\d{2})?"
     r"\s*\]?\s*\[(?:IMPORTANT|ASYNC DELEGATION|Subagent Context|OUT-OF-BAND|【IMPORTANT|【ASYNC)"
 )
+# Machine-generated turn preambles that Hermes injects as a "user" message.
+# They are structurally unmistakable (fixed English prefix), so a prefix match
+# is safe — unlike Chinese keywords, which also occur in real conversation.
+_AUTOMATION_PREFIXES = (
+    "[IMPORTANT: You are running as a scheduled cron job",
+    "[Your active task list was preserved across",
+    "[IMPORTANT: Background process ",
+    "You've reached the maximum number of tool-call",
+    "Review transcript for durable skill updates.",
+)
 _SYSTEM_INJECT_RE = re.compile(
     r"^(?:Continue where you left off|Write a dream diary entry"
     r"|Agent-to-agent|You are running as a subagent"
@@ -102,6 +113,18 @@ def detect_mojibake(content: str) -> bool:
     return bool(_PUA_RE.search(content or ""))
 
 
+def is_machine_preamble(content: str) -> bool:
+    """True only for unmistakable machine-injected turn preambles.
+
+    Deliberately narrow: this is the subset that is safe to apply to *any*
+    source (including Hermes' own state.db), because it cannot collide with
+    real user text. ``classify_noise`` carries broader legacy-store rules
+    that would drop legitimate Hermes turns.
+    """
+    c = (content or "").strip()
+    return bool(c) and (c.startswith(_AUTOMATION_PREFIXES) or bool(_CRON_RE.search(c)))
+
+
 def classify_noise(role: str, content: str) -> tuple[bool, str | None]:
     """Content-level noise classification. Returns ``(is_noise, reason)``."""
     if not content or not content.strip():
@@ -109,6 +132,8 @@ def classify_noise(role: str, content: str) -> tuple[bool, str | None]:
     c = content.strip()
     if _CRON_RE.search(c):
         return True, "cron"
+    if c.startswith(_AUTOMATION_PREFIXES):
+        return True, "automation"
     # Structural markers before keyword heuristics.
     c2 = strip_ts_prefix(c).strip()
     if _INJECTION_RE.match(c) or _SUBAGENT_RE.search(c) or _SYSTEM_INJECT_RE.match(c2):
@@ -183,6 +208,13 @@ def parse_ts(value: Any) -> datetime | None:
     return None
 
 
+def _stable_id(session: str, dt: datetime | None, text: str, idx: int = 0) -> str:
+    """Content-addressed event id: identical across repeated daily snapshots."""
+    digest = hashlib.sha1(f"{session}|{text}".encode("utf-8", "ignore")).hexdigest()[:16]
+    stamp = dt.strftime("%Y%m%dT%H%M%S") if dt else "nots"
+    return f"{session}:{stamp}:{idx}:{digest}"
+
+
 def _iso(dt: datetime | None) -> str | None:
     if dt is None:
         return None
@@ -212,6 +244,17 @@ class _Dropped:
         return "dropped=" + ",".join(f"{k}:{v}" for k, v in sorted(self.counts.items()))
 
 
+# 同一批消息在不同导出形态里出现过（honcho CSV / pg_dump COPY / PG 直连导出）。
+# 身份列必须统一到同一个 host，否则 (host, session, event_id) 去重失效、同一句话
+# 会被导入两遍。
+_HOST_ALIASES = {
+    "honcho_dump": "honcho",
+    "honcho_csv": "honcho",
+    "honcho_copy": "honcho",
+    "honcho_sql": "honcho",
+}
+
+
 def _make_item(
     *,
     host: str,
@@ -222,6 +265,7 @@ def _make_item(
     dt: datetime | None,
     extra: dict[str, Any] | None = None,
 ) -> ImportItem:
+    host = _HOST_ALIASES.get(host, host)
     text = strip_wrapper(text).strip()
     # Idempotent namespacing: exports that already carry ``<host>:<session>``
     # must not end up as ``<host>:<host>:<session>``.
@@ -508,13 +552,16 @@ class LegacySourcesImporter(Importer):
                     if is_noise:
                         dropped.add(reason)
                         continue
+                    ts = parse_ts(ev.get("ts") or ev.get("timestamp") or data.get("ts"))
                     yield _make_item(
                         host="trajectory",
                         session=session_key or path.stem,
-                        event_id=None,
+                        # Daily backups re-snapshot the same sessions; a stable
+                        # id keeps (host, session, event_id) dedupe working.
+                        event_id=_stable_id(session_key or path.stem, ts, line),
                         text=line,
                         role="user",
-                        dt=parse_ts(ev.get("ts") or ev.get("timestamp") or data.get("ts")),
+                        dt=ts,
                     )
             if etype == "model.completed":
                 texts = data.get("assistantTexts") or []
@@ -526,13 +573,14 @@ class LegacySourcesImporter(Importer):
                     if is_noise:
                         dropped.add(reason)
                         continue
+                    ts = parse_ts(ev.get("ts") or ev.get("timestamp") or data.get("ts"))
                     yield _make_item(
                         host="trajectory",
                         session=session_key or path.stem,
-                        event_id=f"{path.stem}:{i}",
+                        event_id=_stable_id(session_key or path.stem, ts, body, i),
                         text=body,
                         role="assistant",
-                        dt=parse_ts(ev.get("ts") or ev.get("timestamp") or data.get("ts")),
+                        dt=ts,
                     )
 
     # ── OpenClaw v3 session event stream ───────────────────────────────

@@ -2542,7 +2542,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     imp.add_argument(
         "source",
-        choices=("list", "hermes", "memory-md", "openclaw", "hindsight", "dsh", "pi", "auto"),
+        choices=(
+            "list",
+            "hermes",
+            "legacy_sources",
+            "memory-md",
+            "openclaw",
+            "hindsight",
+            "dsh",
+            "pi",
+            "auto",
+        ),
         help="'list' shows every registered importer and its honest capability level; "
         "'auto' auto-discovers and imports every supported host (I01).",
     )

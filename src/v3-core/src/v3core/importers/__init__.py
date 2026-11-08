@@ -971,7 +971,11 @@ def import_source(  # noqa: PLR0915 - linear pipeline by design
     )
 
     if raw_items:
-        _emit_raw_messages(
+        # Full-history rebuilds (10^5-10^6 rows) take the batched writer: same
+        # dedupe predicate and counters, but one transaction per batch instead
+        # of one per message. Small imports keep the per-row path.
+        emit = _emit_raw_messages_bulk if len(raw_items) >= 1000 else _emit_raw_messages
+        emit(
             pool=pool,
             items=raw_items,
             source_tag=f"import:{importer.name}",
