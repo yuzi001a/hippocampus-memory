@@ -26,10 +26,11 @@ from __future__ import annotations
 import re
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from . import KIND_RAW, ImportItem
+from .legacy_sources import is_machine_preamble, unwrap_injected
 
 logger = logging.getLogger("v3core.importers.qa_pairing")
 
@@ -60,6 +61,22 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
         role = (it.role or "").strip().lower()
         if role not in ("user", "assistant"):
             continue
+        # 机器外壳里裹着真人原话：OOB 插话（84 条真话）/ standing goal 的 Goal /
+        # skill 调用尾部的真人指令。整条丢等于删真意图 —— 剥壳保留正文，纯外壳才丢。
+        if role == "user":
+            unwrapped = unwrap_injected(it.text or "")
+            if unwrapped is not None:
+                body, _kind = unwrapped
+                # 剥壳后还得再判一次：skill 外壳里裹的常常正是 cron 指令本身
+                # （实测 892 条里 890 条剥出来是机器正文），剥完当提问等于白剥。
+                if not body or is_machine_preamble(body):
+                    continue
+                it = replace(it, text=body)
+        # 机器状态落在 assistant 侧同样不能进问答：[SILENT] 1,628 条、
+        # Operation interrupted 170 条、[ASYNC DELEGATION …] 770 条。
+        # 但**不能整条删**——删了上下两个 user 轮会粘成一个问题（实测 1,638 对
+        # QA 因此消失）。保留这一轮当分界，由 _final_answer 跳过机器文本、
+        # flush 时答案为空自然不出对。
         host_key = (it.host or it.source_system or "").strip() or "unknown"
         sess_key = (it.source_ref or "").strip() or "imported"
         # 同一 session 内相邻的完全相同消息 = 宿主重复落库（实测占 23%），
@@ -84,7 +101,7 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
 
 # 宿主压缩产物：胶水标记，来源固定，非对话内容
 _COMPACTION_RE = re.compile(
-    r"^\[(?:PRIOR CONTEXT|CONTEXT COMPACTION|END OF PRIOR CONTEXT)"
+    r"^\[(?:PRIOR CONTEXT|CONTEXT COMPACTION|END OF PRIOR CONTEXT|STILL IN PROGRESS)"
 )
 
 
@@ -98,18 +115,23 @@ def _final_answer(assts: list[ImportItem]) -> str:
     texts = [a.text.strip() for a in assts if (a.text or "").strip()]
     if not texts:
         return ""
-    if len(assts) == 1:
-        return texts[0]
+    # 机器状态（[SILENT] / Operation interrupted / [ASYNC DELEGATION …]）不是结论。
+    # 必须先剔掉再判断"只有一条"，否则单条 [SILENT] 会被当成答案直接返回。
+    substantive = [a for a in assts if not is_machine_preamble(a.text or "")]
+    if not substantive:
+        return ""
+    if len(substantive) == 1:
+        return (substantive[0].text or "").strip()
     def _has_tools(item: ImportItem) -> bool:
         prov = item.provenance or {}
         tc = prov.get("tool_calls")
         return bool(tc) and tc not in ("[]", "null")
-    if not any(_has_tools(a) for a in assts):
-        return _SEP.join(texts)
-    for a in reversed(assts):
+    if not any(_has_tools(a) for a in substantive):
+        return _SEP.join(t.text.strip() for t in substantive if (t.text or "").strip())
+    for a in reversed(substantive):
         if (a.text or "").strip() and not _has_tools(a):
             return a.text.strip()
-    return texts[-1]
+    return (substantive[-1].text or "").strip()
 
 
 def _pair_session(
@@ -122,6 +144,11 @@ def _pair_session(
     def flush() -> None:
         nonlocal users, assts
         if users and assts:
+            answer = _final_answer(assts)
+            if not answer.strip():
+                # 这一轮只有机器状态（[SILENT] / 中断标记），不是问答。
+                users, assts = [], []
+                return
             q0 = users[0]
             qid = (q0.event_id or "").strip()
             if not qid:

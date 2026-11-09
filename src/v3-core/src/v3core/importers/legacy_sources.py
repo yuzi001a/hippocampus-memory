@@ -56,7 +56,7 @@ _WRAPPER_RE = re.compile(
 _TS_PREFIX_RE = re.compile(
     r"^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}\s+GMT[+-]\d+\]\s*"
 )
-_CRON_RE = re.compile(r"\[cron[:[]")
+_CRON_RE = re.compile(r"^\[cron[:[]")
 _HEARTBEAT_RE = re.compile(
     r"心跳|HEARTBEAT|HEARTBEAT_OK|heartbeat poll|OpenClaw heartbeat", re.I
 )
@@ -78,13 +78,34 @@ _INJECTION_RE = re.compile(
 # Machine-generated turn preambles that Hermes injects as a "user" message.
 # They are structurally unmistakable (fixed English prefix), so a prefix match
 # is safe — unlike Chinese keywords, which also occur in real conversation.
+# 每条都来自 568 片全量通读的实测（2026-11-09，161,275/161,279 条已标注）：
+# 只收「开头即固定串」的形态；正文里**提到**这些串的消息（例如柚在分析
+# "[cron:] 怎么识别"）绝不能被判成机器前言。
 _AUTOMATION_PREFIXES = (
     "[IMPORTANT: You are running as a scheduled cron job",
     "[Your active task list was preserved across",
     "[IMPORTANT: Background process ",
     "You've reached the maximum number of tool-call",
     "Review transcript for durable skill updates.",
+    # 实测 1,628 条（C 1,627）：cron 无事可做时的静默返回
+    "[SILENT]",
+    "ANNOUNCE_SKIP",
+    # 实测 170 条：中断标记
+    "Operation interrupted",
+    # 实测 770 条：子代理批次回执
+    "[ASYNC DELEGATION BATCH COMPLETE",
+    # 实测 52 条：宿主压缩后的重述胶水
+    "[STILL IN PROGRESS —",
+    # 实测 41 条：空响应纠偏
+    "You just executed tool calls",
+    # 实测 41 条：输出契约校验失败重试
+    "Your previous final response was rejected",
+    # OpenClaw 时代的重试注入
+    "[Retry after",
+    # 运行时元数据注入（模型/供应商切换通知）
+    "[System:",
 )
+
 _SYSTEM_INJECT_RE = re.compile(
     r"^(?:Continue where you left off|Write a dream diary entry"
     r"|Agent-to-agent|You are running as a subagent"
@@ -122,7 +143,54 @@ def is_machine_preamble(content: str) -> bool:
     that would drop legitimate Hermes turns.
     """
     c = (content or "").strip()
-    return bool(c) and (c.startswith(_AUTOMATION_PREFIXES) or bool(_CRON_RE.search(c)))
+    if not c:
+        return False
+    # 时间戳前缀（OpenClaw 时代）可能挡在 [cron:...] 前面，先剥掉再判开头。
+    c2 = strip_ts_prefix(c).strip()
+    return c.startswith(_AUTOMATION_PREFIXES) or bool(_CRON_RE.match(c2))
+
+
+_SKILL_INSTRUCTION_RE = re.compile(
+    r"The user has provided the following instruction alongside the skill invocation:\s*(.+)$",
+    re.S,
+)
+_OOB_RE = re.compile(
+    r"\[OUT-OF-BAND USER MESSAGE[^\]]*\]\s*(.*?)\s*(?:\[/OUT-OF-BAND USER MESSAGE\]|\Z)",
+    re.S,
+)
+_GOAL_RE = re.compile(
+    r"\[Continuing toward your standing goal\]\s*Goal:\s*(.*?)\s*Continue working toward this goal",
+    re.S,
+)
+
+
+def unwrap_injected(content: str) -> tuple[str, str] | None:
+    """剥掉机器外壳，保留里面真人写的那段话。
+
+    全量通读实测（2026-11-09）：这些前缀不能整条丢——外壳是宿主的，正文是人写的。
+      * ``[OUT-OF-BAND USER MESSAGE …] 正文 [/OUT-OF-BAND …]`` 103 条，其中 84 条是真人插话
+      * ``[Continuing toward your standing goal] Goal: 正文`` 71 条，Goal 是用户自己写的目标
+      * ``skill 调用注入`` 892 条，尾部带 ``The user has provided the following
+        instruction alongside the skill invocation:`` + 真人指令
+      * ``[STILL IN PROGRESS …] 正文`` 52 条，正文是压缩前未完成的任务原文
+
+    返回 ``(真人正文, 外壳类型)``；是外壳但里面没有可保留正文时返回 ``("", 外壳类型)``
+    （整条按机器处理）；根本不是外壳则返回 ``None``。
+    """
+    c = (content or "").strip()
+    if not c:
+        return None
+    if c.startswith("[OUT-OF-BAND USER MESSAGE"):
+        m = _OOB_RE.search(c)
+        return ((m.group(1) if m else "").strip(), "out_of_band")
+    if c.startswith("[Continuing toward your standing goal"):
+        m = _GOAL_RE.search(c)
+        return ((m.group(1) if m else "").strip(), "standing_goal")
+    if c.startswith("[IMPORTANT: The user has invoked the"):
+        m = _SKILL_INSTRUCTION_RE.search(c)
+        # 只有 skill 全文、没有真人指令 = 纯机器注入
+        return ((m.group(1) if m else "").strip(), "skill_invocation")
+    return None
 
 
 def classify_noise(role: str, content: str) -> tuple[bool, str | None]:
@@ -130,7 +198,8 @@ def classify_noise(role: str, content: str) -> tuple[bool, str | None]:
     if not content or not content.strip():
         return True, "empty"
     c = content.strip()
-    if _CRON_RE.search(c):
+    c_ts = strip_ts_prefix(c).strip()
+    if _CRON_RE.match(c_ts):
         return True, "cron"
     if c.startswith(_AUTOMATION_PREFIXES):
         return True, "automation"
