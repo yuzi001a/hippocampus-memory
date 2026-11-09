@@ -23,8 +23,11 @@ from pathlib import Path
 from typing import Mapping
 
 from . import (
+    KIND_CURATED,
+    KIND_LEGACY,
     KIND_RAW,
     _current_pool,
+    _OrdinalCounter,
     get_importer,
 )
 from . import discovery as _discovery
@@ -166,6 +169,7 @@ def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_sessi
     imp = get_importer(src.host)
     imp.reset_excluded_counts()
 
+    from . import _emit_curated_or_legacy, _emit_raw_messages_bulk, _resolve_writer
     from . import qa_pairing as _qa
 
     stats = _Stats()
@@ -175,30 +179,79 @@ def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_sessi
     seen_sessions: set[str] = set()
     items_seen = 0
     pairs_seen = 0
-    # A rebuild must not hold the whole corpus in memory. At most
-    # ``max_open_sessions`` sessions stay buffered; a session is only
-    # buffered until it has been flushed once, so the working set is one
-    # (or a few interleaved) session(s), not 10^5-10^6 messages.
+    curated_items: list = []
+    ordinals = _OrdinalCounter()
+    # A rebuild must not hold the whole corpus in memory — and neither may a
+    # single huge session. Buffer caps are per session; at most
+    # ``max_open_sessions`` sessions stay open, so peak retention is
+    # ``max_open_sessions * max_session_items`` messages (plus one in flight).
     max_open_sessions = 3
+    max_session_items = 2_000
+    max_session_chars = 4_000_000
+    open_chars: dict[str, int] = {}
 
-    def _flush_session(sid: str) -> None:
+    def _safe_boundary(buf: list, nxt) -> bool:
+        """Splitting here never separates a question from its answer."""
+        if not buf or nxt is None:
+            return True
+        prev_role = (buf[-1].role or "").strip().lower()
+        next_role = (nxt.role or "").strip().lower()
+        return next_role == "user" and prev_role != "user"
+
+    def _assign_identities(sid: str, items: list) -> list:
+        """Give every host-carrying raw item its final event id **before**
+        pairing, so the raw row and its QA pair agree on identity.
+
+        Previously the raw writer invented ``derived:<host>:<sess>:<n>``
+        while the pairing layer invented ``…:turn-<k>`` — for sources with
+        no native event id (honcho, trajectory, old OpenClaw) the QA
+        ``source_id`` therefore pointed at a message that never existed.
+        ``ordinals`` is shared across segments and batches, so the number is
+        a per-session ordinal, not a per-chunk one.
+        """
+        from dataclasses import replace
+
+        out = []
+        for it in items:
+            host = (it.host or "").strip()
+            if it.kind == KIND_RAW and host and not (it.event_id or "").strip():
+                it = replace(it, event_id=f"derived:{host}:{sid}:{ordinals.next(host, sid)}")
+                stats.identity_derived += 1
+            out.append(it)
+        return out
+
+    def _flush_session(sid: str, *, keep_open: bool = False) -> None:
         nonlocal pairs_seen
-        items = pending.pop(sid, [])
+        items = pending.pop(sid, []) if not keep_open else pending.get(sid, [])
         if not items:
             return
+        if keep_open:
+            pending[sid] = []
+            open_chars[sid] = 0
+        else:
+            open_chars.pop(sid, None)
+        items = _assign_identities(sid, items)
         pairs = _qa.pair_items(items)
         pairs_seen += len(pairs)
         if not dry_run:
-            from . import _emit_raw_messages_bulk
-
-            _emit_raw_messages_bulk(
+            failed = _emit_raw_messages_bulk(
                 pool=pool,
                 items=items,
                 source_tag=f"import:{imp.name}",
                 stats=stats,
                 batch_size=batch_size,
+                ordinals=ordinals,
             )
-            if pairs:
+            if failed:
+                # Dependency contract: QA is derived from raw. If the raw
+                # write failed, writing QA would leave orphans that point at
+                # messages which do not exist. Withhold and say so.
+                stats.skipped += len(pairs)
+                stats.errors.append(
+                    f"{sid}: {len(pairs)} QA pair(s) withheld — raw write failed "
+                    f"for {failed} message(s)"
+                )
+            elif pairs:
                 _qa.emit_qa_pairs_bulk(
                     pool=pool, pairs=pairs, stats=stats, batch_size=batch_size
                 )
@@ -212,6 +265,11 @@ def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_sessi
         try:
             for it in imp.parse(artifact):
                 if it.kind != KIND_RAW:
+                    # 用户维护的长期记忆（MEMORY.md / USER.md …）走
+                    # explicit_memories，不能因为"不是 raw"就静默跳过。
+                    if it.kind in (KIND_CURATED, KIND_LEGACY):
+                        if (it.text or "").strip():
+                            curated_items.append(it)
                     continue
                 if not (it.text or "").strip():
                     continue
@@ -224,13 +282,39 @@ def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_sessi
                     while len(pending) >= max_open_sessions and order:
                         _flush_session(order.pop(0))
                     pending[sid] = []
+                    open_chars[sid] = 0
                     order.append(sid)
-                pending[sid].append(it)
+                buf = pending[sid]
+                # Bound the buffer at a safe boundary: flush what we have
+                # before appending a message that would exceed the cap.
+                if buf and (
+                    len(buf) >= max_session_items
+                    or open_chars.get(sid, 0) >= max_session_chars
+                ) and _safe_boundary(buf, it):
+                    _flush_session(sid, keep_open=True)
+                    buf = pending[sid]
+                buf.append(it)
+                open_chars[sid] = open_chars.get(sid, 0) + len(it.text or "")
         except Exception as exc:
             entry["errors"].append(f"{artifact.name}: {exc!r}")
 
     for sid in list(order):
         _flush_session(sid)
+
+    if curated_items and not dry_run:
+        writer = _resolve_writer(pool=pool)
+        if writer is None:
+            entry["errors"].append(
+                f"{len(curated_items)} curated item(s) found but no ActiveMemoryWriter — skipped"
+            )
+        else:
+            _emit_curated_or_legacy(
+                writer=writer,
+                items=curated_items,
+                imported_at=_now_iso(),
+                stats=stats,
+            )
+    entry["curated_found"] = len(curated_items)
 
     entry["reopened_sessions"] = reopened
     if reopened:
@@ -253,7 +337,7 @@ def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_sessi
     entry["raw_imported"] = stats.raw_messages
     entry["duplicates_skipped"] = stats.deduped
     entry["nul_sanitized"] = stats.nul_sanitized
-    entry["user_curated_imported"] = 0
+    entry["user_curated_imported"] = stats.user_curated
     for e in stats.errors:
         entry["errors"].append(e)
 

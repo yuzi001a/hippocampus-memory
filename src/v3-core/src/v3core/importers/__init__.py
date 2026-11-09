@@ -376,6 +376,7 @@ def _emit_raw_messages(
     sessions_seen: set[str] = set()
     oldest_ts: str | None = None
     newest_ts: str | None = None
+    ordinals = _OrdinalCounter()
 
     for idx, it in enumerate(items, start=1):
         if it.kind != KIND_RAW:
@@ -409,8 +410,9 @@ def _emit_raw_messages(
         host = (it.host or "").strip() or None
         event_id = (it.event_id or "").strip() or None
         if host and not event_id:
-            # Import-derived identity — stable, visibly not-native.
-            event_id = f"derived:{host}:{sess}:{idx}"
+            # Import-derived identity — stable, visibly not-native, and
+            # counted per session (not per call): see _OrdinalCounter.
+            event_id = f"derived:{host}:{sess}:{ordinals.next(host, sess)}"
             stats.identity_derived += 1
 
         lease = pool.lease(timeout=5.0)
@@ -466,8 +468,33 @@ def _emit_raw_messages(
         stats.newest = newest_ts
 
 
-def _raw_params(it: ImportItem, *, idx: int, source_tag: str):
-    """Build the bound parameters for one raw item (shared by both writers)."""
+class _OrdinalCounter:
+    """Per-(host, session) ordinal for import-derived event ids.
+
+    The ordinal must count messages **within a session**, never within the
+    write batch. With ``batch_size=500`` the 501st message of a session used
+    to get ``derived:<host>:<sess>:1`` again — colliding with a row that
+    already existed, so the raw insert deduped it away *and* its QA pair
+    inherited the wrong ``q_event_id`` (identity silently pointed at another
+    message). One counter is shared by every batch and by every flush call
+    of the same import run.
+    """
+
+    def __init__(self) -> None:
+        self._n: dict[tuple[str, str], int] = {}
+
+    def next(self, host: str, sess: str) -> int:
+        key = (host, sess)
+        self._n[key] = self._n.get(key, 0) + 1
+        return self._n[key]
+
+
+def _raw_params(it: ImportItem, *, idx: int, source_tag: str,
+                ordinals: "_OrdinalCounter | None" = None):
+    """Build the bound parameters for one raw item (shared by both writers).
+
+    ``idx`` is only used when the item has no session ordinal available.
+    """
     ts = _to_iso8601(it.occurred_at)
     role = (it.role or "").strip()
     sess = (it.source_ref or "").strip() or "imported"
@@ -487,7 +514,8 @@ def _raw_params(it: ImportItem, *, idx: int, source_tag: str):
     event_id = (it.event_id or "").strip() or None
     derived = False
     if host and not event_id:
-        event_id = f"derived:{host}:{sess}:{idx}"
+        n = ordinals.next(host, sess) if ordinals is not None else idx
+        event_id = f"derived:{host}:{sess}:{n}"
         derived = True
     return {
         "ts": ts,
@@ -510,21 +538,28 @@ def _emit_raw_messages_bulk(
     source_tag: str,
     stats: ImportStats,
     batch_size: int = 500,
-) -> None:
+    ordinals: "_OrdinalCounter | None" = None,
+) -> int:
     """Batched F2-identity raw writer (one lease + one commit per batch).
 
     Semantics are identical to ``_emit_raw_messages`` — same dedupe
     predicate, same counters — but a full-history rebuild no longer pays a
     transaction per message. A failing batch is rolled back as a unit and
     every item in it is recorded in ``stats.errors`` (never silently lost).
+
+    Returns the number of raw items whose batch failed. Callers that derive
+    rows from these messages (QA pairing) MUST NOT write those derived rows:
+    a QA pair whose source message is missing is an orphan.
     """
     sessions_seen: set[str] = set()
     oldest_ts: str | None = None
     newest_ts: str | None = None
     batch: list[ImportItem] = []
+    ordinals = ordinals or _OrdinalCounter()
+    failed_items = 0
 
     def _flush(chunk: list[ImportItem]) -> None:
-        nonlocal oldest_ts, newest_ts
+        nonlocal oldest_ts, newest_ts, failed_items
         if not chunk:
             return
         lease = pool.lease(timeout=10.0)
@@ -533,7 +568,7 @@ def _emit_raw_messages_bulk(
             inserted_total = 0
             for offset, it in enumerate(chunk):
                 idx = offset + 1
-                p = _raw_params(it, idx=idx, source_tag=source_tag)
+                p = _raw_params(it, idx=idx, source_tag=source_tag, ordinals=ordinals)
                 text, nul = sanitize_nul(it.text)
                 stats.nul_sanitized += nul
                 if p["ts"]:
@@ -570,6 +605,7 @@ def _emit_raw_messages_bulk(
                 lease.connection.rollback()
             except Exception:
                 pass
+            failed_items += len(chunk)
             stats.skipped += len(chunk)
             first = chunk[0]
             stats.errors.append(
@@ -595,6 +631,7 @@ def _emit_raw_messages_bulk(
         stats.oldest = oldest_ts
     if newest_ts is not None:
         stats.newest = newest_ts
+    return failed_items
 
 
 # ── curated/legacy writes (explicit_memories) ───────────────────────────

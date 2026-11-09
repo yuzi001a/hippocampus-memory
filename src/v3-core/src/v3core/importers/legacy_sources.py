@@ -104,6 +104,10 @@ _AUTOMATION_PREFIXES = (
     "[Retry after",
     # 运行时元数据注入（模型/供应商切换通知）
     "[System:",
+    # 实测 4 条残留（canary 对账时发现）：watch 限流停用通知、批量委派完成通知。
+    # 两条都是机器状态，答案里即便有结论，也不该以"机器通知"当提问。
+    "[IMPORTANT: Watch patterns disabled",
+    "[IMPORTANT: 3 background subagent delegations completed",
 )
 
 _SYSTEM_INJECT_RE = re.compile(
