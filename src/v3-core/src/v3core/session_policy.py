@@ -114,20 +114,29 @@ def collect_signals(pool, *, machine_marker=None) -> list[SessionSignals]:
                           human_user_n=r[3] or 0, assistant_n=r[4] or 0,
                           qa_n=r[6] or 0) for r in rows]
     if machine_marker is not None:
-        # 机器行数用同一套捕获规则补算（结构前缀，不猜内容）
+        # 机器行数用同一套捕获规则补算（结构前缀，不猜内容）。
+        # 逐批取，避免把全库正文一次装进内存（生产 20 万行 ≈ 260MB）。
+        by_key = {(s.host, s.session_id): s for s in out}
         lease = pool.lease(timeout=10.0)
         try:
             cur = lease.connection.cursor()
-            cur.execute(
-                "SELECT host, session_id, text FROM public.conversation_stream "
-                "WHERE role IN ('user','assistant')"
-            )
-            for host, sid, text in (cur.fetchall() or []):
-                if machine_marker(text or ""):
-                    for s in out:
-                        if s.session_id == sid and s.host == host:
-                            s.machine_n += 1
-                            break
+            last_id = 0
+            while True:
+                # keyset 分页（走主键），不把全库正文一次装进内存：
+                # 生产 20 万行正文约 260MB，fetchall 会直接爆掉。
+                cur.execute(
+                    "SELECT id, host, session_id, content FROM public.conversation_stream "
+                    "WHERE role IN ('user','assistant') AND id > %s ORDER BY id LIMIT 2000",
+                    (last_id,),
+                )
+                chunk = cur.fetchall() or []
+                if not chunk:
+                    break
+                for row_id, host, sid, content in chunk:
+                    last_id = row_id
+                    sig = by_key.get((host, sid))
+                    if sig is not None and machine_marker(content or ""):
+                        sig.machine_n += 1
         finally:
             try:
                 lease.close()
