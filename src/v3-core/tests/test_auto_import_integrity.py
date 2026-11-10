@@ -278,3 +278,25 @@ def test_huge_session_buffer_is_bounded(monkeypatch):
     assert sizes, "没有产生任何 flush"
     assert max(sizes) <= 2001, f"单批缓冲 {max(sizes)} 条，超过上限"
     assert len(sizes) > 1, "大会话没有被分段"
+
+
+def test_hard_cap_bounds_sessions_with_no_safe_boundary(monkeypatch):
+    """整段都是 assistant 行的会话永远等不到安全边界 —— 也必须封顶。"""
+    import v3core.importers.qa_pairing as qp
+
+    items = [
+        _raw("mono", "assistant", "x" * 40, f"2026-01-01T00:{(i // 60) % 60:02d}:{i % 60:02d}Z")
+        for i in range(9000)
+    ]
+    sizes: list[int] = []
+    real = qp.pair_items
+
+    def _spy(batch):
+        sizes.append(len(batch))
+        return real(batch)
+
+    monkeypatch.setattr(qp, "pair_items", _spy)
+    monkeypatch.setattr(A, "get_importer", lambda name: FakeImporter(items))
+    entry = A._process_source(_src(), pool=FakePool(), dry_run=False)
+    assert max(sizes) <= 8001, f"单批 {max(sizes)} 条，硬上限没生效"
+    assert any("hard cap" in e for e in entry["errors"])

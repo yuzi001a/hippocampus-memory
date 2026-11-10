@@ -188,7 +188,13 @@ def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_sessi
     max_open_sessions = 3
     max_session_items = 2_000
     max_session_chars = 4_000_000
+    # 硬上限：某些会话整段都是 assistant/tool 行，永远等不到"下一条是 user"的
+    # 安全边界。到硬上限必须切，否则单会话内存无界。切了就如实记一笔，
+    # 不静默截断答案链。
+    max_session_hard_items = 8_000
+    max_session_hard_chars = 16_000_000
     open_chars: dict[str, int] = {}
+    forced_splits = 0
 
     def _safe_boundary(buf: list, nxt) -> bool:
         """Splitting here never separates a question from its answer."""
@@ -293,6 +299,15 @@ def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_sessi
                 ) and _safe_boundary(buf, it):
                     _flush_session(sid, keep_open=True)
                     buf = pending[sid]
+                elif buf and (
+                    len(buf) >= max_session_hard_items
+                    or open_chars.get(sid, 0) >= max_session_hard_chars
+                ):
+                    # 没有安全边界也只能切：内存必须封顶。切点会让一条回答链
+                    # 分成两段（后半段没有提问，只留 raw），所以必须可见。
+                    forced_splits += 1
+                    _flush_session(sid, keep_open=True)
+                    buf = pending[sid]
                 buf.append(it)
                 open_chars[sid] = open_chars.get(sid, 0) + len(it.text or "")
         except Exception as exc:
@@ -316,6 +331,12 @@ def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_sessi
             )
     entry["curated_found"] = len(curated_items)
 
+    if forced_splits:
+        entry["errors"].append(
+            f"{forced_splits} segment(s) force-flushed at the hard cap "
+            f"({max_session_hard_items} items / {max_session_hard_chars} chars): "
+            "an answer chain that long is split, the tail stays raw-only"
+        )
     entry["reopened_sessions"] = reopened
     if reopened:
         # A session that shows up again after being flushed can only mean the
