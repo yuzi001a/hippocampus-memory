@@ -137,6 +137,30 @@ def strip_ts_prefix(text: str) -> str:
     return _TS_PREFIX_RE.sub("", text, count=1)
 
 
+_MESSAGE_ID_RE = re.compile(r"^\[message_id:\s*[^\]]+\]\s*")
+_REPLY_MARK = "[[reply_to_current]]"
+
+
+def strip_host_markers(text: str) -> str:
+    """剥掉宿主贴在正文前的标记：时间戳、message_id、平台引用标记。
+
+    这些是投递层加的，真人没打过；剥掉留正文，不能因此把整条当垃圾。
+    实测（2026-11-11 全量重建）：1,000+ 条机器前言清掉后，剩下的带 "[" 提问
+    几乎全是这几类标记粘在真人话前面。
+    """
+    c = (text or "").strip()
+    for _ in range(4):
+        prev = c
+        c = _TS_PREFIX_RE.sub("", c, count=1)
+        c = _MESSAGE_ID_RE.sub("", c, count=1)
+        if c.startswith(_REPLY_MARK):
+            c = c[len(_REPLY_MARK):]
+        c = c.lstrip("\n ").strip()
+        if c == prev:
+            break
+    return c
+
+
 def strip_wrapper(text: str) -> str:
     return _WRAPPER_RE.sub("", text)
 

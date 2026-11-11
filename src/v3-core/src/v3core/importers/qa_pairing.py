@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from typing import Iterable
 
 from . import KIND_RAW, ImportItem
-from .legacy_sources import is_machine_preamble, unwrap_injected
+from .legacy_sources import is_machine_preamble, strip_host_markers, unwrap_injected
 
 logger = logging.getLogger("v3core.importers.qa_pairing")
 
@@ -61,6 +61,11 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
         role = (it.role or "").strip().lower()
         if role not in ("user", "assistant"):
             continue
+        # 投递层贴在正文前的标记（[Wed 2026-04-22 01:59 GMT+8] / [message_id: …] /
+        # [[reply_to_current]]）不是内容：剥掉留正文，两条角色都适用。
+        marked = strip_host_markers(it.text or "")
+        if marked != (it.text or ""):
+            it = replace(it, text=marked)
         # 机器外壳里裹着真人原话：OOB 插话（84 条真话）/ standing goal 的 Goal /
         # skill 调用尾部的真人指令。整条丢等于删真意图 —— 剥壳保留正文，纯外壳才丢。
         if role == "user":
