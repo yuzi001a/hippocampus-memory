@@ -115,6 +115,18 @@ _AUTOMATION_PREFIXES = (
     "[media attached:",
     "[The user attached an image:",
     "[Background process ",
+    # 2026-11-11 全量重建第二轮：清掉上面那批后还剩的机器文本（各 1-2 条）。
+    # 都是宿主自己贴的，真人不会拿这些当一句话的开头。
+    "[IMPORTANT: ",
+    "[Bootstrap pending]",
+    "[User sent media without caption]",
+    "[The user sent an image",
+    "[The user sent a document:",
+    "[assistant reasoning omitted",
+    "[chat.history omitted",
+    "[hooks]",
+    "[memory-context]",
+    "[/plan ",
 )
 
 _SYSTEM_INJECT_RE = re.compile(
@@ -226,6 +238,13 @@ def unwrap_injected(content: str) -> tuple[str, str] | None:
     if c.startswith("[Continuing toward your standing goal"):
         m = _GOAL_RE.search(c)
         return ((m.group(1) if m else "").strip(), "standing_goal")
+    # 平台包装但正文是真人内容：'[Mentioned: 张三 (open_id=…)] 正文'
+    if c.startswith("[Mentioned:") or c.startswith("[Replying to:"):
+        cut = c.find("]\n")
+        if cut == -1:
+            cut = c.find("] ")
+        body = c[cut + 1:] if cut != -1 else ""
+        return (body.strip(), "platform_prefix")
     if c.startswith("[[reply_to_current]]"):
         # 平台引用标记（飞书/微信桥）：标记是宿主的，后面那段才是人写的。
         body = c[len("[[reply_to_current]]"):].lstrip("\n ")
