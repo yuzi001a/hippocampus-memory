@@ -51,7 +51,10 @@ _SEP = "\n\n"
 # with zero false positives. Unknown/absent sources stay in (fail-open) so a
 # store without a ``sessions`` table degrades to the old behaviour instead of
 # silently dropping history.
-MACHINE_SESSION_SOURCES = frozenset({"tool", "cron", "oneshot", "subagent", "p0-phase23", "p0-phase23-scoped"})
+MACHINE_SESSION_SOURCES = frozenset({
+    "tool", "cron", "oneshot", "subagent", "api_server", "kanban",
+    "p0-phase23", "p0-phase23-scoped",
+})
 
 
 @dataclass

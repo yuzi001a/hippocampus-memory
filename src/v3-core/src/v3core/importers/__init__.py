@@ -345,6 +345,17 @@ _RAW_DEDUPE_SQL_F2 = """
            AND session_id = %s
            AND event_id = %s
     )
+      -- 同一个库在多个快照里给同一条消息两个身份（原生自增 id vs uid/内容指纹），
+      -- 只按 event_id 判重会把同一条消息再插一遍。实测这样堆出 62,951 行重复
+      -- （占 28%）。语义判据兜底：同 host+会话+角色+时间+内容 = 同一条消息。
+      AND NOT EXISTS (
+        SELECT 1 FROM public.conversation_stream
+         WHERE host = %s
+           AND session_id = %s
+           AND role = %s
+           AND timestamp = %s::timestamptz
+           AND md5(content) = md5(%s)
+    )
 """
 
 _RAW_DEDUPE_SQL_NO_TS = """
@@ -433,6 +444,7 @@ def _emit_raw_messages(
                         tool_calls, tool_results, host, event_id,
                         session_source,
                         host, sess, event_id,
+                        host, sess, role, ts, text,
                     ),
                 )
             elif ts:
@@ -592,7 +604,8 @@ def _emit_raw_messages_bulk(
                         (p["sess"], p["role"], text, p["turn_id"], p["ts"], source_tag,
                          p["tool_calls"], p["tool_results"], p["host"], p["event_id"],
                          p["session_source"],
-                         p["host"], p["sess"], p["event_id"]),
+                         p["host"], p["sess"], p["event_id"],
+                         p["host"], p["sess"], p["role"], p["ts"], text),
                     )
                 elif p["ts"]:
                     cur.execute(
