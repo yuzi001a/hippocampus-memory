@@ -40,6 +40,7 @@ caller (``import_source``) owns the pool / lease lifecycle.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -61,6 +62,7 @@ _MSG_COL_CANDIDATES = {
     "tool_calls": ("tool_calls", "tool_call", "toolcall_json"),
     "tool_results": ("tool_results", "tool_result"),
     "display_kind": ("display_kind",),
+    "message_uid": ("message_uid", "uid"),
 }
 
 _SESSION_COL_CANDIDATES = {
@@ -195,6 +197,7 @@ class HermesSessionImporter(Importer):
             tc_col = mapping.get("tool_calls")
             tr_col = mapping.get("tool_results")
             dk_col = mapping.get("display_kind")
+            uid_col = mapping.get("message_uid")
 
             select_cols = [role_col, content_col]
             if sess_id_col:
@@ -203,6 +206,8 @@ class HermesSessionImporter(Importer):
                 select_cols.append(ts_col)
             if id_col:
                 select_cols.append(id_col)
+            if uid_col:
+                select_cols.append(uid_col)
             if tc_col:
                 select_cols.append(tc_col)
             if tr_col:
@@ -257,13 +262,26 @@ class HermesSessionImporter(Importer):
                 raw_id = row[id_col] if id_col else None
                 tc_raw = row[tc_col] if tc_col else None
                 tr_raw = row[tr_col] if tr_col else None
-                event_id = str(raw_id) if raw_id is not None else None
+                uid_raw = row[uid_col] if uid_col else None
+                uid_s = str(uid_raw).strip() if uid_raw is not None else ""
+                # 身份必须跨快照稳定：同一份 Hermes 库在 09-20 / 11-08 / 今天三个
+                # 快照里自增 id 完全不同，直接拿 id 当 event_id 会让不同消息撞车。
+                if uid_s:
+                    event_id = f"uid:{uid_s}"
+                    identity_kind = "native"
+                else:
+                    # 旧快照没有 message_uid：用内容指纹，保证同一消息在任何快照里
+                    # 都得到同一个身份（各库自增 id 彼此完全不相干，不能拿来当身份）。
+                    event_id = "h:" + hashlib.sha1(
+                        f"{session_id}|{role_s}|{occurred}|{text}".encode("utf-8", "replace")
+                    ).hexdigest()[:24]
+                    identity_kind = "content-hash"
                 provenance = {
                     "session_id": session_id,
                     "schema_columns": sorted(msg_cols),
                     "raw_id": raw_id,
                     "native_id": event_id,
-                    "identity_kind": "native" if event_id else "import-derived",
+                    "identity_kind": identity_kind,
                     "tool_calls": _coerce_json(tc_raw) if tc_raw else None,
                     "tool_results": _coerce_json(tr_raw) if tr_raw else None,
                     "artifact": path.name,
@@ -285,7 +303,7 @@ class HermesSessionImporter(Importer):
                     provenance=provenance,
                     host="hermes",
                     event_id=event_id,
-                    identity_kind="native" if event_id else "import-derived",
+                    identity_kind=identity_kind,
                 )
         finally:
             conn.close()
