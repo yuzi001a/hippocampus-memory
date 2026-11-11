@@ -108,6 +108,13 @@ _AUTOMATION_PREFIXES = (
     # 两条都是机器状态，答案里即便有结论，也不该以"机器通知"当提问。
     "[IMPORTANT: Watch patterns disabled",
     "[IMPORTANT: 3 background subagent delegations completed",
+    # 2026-11-11 全量重建时在 22.5 万条真实 raw 上核对到的漏网外壳：
+    # 都带固定前缀、且不可能是真人打字开头，属于可确定判定的机器文本。
+    "[This response was interrupted by a user",
+    "[assistant turn failed before producing",
+    "[media attached:",
+    "[The user attached an image:",
+    "[Background process ",
 )
 
 _SYSTEM_INJECT_RE = re.compile(
@@ -151,7 +158,12 @@ def is_machine_preamble(content: str) -> bool:
         return False
     # 时间戳前缀（OpenClaw 时代）可能挡在 [cron:...] 前面，先剥掉再判开头。
     c2 = strip_ts_prefix(c).strip()
-    return c.startswith(_AUTOMATION_PREFIXES) or bool(_CRON_RE.match(c2))
+    if c.startswith(_AUTOMATION_PREFIXES) or _CRON_RE.match(c2):
+        return True
+    # 模型思考块被整段当正文落库（实测 24 条 answer 是 [{"type":"thinking",…}]）。
+    if c.startswith("[{") and '"type"' in c[:200]:
+        return True
+    return False
 
 
 _SKILL_INSTRUCTION_RE = re.compile(
@@ -190,6 +202,10 @@ def unwrap_injected(content: str) -> tuple[str, str] | None:
     if c.startswith("[Continuing toward your standing goal"):
         m = _GOAL_RE.search(c)
         return ((m.group(1) if m else "").strip(), "standing_goal")
+    if c.startswith("[[reply_to_current]]"):
+        # 平台引用标记（飞书/微信桥）：标记是宿主的，后面那段才是人写的。
+        body = c[len("[[reply_to_current]]"):].lstrip("\n ")
+        return (body.strip(), "reply_quote")
     if c.startswith("[IMPORTANT: The user has invoked the"):
         m = _SKILL_INSTRUCTION_RE.search(c)
         # 只有 skill 全文、没有真人指令 = 纯机器注入

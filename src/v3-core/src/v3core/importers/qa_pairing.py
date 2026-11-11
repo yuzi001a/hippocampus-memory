@@ -64,7 +64,13 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
         # 机器外壳里裹着真人原话：OOB 插话（84 条真话）/ standing goal 的 Goal /
         # skill 调用尾部的真人指令。整条丢等于删真意图 —— 剥壳保留正文，纯外壳才丢。
         if role == "user":
-            unwrapped = unwrap_injected(it.text or "")
+            raw_text = it.text or ""
+            # 裸的机器前言必须在这里拦掉。此前这段判断只写在"剥壳成功"分支里，
+            # 导致没有外壳的 cron/后台通知（实测 361 条 "You are running as a
+            # scheduled cron job"、217 条 "Your active task list…"）整条混成提问。
+            if is_machine_preamble(raw_text):
+                continue
+            unwrapped = unwrap_injected(raw_text)
             if unwrapped is not None:
                 body, _kind = unwrapped
                 # 剥壳后还得再判一次：skill 外壳里裹的常常正是 cron 指令本身
