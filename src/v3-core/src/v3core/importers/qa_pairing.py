@@ -56,6 +56,21 @@ MACHINE_SESSION_SOURCES = frozenset({
     "p0-phase23", "p0-phase23-scoped",
 })
 
+# 文件转储冒充提问：JSON 状态文件、会话语料导出、记忆文件全文、附件引用。
+# 这些是"把文件内容粘进对话框"，不是提问；长度可达 250 万字符，永远嵌不进
+# 向量库（API 直接 400），留着只会挤掉真实召回槽位。raw 原文不动。
+_DUMP_PREFIXES = (
+    '{"version":',
+    '{"last_check":',
+    '# Session Corpus:',
+    '# USER.md',
+    '@file:',
+)
+_DUMP_MARKERS = ('"processed_files":',)
+# 显式上限：超过这个长度的题面不可能是人类一问一答（实测最长 250 万字符）
+MAX_QUESTION_CHARS = 100_000
+
+
 
 @dataclass
 class QAPair:
@@ -81,6 +96,7 @@ def pair_items(
         else frozenset(str(s).strip().lower() for s in excluded_session_sources)
     )
     skipped_sessions: dict[str, int] = {}
+    dump_skipped = 0
     groups: dict[tuple[str, str], list[ImportItem]] = {}
     for it in items:
         if it.kind != KIND_RAW:
@@ -113,6 +129,10 @@ def pair_items(
             # scheduled cron job"、217 条 "Your active task list…"）整条混成提问。
             if is_machine_preamble(raw_text):
                 continue
+            # 文件转储（JSON 状态 / 会话语料导出 / 记忆文件全文 / 附件引用）不是提问
+            if is_machine_dump(raw_text):
+                dump_skipped += 1
+                continue
             unwrapped = unwrap_injected(raw_text)
             if unwrapped is not None:
                 body, _kind = unwrapped
@@ -141,6 +161,8 @@ def pair_items(
         sid = (it.source_ref or "").strip() or "imported"
         groups.setdefault((host, sid), []).append(it)
 
+    if dump_skipped:
+        logger.info("qa_pairing: skipped %d machine dump question(s)", dump_skipped)
     if skipped_sessions:
         logger.info(
             "qa_pairing: skipped %d machine-session message(s) across %d session(s) "
@@ -161,6 +183,18 @@ def pair_items(
 _COMPACTION_RE = re.compile(
     r"^\[(?:PRIOR CONTEXT|CONTEXT COMPACTION|END OF PRIOR CONTEXT|STILL IN PROGRESS)"
 )
+
+
+def is_machine_dump(text: str) -> bool:
+    """文件转储/导出体冒充提问的确定性判据（只作用于 QA 派生层，raw 不动）"""
+    head = (text or "").lstrip()[:2000]
+    if not head:
+        return False
+    if len(text or "") > MAX_QUESTION_CHARS:
+        return True
+    if head.startswith(_DUMP_PREFIXES):
+        return True
+    return any(m in head for m in _DUMP_MARKERS)
 
 
 def _final_answer(assts: list[ImportItem]) -> str:
@@ -207,6 +241,12 @@ def _pair_session(
                 # 这一轮只有机器状态（[SILENT] / 中断标记），不是问答。
                 users, assts = [], []
                 return
+            question = _SEP.join(u.text.strip() for u in users)
+            # 合并相邻 user 行后可能拼出超长转储体（单条各自都不超限），
+            # 所以判据必须在**合并后**再跑一次：>100k 或转储签名都不是提问。
+            if is_machine_dump(question):
+                users, assts = [], []
+                return
             q0 = users[0]
             qid = (q0.event_id or "").strip()
             if not qid:
@@ -217,7 +257,7 @@ def _pair_session(
                 QAPair(
                     host=host,
                     session_id=session_id,
-                    question=_SEP.join(u.text.strip() for u in users),
+                    question=question,
                     answer=_final_answer(assts),
                     q_event_id=qid,
                     turn_id=len(out) + 1,

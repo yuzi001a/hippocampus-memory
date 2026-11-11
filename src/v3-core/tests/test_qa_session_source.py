@@ -150,3 +150,55 @@ def test_explicit_exclusion_overrides_default(tmp_path):
     qa = _pairing()
     assert len(qa.pair_items(items)) == 1
     assert qa.pair_items(items, excluded_session_sources=["desktop"]) == []
+
+
+_SEQ = {"n": 0}
+
+
+def _raw_item(text, role="user", source="desktop"):
+    imp = importlib.import_module("v3core.importers")
+    _SEQ["n"] += 1
+    return imp.ImportItem(
+        kind=imp.KIND_RAW, source_system="hermes", source_ref="s-dump",
+        text=text, role=role, occurred_at="2026-11-01T00:00:00+08:00",
+        host="hermes", event_id=f"u-{role}-{_SEQ['n']}", session_source=source,
+    )
+
+
+@pytest.mark.parametrize(
+    "dump",
+    [
+        '{"version": 3, "files": {"main:sessions/x.jsonl": {}}}',
+        '{"last_check": 1777293001.184535, "processed_files": ["a.jsonl"]}',
+        "# Session Corpus: 2026-04-07\n\n**USER**: 测试",
+        "# USER.md - About Your Human\n\n[基础设备]",
+        "@file:C:\\Users\\servi\\a.html  @url:`https://example.com`",
+    ],
+)
+def test_machine_dumps_are_not_questions(dump):
+    qa = _pairing()
+    items = [_raw_item(dump), _raw_item("收到", role="assistant")]
+    assert qa.pair_items(items) == []
+
+
+def test_oversized_question_is_not_a_question():
+    qa = _pairing()
+    huge = "正文" * 60_000  # 12 万字符，超过 MAX_QUESTION_CHARS
+    items = [_raw_item(huge), _raw_item("收到", role="assistant")]
+    assert qa.pair_items(items) == []
+    # 但正常的长任务书（几千字符）必须保留
+    normal = ("要求" * 2_000)
+    items2 = [_raw_item(normal), _raw_item("收到", role="assistant")]
+    assert len(qa.pair_items(items2)) == 1
+
+
+def test_merged_user_rows_cannot_build_a_giant_question():
+    """相邻 user 行会合并成一个问题：单条都不超限，合并后超限的必须拦掉。"""
+    qa = _pairing()
+    part = "片段" * 30_000  # 6 万字符，两条合并 = 12 万 > 上限
+    items = [
+        _raw_item(part),
+        _raw_item(part + "（续）"),
+        _raw_item("收到", role="assistant"),
+    ]
+    assert qa.pair_items(items) == []
