@@ -37,6 +37,22 @@ logger = logging.getLogger("v3core.importers.qa_pairing")
 QA_SOURCE_PREFIX = "qa_import"
 _SEP = "\n\n"
 
+# Session provenance that must never enter the conversational QA layer.
+#
+# Hermes records *how* a session was created in ``sessions.source``:
+#   desktop / tui / feishu / weixin  → a human talking
+#   tool                             → one scripted CLI call (max 2 messages)
+#   cron                             → a scheduler run
+#   oneshot / subagent               → programmatic dispatch
+#
+# The batch judge was 1,060 QA pairs whose "question" was a 12k–124k char
+# reviewer prompt: every one of them came from a ``tool`` session. No text
+# prefix or length heuristic catches that reliably — the native field does,
+# with zero false positives. Unknown/absent sources stay in (fail-open) so a
+# store without a ``sessions`` table degrades to the old behaviour instead of
+# silently dropping history.
+MACHINE_SESSION_SOURCES = frozenset({"tool", "cron", "oneshot", "subagent", "p0-phase23", "p0-phase23-scoped"})
+
 
 @dataclass
 class QAPair:
@@ -50,8 +66,18 @@ class QAPair:
     source_id: str
 
 
-def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
+def pair_items(
+    items: Iterable[ImportItem],
+    *,
+    excluded_session_sources: Iterable[str] | None = None,
+) -> list[QAPair]:
     """Derive deterministic QA pairs from a raw import stream."""
+    excluded = (
+        MACHINE_SESSION_SOURCES
+        if excluded_session_sources is None
+        else frozenset(str(s).strip().lower() for s in excluded_session_sources)
+    )
+    skipped_sessions: dict[str, int] = {}
     groups: dict[tuple[str, str], list[ImportItem]] = {}
     for it in items:
         if it.kind != KIND_RAW:
@@ -60,6 +86,15 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
             continue
         role = (it.role or "").strip().lower()
         if role not in ("user", "assistant"):
+            continue
+        # Native session provenance beats every text heuristic: a scripted
+        # judge run is not a conversation no matter how clean its prompt reads.
+        src = (getattr(it, "session_source", None) or "").strip().lower()
+        if src and src in excluded:
+            key = (it.host or it.source_system or "", it.source_ref or "")
+            if key not in skipped_sessions:
+                skipped_sessions[key] = 0
+            skipped_sessions[key] += 1
             continue
         # 投递层贴在正文前的标记（[Wed 2026-04-22 01:59 GMT+8] / [message_id: …] /
         # [[reply_to_current]]）不是内容：剥掉留正文，两条角色都适用。
@@ -102,6 +137,15 @@ def pair_items(items: Iterable[ImportItem]) -> list[QAPair]:
         host = (it.host or it.source_system or "").strip() or "unknown"
         sid = (it.source_ref or "").strip() or "imported"
         groups.setdefault((host, sid), []).append(it)
+
+    if skipped_sessions:
+        logger.info(
+            "qa_pairing: skipped %d machine-session message(s) across %d session(s) "
+            "(excluded sources: %s)",
+            sum(skipped_sessions.values()),
+            len(skipped_sessions),
+            ",".join(sorted(excluded)) or "<none>",
+        )
 
     pairs: list[QAPair] = []
     for (host, sid), group in groups.items():

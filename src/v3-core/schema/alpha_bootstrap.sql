@@ -243,6 +243,19 @@ CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
     ON public.conversation_stream (session_id, host_turn_id)
     WHERE host_turn_id IS NOT NULL;
 
+-- P0-A session provenance (additive only, 2026-11-11): session_source carries
+-- the host's native answer to "how was this session created" (Hermes
+-- `sessions.source`: desktop / tui / feishu / weixin = a human; tool / cron /
+-- oneshot / subagent = a program). Pairing reads it to keep machine dispatch
+-- ("one scripted call per judge case") out of the conversational QA layer while
+-- raw keeps every message. Nullable with a partial index; historic rows (NULL)
+-- are untouched and stay fail-open (they keep pairing as before).
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS session_source TEXT;
+CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
+    ON public.conversation_stream (host, session_source)
+    WHERE session_source IS NOT NULL;
+
 -- -----------------------------------------------------------------------------
 -- topics — observer topic card (replaces the archived v3_cards). Evidence:
 -- pg_store.insert_card INSERT (topic_id, title, summary, body, keywords,

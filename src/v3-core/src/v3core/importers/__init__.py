@@ -97,6 +97,12 @@ class ImportItem:
     host: str | None = None
     event_id: str | None = None
     identity_kind: str | None = None
+    # Hermes `sessions.source` for this message's session ('desktop', 'cron',
+    # 'tool', 'oneshot', 'subagent', ...). Native provenance, NOT a text
+    # heuristic: a `tool` session is one scripted CLI call (max 2 messages),
+    # a `cron` session is a scheduler run. Pairing uses it to keep machine
+    # dispatch out of the conversational QA layer while raw keeps everything.
+    session_source: str | None = None
 
 
 @dataclass
@@ -330,9 +336,9 @@ _RAW_DEDUPE_SQL = """
 _RAW_DEDUPE_SQL_F2 = """
     INSERT INTO public.conversation_stream
         (session_id, role, content, trigger, turn_id, timestamp, source,
-         tool_calls, tool_results, host, event_id)
+         tool_calls, tool_results, host, event_id, session_source)
     SELECT %s, %s, %s, 'import', %s, %s::timestamptz, %s,
-           %s::jsonb, %s::jsonb, %s, %s
+           %s::jsonb, %s::jsonb, %s, %s, %s
     WHERE NOT EXISTS (
         SELECT 1 FROM public.conversation_stream
          WHERE host = %s
@@ -409,6 +415,7 @@ def _emit_raw_messages(
 
         host = (it.host or "").strip() or None
         event_id = (it.event_id or "").strip() or None
+        session_source = (getattr(it, "session_source", None) or "").strip() or None
         if host and not event_id:
             # Import-derived identity — stable, visibly not-native, and
             # counted per session (not per call): see _OrdinalCounter.
@@ -424,6 +431,7 @@ def _emit_raw_messages(
                     (
                         sess, role, text, turn_id, ts, source_tag,
                         tool_calls, tool_results, host, event_id,
+                        session_source,
                         host, sess, event_id,
                     ),
                 )
@@ -526,6 +534,7 @@ def _raw_params(it: ImportItem, *, idx: int, source_tag: str,
         "turn_id": turn_id,
         "host": host,
         "event_id": event_id,
+        "session_source": (getattr(it, "session_source", None) or "").strip() or None,
         "derived": derived,
         "source_tag": source_tag,
     }
@@ -582,6 +591,7 @@ def _emit_raw_messages_bulk(
                         _RAW_DEDUPE_SQL_F2,
                         (p["sess"], p["role"], text, p["turn_id"], p["ts"], source_tag,
                          p["tool_calls"], p["tool_results"], p["host"], p["event_id"],
+                         p["session_source"],
                          p["host"], p["sess"], p["event_id"]),
                     )
                 elif p["ts"]:

@@ -183,6 +183,12 @@ class HermesSessionImporter(Importer):
 
             msg_cols = self._table_columns(conn, msg_table)
             mapping = self._map_columns(msg_cols, _MSG_COL_CANDIDATES)
+            # `sessions.source` is native provenance for how the session was
+            # created ('desktop' | 'cron' | 'tool' | 'oneshot' | 'subagent' | …).
+            # A `tool` session is one scripted CLI call (max 2 messages) — the
+            # batch judge runs live there. Dropping this field at import forced
+            # every downstream filter to guess from text prefixes instead.
+            sess_meta = self._read_session_meta(conn, sess_table) if sess_table else {}
             if "content" not in mapping or "role" not in mapping:
                 raise ValueError(
                     f"hermes importer: {msg_table!r} lacks role/content "
@@ -286,6 +292,13 @@ class HermesSessionImporter(Importer):
                     "tool_results": _coerce_json(tr_raw) if tr_raw else None,
                     "artifact": path.name,
                 }
+                meta = sess_meta.get(session_id) or {}
+                if meta:
+                    provenance["session_source"] = meta.get("source")
+                    provenance["session_end_reason"] = meta.get("end_reason")
+                    provenance["session_message_count"] = meta.get("message_count")
+                    if meta.get("parent_session_id"):
+                        provenance["parent_session_id"] = meta["parent_session_id"]
                 # Strip None-valued tool fields so the downstream writer
                 # doesn't serialize 'null'.
                 provenance = {k: v for k, v in provenance.items() if v not in (None, "")}
@@ -304,9 +317,38 @@ class HermesSessionImporter(Importer):
                     host="hermes",
                     event_id=event_id,
                     identity_kind=identity_kind,
+                    session_source=(meta.get("source") if meta else None),
                 )
         finally:
             conn.close()
+
+    def _read_session_meta(
+        self, conn: sqlite3.Connection, sess_table: str | None
+    ) -> dict[str, dict]:
+        """Read ``sessions`` metadata keyed by session id.
+
+        Only the columns that describe *how a session came to exist* matter
+        downstream: ``source`` (desktop/cron/tool/...), ``end_reason``,
+        ``message_count`` and ``parent_session_id``. Missing columns are
+        tolerated — an old store simply yields fewer keys, never an error.
+        """
+        if not sess_table:
+            return {}
+        cols = {c.lower(): c for c in self._table_columns(conn, sess_table)}
+        if "id" not in cols:
+            return {}
+        wanted = [k for k in ("source", "end_reason", "message_count", "parent_session_id") if k in cols]
+        if not wanted:
+            return {}
+        select = ", ".join(cols[k] for k in wanted)
+        try:
+            rows = conn.execute(f"SELECT {cols['id']}, {select} FROM {sess_table}").fetchall()
+        except sqlite3.Error:
+            return {}
+        out: dict[str, dict] = {}
+        for row in rows:
+            out[str(row[0])] = {k: row[i + 1] for i, k in enumerate(wanted)}
+        return out
 
     @staticmethod
     def _is_sqlite_state_store(path: Path) -> bool:
