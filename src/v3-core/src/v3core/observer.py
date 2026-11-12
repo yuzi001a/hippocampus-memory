@@ -2435,6 +2435,70 @@ def _filter_keywords(tags):
     return out or None
 
 
+_FACT_CITATION_RE = re.compile(r"\[\s*#\s*(\d+)\s*\]")
+_FACT_NORM_STRIP = re.compile(r"[\s\u3000，。、；：·\-—…“”‘’（）()\[\]【】\"']+")
+
+
+def _norm_fact_text(s: str) -> str:
+    """事实文本归一化: 去空白/标点/大小写差异, 只留可比较的字面。
+
+    用途: 判断"这条新事实是不是旧 body 里已经写过的那件事"。
+    2026-11-12: body 是滚动累积的, 归一化后子串包含足以拦住"同义改写"这一档,
+    不做语义裁判 — 拿不准的一律保留 (宁可留重复, 不丢事实)。
+    """
+    return _FACT_NORM_STRIP.sub("", (s or "").lower())
+
+
+def _dedupe_facts(old_body: str, facts: list[str]) -> list[str]:
+    """追加前拦截 body 里已有的事实 (完全相同 / 轻微改写 / 批内重复)。
+
+    只做字面级判断, 不做语义裁判: 归一化后被已有文本包含 → 判定重复丢弃。
+    宁可留下一条措辞不同的新事实, 也不因为"看起来像"把真新内容删掉。
+    """
+    old_norm = _norm_fact_text(old_body)
+    kept: list[str] = []
+    kept_norm: list[str] = []
+    for f in facts or []:
+        nf = _norm_fact_text(f)
+        if not nf or nf in old_norm:
+            continue
+        if any(nf in kn or kn in nf for kn in kept_norm):
+            continue
+        kept.append(f)
+        kept_norm.append(nf)
+    return kept
+
+
+def _fact_refs_from_text(fact_text: str, qa_rows: list[Any] | None) -> tuple[list[int], str]:
+    """解析 fact 里全部 [#N] → 本批真实 qa_pairs.id 列表 + source 后缀。
+
+    2026-11-12 断链修正: 之前只用第一条引用去复用向量, 引用关系用完就丢,
+    结果 topic_entries 只知道"来自哪张印", 回不到具体 QA。现在:
+      · 恰好一条引用 → 写 source_qa_id (source 前缀 obs:fact 已标明它是派生事实,
+        不是 QA 原话 — 回查语义是"由这条 QA 归纳而来")
+      · 多条引用 → 不伪造单一来源, 在 source 后缀记可核实集合 `:qa=12,37`
+      · 没有引用 → 维持空, 只靠 obs:fact:{note_id} 回查印
+    """
+    if not qa_rows:
+        return [], ""
+    ids: list[int] = []
+    for m in _FACT_CITATION_RE.finditer(fact_text or ""):
+        try:
+            n = int(m.group(1))
+        except Exception:
+            continue
+        if n < 1 or n > len(qa_rows):
+            continue
+        row = qa_rows[n - 1]
+        qid = row.get("id") if isinstance(row, dict) else None
+        if qid is None:
+            continue
+        qi = int(qid)
+        if qi not in ids:
+            ids.append(qi)
+    return ids, (f":qa={','.join(str(i) for i in ids)}" if len(ids) > 1 else "")
+
+
 def _apply_topic_updates(
     pg,
     note_id: int,
@@ -2589,6 +2653,10 @@ def _apply_topic_updates(
         if emb is None:
             return None, "missing_embedding"
         return emb, None
+
+    def _resolve_fact_refs(fact_text: str) -> tuple[list[int], str]:
+        return _fact_refs_from_text(fact_text, qa_rows)
+
     for upd in updates:
         if not isinstance(upd, dict):
             continue
@@ -2596,6 +2664,8 @@ def _apply_topic_updates(
         title = (upd.get("title") or "").strip()[:200]
         summary = (upd.get("summary") or "").strip()[:500]
         new_facts = (upd.get("new_facts") or "").strip()[:8000]
+        _fact_items_all = [f.strip() for f in re.split(r'[\n；;]+', new_facts) if f.strip()]
+        _facts_for_entries: list[str] | None = None
         tags = upd.get("tags") or []
         if not isinstance(tags, list):
             tags = []
@@ -2638,10 +2708,16 @@ def _apply_topic_updates(
                         old_summary = cur[1] or ""
                         _found = True
                 if _found:
+                    # 2026-11-12 追加前去重: body 是滚动累积的, LLM 每轮会把上一版印里
+                    # 已经写过的事实换个说法再给一遍; 直 append 会在 3000 字上限以内
+                    # 反复堆同一件事 (实测某卡 13 段里 2 段同义)。这里按归一化后
+                    # 子串包含拦截"完全相同 + 轻微改写", 拿不准的一律保留。
+                    _facts_to_add = _dedupe_facts(old_body, _fact_items_all)
+                    _facts_for_entries = _facts_to_add
+                    _new_body = (old_body + "\n\n" + "\n".join(_facts_to_add)).strip() if _facts_to_add else old_body
                     # 2026-08-12 v2 修正: body 追加限量 — 第二轮事实级改造发现 new_facts 全追加
                     # 导致单卡膨胀 (6975字) 超注入预算 4000 → 截断 → 关键事实不可见 (conv-26 75%→64%)
                     # 小粒度主题卡覆盖更好 (对照组 31 卡 45.8% vs 实验组 23 卡 44.1%)
-                    _new_body = (old_body + "\n\n" + new_facts).strip()
                     if len(_new_body) > 3000:
                         # body 超限: 不追加, 事实只走 entries (chain 链路), 保持小粒度
                         appended = old_body
@@ -2690,7 +2766,10 @@ def _apply_topic_updates(
             # 解析不到引用的事实走"skip + warning + 累计计数"; strict_pg 下绝不静默
             # 写 NULL embedding (避免断链残留); 非 strict 模式下允许 NULL 但仍记录。
             if (new_facts or '').strip():
-                _fact_items = [f.strip() for f in re.split(r'[\n；;]+', new_facts) if f.strip()]
+                # 2026-11-12: update 分支已做过追加前去重 — 已写进 body 的事实不再重复落
+                # entry, 否则同一件事会既在 body 又在 entries 里各来一遍。
+                _fact_items = (_facts_for_entries if _facts_for_entries is not None
+                               else _fact_items_all)
                 for _fi in _fact_items[:20]:
                     _fact_emb, _reason = _resolve_fact_embedding(_fi)
                     if _fact_emb is None:
@@ -2701,12 +2780,16 @@ def _apply_topic_updates(
                                 f"[{_reason}] {_fi[:80]}"
                             )
                         continue
+                    # 2026-11-12: 把 [#N] 引用落成可核实来源 —
+                    # 单引用写 source_qa_id, 多引用写 source 后缀 :qa=a,b (不伪造单一来源)
+                    _fact_ids, _ref_suffix = _resolve_fact_refs(_fi)
                     try:
                         store.add_entry(
                             topic_id_in,
-                            source=f'obs:fact:{note_id}',
+                            source=f'obs:fact:{note_id}{_ref_suffix}',
                             question=_fi[:300],
                             answer='',
+                            source_qa_id=(_fact_ids[0] if len(_fact_ids) == 1 else None),
                             pg_conn=pg,
                             embedding=_fact_emb,
                             embed_cfg=embed_cfg,
