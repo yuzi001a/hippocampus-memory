@@ -3292,6 +3292,154 @@ def _record_skipped_sensitive(
             "记录 skipped_sensitive 审计失败 (不阻塞): %s", _safe_err(e)[:120])
 
 
+_BLOCKED_QA_CAP = 20000
+
+
+def _blocked_qa_path(cfg: dict[str, Any] | None = None):
+    """毒条黑名单文件路径 (与 observer_state.json 同目录)。"""
+    return _state_path(cfg).parent / "observer_blocked_qa_ids.json"
+
+
+def _load_blocked_qa_ids(cfg: dict[str, Any] | None = None) -> list[int]:
+    """读取「输入侧内容过滤确定性拒绝」的 QA id 黑名单。
+
+    设计动机 (2026-11-12): 一批 30 条 QA 里只要有一条被平台输入侧过滤
+    (422 new_sensitive / 1026), 整批就废; 旧逻辑只能自适应减半 30→15→7→3→1,
+    结果每份 note 只覆盖 1-3 条, 印退化成几十字的碎片。把毒条拉黑后按 30 条
+    重新取批, 批次粒度与生产一致, note 不被稀释。
+    只影响"是否送进 note"这一步 — raw / qa_pairs / 主题卡层完全不动。
+    """
+    p = _blocked_qa_path(cfg)
+    try:
+        if not p.exists():
+            return []
+        data = json.loads(p.read_text(encoding="utf-8")) or {}
+        ids = data.get("qa_ids") if isinstance(data, dict) else data
+        if not isinstance(ids, list):
+            return []
+        return [int(i) for i in ids]
+    except Exception as e:
+        logger.warning("读取 blocked_qa_ids 失败 (按空处理): %s", _safe_err(e)[:120])
+        return []
+
+
+def _add_blocked_qa_ids(
+    ids: list[int],
+    *,
+    reason: str,
+    cfg: dict[str, Any] | None = None,
+) -> None:
+    """把确定性触发内容过滤的 QA id 追加进黑名单。写失败只警告, 不阻塞主流程。"""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return
+    p = _blocked_qa_path(cfg)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {}
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8")) or {}
+            except Exception:
+                data = {}
+        cur_ids = data.get("qa_ids") if isinstance(data, dict) else data
+        if not isinstance(cur_ids, list):
+            cur_ids = []
+        seen = {int(i) for i in cur_ids}
+        for i in ids:
+            if i not in seen:
+                cur_ids.append(i)
+                seen.add(i)
+        if len(cur_ids) > _BLOCKED_QA_CAP:
+            cur_ids = cur_ids[-_BLOCKED_QA_CAP:]
+        payload = {
+            "qa_ids": cur_ids,
+            "count": len(cur_ids),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "last_reason": str(reason)[:200],
+        }
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("写 blocked_qa_ids 失败 (不阻塞): %s", _safe_err(e)[:120])
+
+
+def _probe_qa_rows_sensitive(
+    rows: list[Any],
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+) -> bool:
+    """用同一模型对一组 QA 做最小探测: 是否触发输入侧内容过滤。
+
+    探测文本只含该组 QA 的问答正文, 不含上一版印 —— 目的是把"毒条"归因到
+    具体 QA, 而不是判断整份 prompt 的可用性。平台的内容过滤在推理前完成
+    (0.4-0.6s 返回 422), 因此探测基本不消耗输出额度。
+    """
+    parts: list[str] = []
+    for r in rows:
+        try:
+            q = r[3]
+            a = r[4]
+        except Exception:
+            q, a = "", ""
+        parts.append(f"Q: {q or ''}\nA: {a or ''}")
+    text = "\n\n".join(parts).strip()
+    if not text:
+        return False
+    try:
+        res = call_m3(
+            llm_cfg, api_key, text,
+            max_completion_tokens=16,
+            thinking=thinking, reasoning_split=reasoning_split,
+        )
+    except Exception as e:
+        logger.warning("observer: 敏感探测调用异常 (按未命中处理): %s", _safe_err(e)[:120])
+        return False
+    if "error" not in res:
+        return False
+    return _is_m3_sensitive_error(str(res.get("error", "")))
+
+
+def _find_sensitive_rows(
+    rows: list[Any],
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+    _depth: int = 0,
+) -> list[Any]:
+    """二分定位批内触发内容过滤的 QA 行。返回被拒行; 空列表 = 与具体 QA 无关。
+
+    bounded: 深度上限 6 (2**6=64 分片), 单批最多数十条, 足够覆盖;
+    探测次数约 2k·log(n) (k=毒条数), 相比旧逻辑"整批重试必败 + 降批"
+    既省调用又保住批次粒度。
+    """
+    if not rows or _depth > 6:
+        return []
+    if len(rows) == 1:
+        hit = _probe_qa_rows_sensitive(
+            rows, llm_cfg, api_key,
+            thinking=thinking, reasoning_split=reasoning_split,
+        )
+        return list(rows) if hit else []
+    mid = len(rows) // 2
+    out: list[Any] = []
+    for part in (rows[:mid], rows[mid:]):
+        if _probe_qa_rows_sensitive(
+            part, llm_cfg, api_key,
+            thinking=thinking, reasoning_split=reasoning_split,
+        ):
+            out.extend(_find_sensitive_rows(
+                part, llm_cfg, api_key,
+                thinking=thinking, reasoning_split=reasoning_split,
+                _depth=_depth + 1,
+            ))
+    return out
+
+
 def _segment_id_from_range(qa_range_start: int, qa_range_end: int) -> str:
     """生成 failed_segment / stalled_state 的稳定 segment_id。
 
@@ -4061,6 +4209,9 @@ def _observe_worker(
         # v5.2 (2026-08-21): last_qa_id 已在 1.4 步加载, 这里不再重复 _load_cursor。
         try:
             with pg.cursor() as cur:
+                # 2026-11-12: 毒条黑名单 — 被平台输入侧内容过滤确定性拒绝的 QA
+                # 不进 note 批次 (仍在 raw/qa_pairs/主题卡层)。空列表时该条件恒真。
+                _blocked_ids = _load_blocked_qa_ids(cfg)
                 cur.execute(
                     """
                     SELECT id, session_id, timestamp,
@@ -4069,10 +4220,11 @@ def _observe_worker(
                     FROM qa_pairs
                     WHERE id > %s AND answer IS NOT NULL
                       AND session_id NOT LIKE '%%.trajectory%%'
+                      AND NOT (id = ANY(%s::bigint[]))
                     ORDER BY timestamp ASC NULLS LAST, id ASC
                     LIMIT %s
                     """,
-                    (last_qa_id, max_qa_per_run),
+                    (last_qa_id, _blocked_ids, max_qa_per_run),
                 )
                 rows = cur.fetchall()
         except Exception as e:
@@ -4447,6 +4599,41 @@ def _observe_worker(
                                err_str, latency)
         # 统一失败态分支: primary 失败 / fallback 失败 都过这里
         if _m3_failed_path is not None and "error" in result:
+            # 敏感项隔离 (2026-11-12): 批内确定性内容过滤 → 二分定位毒条并拉黑,
+            # 保持批次粒度不变 (不降批, 不用 1-3 条凑 note)。定位不到具体 QA
+            # (说明是上一版印/候选等其它输入触发) 才回落旧的自适应减半。
+            if len(rows) > 1 and _is_m3_sensitive_error(str(result.get("error", ""))):
+                try:
+                    _offenders = _find_sensitive_rows(
+                        rows, merged, api_key,
+                        thinking=thinking, reasoning_split=reasoning_split,
+                    )
+                except Exception as _e_iso:
+                    _offenders = []
+                    logger.warning(
+                        "observer: 敏感项隔离探测失败 (回落自适应减半): %s",
+                        _safe_err(_e_iso)[:120],
+                    )
+                if _offenders:
+                    _bad_ids = [int(r[0]) for r in _offenders]
+                    _iso_reason = str(result.get("error", ""))[:200]
+                    _add_blocked_qa_ids(_bad_ids, reason=_iso_reason, cfg=cfg)
+                    for _bid in _bad_ids:
+                        _record_skipped_sensitive(_bid, _bid, reason=_iso_reason, cfg=cfg)
+                    logger.warning(
+                        "observer: 敏感项隔离 — 批内 %d/%d 条被平台确定性拒绝, 已拉黑留档 "
+                        "(ids=%s); 本批不降批、不推进 cursor, 下轮按 %d 条重新取批",
+                        len(_bad_ids), len(rows), _bad_ids[:10], max_qa_per_run,
+                    )
+                    try:
+                        pg.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        pg.close()
+                    except Exception:
+                        pass
+                    return
             if len(rows) > 1:
                 # 多条 QA: 复用现有 _save_adaptive_batch (与 JSON 解析失败 / 多条超长
                 # 输出走同一契约), 把 batch 减半 → 下次 worker 按 adaptive reason
