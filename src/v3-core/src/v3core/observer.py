@@ -3440,6 +3440,111 @@ def _find_sensitive_rows(
     return out
 
 
+def _probe_text_sensitive(
+    text: str,
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+) -> bool:
+    """对任意文本做一次最小探测: 是否被平台输入侧内容过滤确定性拒绝。"""
+    text = (text or "").strip()
+    if not text:
+        return False
+    try:
+        res = call_m3(
+            llm_cfg, api_key, text,
+            max_completion_tokens=16,
+            thinking=thinking, reasoning_split=reasoning_split,
+        )
+    except Exception as e:
+        logger.warning("observer: 文本探测异常 (按未命中): %s", _safe_err(e)[:120])
+        return False
+    if "error" not in res:
+        return False
+    return _is_m3_sensitive_error(str(res.get("error", "")))
+
+
+def _bisect_refused_text(
+    paras: list[str],
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+    _depth: int = 0,
+) -> list[str]:
+    """在段落粒度上二分定位被拒文本的最小区块。"""
+    if not paras or _depth > 12:
+        return []
+    if len(paras) == 1:
+        return list(paras) if _probe_text_sensitive(
+            paras[0], llm_cfg, api_key,
+            thinking=thinking, reasoning_split=reasoning_split,
+        ) else []
+    mid = len(paras) // 2
+    out: list[str] = []
+    for part in (paras[:mid], paras[mid:]):
+        if _probe_text_sensitive(
+            "\n\n".join(part), llm_cfg, api_key,
+            thinking=thinking, reasoning_split=reasoning_split,
+        ):
+            out.extend(_bisect_refused_text(
+                part, llm_cfg, api_key,
+                thinking=thinking, reasoning_split=reasoning_split,
+                _depth=_depth + 1,
+            ))
+    return out
+
+
+def _find_sensitive_rows_in_prompt(
+    prompt: str,
+    rows: list[Any],
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+) -> list[Any]:
+    """在被拒的真实 prompt 上二分, 把最小触发块映射回具体 QA 行。
+
+    为什么必须用 prompt 而不是"重新渲染 QA 文本": 平台过滤按输入原文匹配,
+    换成另一种包法 (裸 Q/A、无前缀、不同分隔符) 可能就不触发 —— 实测同一批
+    在真实 prompt 里必拒、在裸问答里全过。只有对同一份文本二分才可靠。
+
+    返回空列表的两种情况 (调用方据此回落旧的自适应减半):
+      ① 触发块落在 prompt 骨架/上一版印/候选主题里, 映射不到具体 QA;
+      ② 探测本身没复现拒绝 (过滤概率性)。
+    """
+    if not prompt or not rows:
+        return []
+    paras = [p for p in prompt.split("\n\n") if p.strip()]
+    bad_spans = _bisect_refused_text(
+        paras, llm_cfg, api_key,
+        thinking=thinking, reasoning_split=reasoning_split,
+    )
+    if not bad_spans:
+        return []
+    joined = "\n\n".join(bad_spans)
+    offenders: list[Any] = []
+    seen: set[int] = set()
+    for r in rows:
+        try:
+            qa_id = int(r[0])
+            q = str(r[3] or "")
+            a = str(r[4] or "")
+        except Exception:
+            continue
+        if qa_id in seen:
+            continue
+        probes = [s[:60] for s in (q.strip(), a.strip()) if len(s.strip()) >= 8]
+        if probes and any(s in joined for s in probes):
+            offenders.append(r)
+            seen.add(qa_id)
+    return offenders
+
+
 def _segment_id_from_range(qa_range_start: int, qa_range_end: int) -> str:
     """生成 failed_segment / stalled_state 的稳定 segment_id。
 
@@ -4599,13 +4704,25 @@ def _observe_worker(
                                err_str, latency)
         # 统一失败态分支: primary 失败 / fallback 失败 都过这里
         if _m3_failed_path is not None and "error" in result:
+            # 诊断留痕 (2026-11-12): 被拒时把实际 prompt 落盘, 供离线二分定位触发源。
+            # 只在显式开 V3CORE_OBSERVER_DUMP_REFUSED=1 时写, 默认零副作用。
+            if os.environ.get("V3CORE_OBSERVER_DUMP_REFUSED") == "1":
+                try:
+                    from .config import _resolve_data_dir as _rdd
+                    _dump_dir = _rdd(cfg)
+                    _dump_dir.mkdir(parents=True, exist_ok=True)
+                    _dump = _dump_dir / f"refused_prompt_{first_qa_id}_{last_qa_id_now}.txt"
+                    _dump.write_text(prompt, encoding="utf-8")
+                    logger.warning("observer: 被拒 prompt 已落盘 %s (%d 字)", _dump, len(prompt))
+                except Exception as _e_dump:
+                    logger.warning("observer: 落盘被拒 prompt 失败: %s", _safe_err(_e_dump)[:120])
             # 敏感项隔离 (2026-11-12): 批内确定性内容过滤 → 二分定位毒条并拉黑,
             # 保持批次粒度不变 (不降批, 不用 1-3 条凑 note)。定位不到具体 QA
             # (说明是上一版印/候选等其它输入触发) 才回落旧的自适应减半。
             if len(rows) > 1 and _is_m3_sensitive_error(str(result.get("error", ""))):
                 try:
-                    _offenders = _find_sensitive_rows(
-                        rows, merged, api_key,
+                    _offenders = _find_sensitive_rows_in_prompt(
+                        prompt, rows, merged, api_key,
                         thinking=thinking, reasoning_split=reasoning_split,
                     )
                 except Exception as _e_iso:

@@ -88,3 +88,52 @@ def test_blocked_path_lives_next_to_state_file(state_cfg):
     """黑名单与游标同目录 — 回放/隔离 profile 各自独立, 不串味。"""
     state = obs._state_path(state_cfg)
     assert obs._blocked_qa_path(state_cfg).parent == state.parent
+
+
+# ── prompt 级二分 (真实触发源) ──────────────────────────────────────────
+
+
+def _prompt_for(rows):
+    """模拟真实 prompt: 指令骨架 + 每行 QA 独立成段。"""
+    parts = ["[instructions] write a rolling note", "[prev note] 上一版印内容"]
+    for r in rows:
+        parts.append(f"[QA {r[0]}]\nQ: {r[3]}\nA: {r[4]}")
+    return "\n\n".join(parts)
+
+
+def test_prompt_bisect_maps_refused_span_back_to_row(monkeypatch):
+    """真实 prompt 里的触发块必须能映射回具体 QA 行。
+
+    回归点: 裸问答探测会漏判 —— 平台按输入原文匹配, 换一种包法就不触发。
+    """
+    def fake_call_m3(cfg, api_key, prompt, **kwargs):
+        return {"error": "HTTP 422: input new_sensitive (1026)"} if "POISON" in prompt else {"text": "ok"}
+
+    monkeypatch.setattr(obs, "call_m3", fake_call_m3)
+
+    rows = [_row(1, "q1"), _row(2, "q2"), _row(3, "POISON question"), _row(4, "q4")]
+    offenders = obs._find_sensitive_rows_in_prompt(_prompt_for(rows), rows, {"model": "m"}, "k")
+    assert [int(r[0]) for r in offenders] == [3]
+
+
+def test_prompt_bisect_returns_empty_when_trigger_is_skeleton(monkeypatch):
+    """触发块落在指令/上一版印里 → 返回空, 调用方回落自适应减半, 不误伤 QA。"""
+    def fake_call_m3(cfg, api_key, prompt, **kwargs):
+        return {"error": "422 new_sensitive"} if "上一版印内容" in prompt else {"text": "ok"}
+
+    monkeypatch.setattr(obs, "call_m3", fake_call_m3)
+
+    rows = [_row(i, f"q{i}") for i in range(1, 5)]
+    assert obs._find_sensitive_rows_in_prompt(_prompt_for(rows), rows, {"model": "m"}, "k") == []
+
+
+def test_prompt_bisect_two_offenders_in_different_halves(monkeypatch):
+    """两个毒条分处不同半区时都要被找出来。"""
+    def fake_call_m3(cfg, api_key, prompt, **kwargs):
+        return {"error": "HTTP 422 new_sensitive (1026)"} if ("POISON_A" in prompt or "POISON_B" in prompt) else {"text": "ok"}
+
+    monkeypatch.setattr(obs, "call_m3", fake_call_m3)
+
+    rows = [_row(1, "POISON_A q"), _row(2, "q2"), _row(3, "q3"), _row(4, "POISON_B q")]
+    offenders = obs._find_sensitive_rows_in_prompt(_prompt_for(rows), rows, {"model": "m"}, "k")
+    assert sorted(int(r[0]) for r in offenders) == [1, 4]
