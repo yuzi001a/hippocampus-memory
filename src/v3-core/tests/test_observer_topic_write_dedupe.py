@@ -58,6 +58,18 @@ def test_dedupe_does_not_swallow_unrelated_short_fact():
     assert obs._dedupe_facts("", facts) == facts
 
 
+# ── update 不改名 ─────────────────────────────────────────────────────────
+
+
+def test_update_keeps_existing_title():
+    """建卡定名后不再改名 — 否则卡名只代表最后一轮讨论的子话题。"""
+    assert obs._title_for_update("Honcho 本地部署与插件接入", "本地消息上限评估与调整") == "Honcho 本地部署与插件接入"
+
+
+def test_create_path_still_uses_model_title():
+    assert obs._title_for_update("", "  新主题名  ") == "新主题名"
+
+
 # ── [#N] 引用落成可核实来源 ───────────────────────────────────────────────
 
 

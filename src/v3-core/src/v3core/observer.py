@@ -2439,6 +2439,16 @@ _FACT_CITATION_RE = re.compile(r"\[\s*#\s*(\d+)\s*\]")
 _FACT_NORM_STRIP = re.compile(r"[\s\u3000，。、；：·\-—…“”‘’（）()\[\]【】\"']+")
 
 
+def _title_for_update(old_title: str, model_title: str) -> str:
+    """update 分支的标题选择: 已有标题优先, 不被当轮模型标题覆盖。
+
+    2026-11-13: 之前每轮 update 都写模型当轮的 title, 一张卡会被最后一次讨论的
+    子话题改名 (「Honcho 本地部署与插件接入」→「本地消息上限评估与调整」),
+    卡名从此只代表最后一轮。建卡定名, 之后不改名。
+    """
+    return (old_title or "").strip() or (model_title or "").strip()
+
+
 def _norm_fact_text(s: str) -> str:
     """事实文本归一化: 去空白/标点/大小写差异, 只留可比较的字面。
 
@@ -2682,19 +2692,21 @@ def _apply_topic_updates(
                 # 读 SQLite 找不到 → 误转 create → 制造重复卡）; PG 无则转 create
                 old_body = ""
                 old_summary = ""
+                old_title = ""
                 _found = False
                 if pg is not None:
                     try:
                         _conn_pg = pg._connect() if hasattr(pg, "_connect") else pg
                         with _conn_pg.cursor() as _cur:
                             _cur.execute(
-                                f"SELECT body, summary FROM {topics_table} WHERE topic_id=%s",
+                                f"SELECT body, summary, title FROM {topics_table} WHERE topic_id=%s",
                                 (topic_id_in,),
                             )
                             _row = _cur.fetchone()
                             if _row:
                                 old_body = _row[0] or ""
                                 old_summary = _row[1] or ""
+                                old_title = _row[2] or ""
                                 _found = True
                     except Exception:
                         _found = False
@@ -2725,8 +2737,13 @@ def _apply_topic_updates(
                     else:
                         appended = _new_body
                     new_summary = summary or old_summary
+                    # 2026-11-13 标题锁定: 每轮 update 都把模型当轮写的 title 覆盖回去,
+                    # 实测一张卡会被后来讨论的子话题改名 (「Honcho 本地部署与插件接入」
+                    # → 「本地消息上限评估与调整」), 卡名从此只代表最后一轮。
+                    # 建卡时定名, update 不改名 — 除非模型显式给 rename (本版未开放)。
+                    _kept_title = _title_for_update(old_title, title)
                     store.upsert_topic(
-                        title=title,
+                        title=_kept_title,
                         summary=new_summary,
                         body=appended[:16000],
                         keywords=_filter_keywords(tags),

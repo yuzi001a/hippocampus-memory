@@ -736,31 +736,43 @@ def synthesize_yin(
 
     try:
         target.write_text(header + y_content, encoding="utf-8")
-        _ingest_yin_segments(y_content, cfg, ts, pool=pool)
+        _seg_written = _ingest_yin_segments(y_content, cfg, ts, pool=pool) or 0
 
         # ── 2026-08-06 Step 3c: 印进召回池（切段入库 yin_paragraphs）──
         # 失败不阻塞（印已写文件; 入库失败下次 E1 重新切段）
-        try:
-            from .yin_pool import ingest_yin
-            from .embedding import safe_embed_cfg as _safe_embed_cfg
-            # 阶段1 (2026-08-20): 走 build_embed_cfg 工厂; 缺 model/endpoint → 不传 cfg
-            _ecfg = _safe_embed_cfg(cfg)
-            _pg_yin = _get_cfg_pg_conn_compat(cfg, pool)
-            if _pg_yin is not None:
-                try:
-                    _ingested = ingest_yin(
-                        y_content, target.name, _pg_yin, _ecfg
-                    )
-                    logger.info("[e1] 印段落入库 yin_paragraphs: %d 段 (%s)", _ingested, target.name)
-                finally:
+        #
+        # 2026-11-13 双写去重: 上面主路径与这里的 yin_pool 路径都会切段 INSERT,
+        # 版本键还不同 (ts vs y_*.md) → 幂等清理互不见, 每份印入库两遍。
+        # 生产实测 yin_paragraphs 1,657 行 / 818 份不同内容 (50.6% 是重复副本),
+        # 印段落召回于是同一段命中两次、白占注入预算。现在: 主路径写成即跳过,
+        # 只有主路径 0 段(降级/失败)才走 yin_pool 兜底。
+        if _seg_written:
+            logger.info(
+                "[e1] 印段主路径已写入 %d 段, 跳过 yin_pool 重复写入 (%s)",
+                _seg_written, target.name,
+            )
+        else:
+            try:
+                from .yin_pool import ingest_yin
+                from .embedding import safe_embed_cfg as _safe_embed_cfg
+                # 阶段1 (2026-08-20): 走 build_embed_cfg 工厂; 缺 model/endpoint → 不传 cfg
+                _ecfg = _safe_embed_cfg(cfg)
+                _pg_yin = _get_cfg_pg_conn_compat(cfg, pool)
+                if _pg_yin is not None:
                     try:
-                        _pg_yin.close()
-                    except Exception:
-                        pass
-        except ValueError:
-            raise
-        except Exception as e:
-            logger.warning("[e1] 印入库失败 (不阻塞): %s", _safe_err(e)[:150])
+                        _ingested = ingest_yin(
+                            y_content, target.name, _pg_yin, _ecfg
+                        )
+                        logger.info("[e1] 印段落入库 yin_paragraphs: %d 段 (%s)", _ingested, target.name)
+                    finally:
+                        try:
+                            _pg_yin.close()
+                        except Exception:
+                            pass
+            except ValueError:
+                raise
+            except Exception as e:
+                logger.warning("[e1] 印入库失败 (不阻塞): %s", _safe_err(e)[:150])
 
         # ── PG 双写 ──
         try:
@@ -1281,6 +1293,7 @@ def _ingest_yin_segments(y_content, config, ts, pool: Any = None):
     sections = [s for s in y_content.strip().split("\n") if s.startswith("## ")]
     if not sections:
         return
+    _written = 0
     try:
         pg = _Pg(config, pool=pool)
         try:
@@ -1315,6 +1328,7 @@ def _ingest_yin_segments(y_content, config, ts, pool: Any = None):
                         scope_id="all",
                         metadata={"topic_ids": topic_ids} if topic_ids else None,
                     )
+                    _written += 1
         finally:
             try:
                 pg.close()
@@ -1324,6 +1338,7 @@ def _ingest_yin_segments(y_content, config, ts, pool: Any = None):
         raise
     except Exception:
         pass
+    return _written
 
 
 # ────────────────────────────────────────────────────────────
