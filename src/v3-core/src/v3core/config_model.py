@@ -120,6 +120,9 @@ class LLMConfig:
     max_tokens: int | None = None
     thinking_mode: str = "auto"
     timeout: int = 600
+    # adaptive-thinking 族 (M3.1) 的思考档位。None = 不显式下发 (llm.py 只认显式配置)。
+    # 没有字段时 `llm.reasoning_effort: high` 会被解析层静默丢掉, 表现为"写了没用"。
+    reasoning_effort: str | None = None
 
     def __repr__(self):
         return f"LLMConfig(provider={self.provider!r}, model={self.model!r}, api_key='***')"
@@ -281,6 +284,9 @@ class V3Config:
                 else {}
             )},
             "half_life": self.half_life,
+            # models: 是用户可见的配置面; escape hatch 丢了它, 任何走 to_legacy_dict
+            # 的下游 (迁移脚本 / LLMClient / init 重写 config.yaml) 都会退回内置表。
+            "models": {k: dict(v) for k, v in (self.models or {}).items()},
             "storage": {
                 "pg": self.pg.to_legacy_dict() if self.pg else {},
                 "embed": self.embed.to_legacy_dict() if self.embed else {},
@@ -361,6 +367,12 @@ def from_legacy_dict(src: dict | None) -> V3Config:
     ingest_raw = src.get("ingest") or {}
     prompts = src.get("prompts") or {}
     models_raw = src.get("models") or {}
+    if not isinstance(models_raw, dict):
+        logger.warning(
+            "config: models: 段应该是 mapping (模型名 → {thinking, reasoning_effort}), "
+            "收到 %s — 已忽略, 全部按内置表解析", type(models_raw).__name__,
+        )
+        models_raw = {}
 
     # -- LLM --
     _llm_max_tokens = llm_raw.get("max_tokens")
@@ -377,6 +389,10 @@ def from_legacy_dict(src: dict | None) -> V3Config:
         thinking_mode=str(llm_raw.get("thinking_mode", "auto") or "auto").strip().lower(),
         max_tokens=_llm_max_tokens,
         timeout=_coerce_int(llm_raw.get("timeout"), 600),
+        reasoning_effort=(
+            str(llm_raw.get("reasoning_effort")).strip().lower()
+            if llm_raw.get("reasoning_effort") not in (None, "") else None
+        ),
     )
 
     # -- PG --

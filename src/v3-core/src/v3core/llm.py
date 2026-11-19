@@ -222,7 +222,8 @@ class LLMClient:
             # states `thinking: false` / `max_tokens: 8192` silently inherits
             # defaults meant for another vendor (131072 got rejected with
             # "exceeded max_seq_len" on SiliconFlow).
-            for opt in ("thinking", "thinking_mode", "max_tokens", "temperature", "timeout"):
+            for opt in ("thinking", "thinking_mode", "max_tokens", "temperature", "timeout",
+                        "reasoning_effort"):
                 value = getattr(config.llm, opt, None)
                 if value is not None:
                     out[opt] = value
@@ -234,7 +235,8 @@ class LLMClient:
                 "api_key": getattr(config, "api_key", ""),
                 "base_url": getattr(config, "base_url", "") or "",
             }
-            for opt in ("thinking", "thinking_mode", "max_tokens", "timeout"):
+            for opt in ("thinking", "thinking_mode", "max_tokens", "timeout",
+                        "reasoning_effort"):
                 value = getattr(config, opt, None)
                 if value is not None:
                     out[opt] = value
@@ -338,11 +340,11 @@ class LLMClient:
             "max_completion_tokens": _output_budget,  # M3 铁律: max_tokens 已弃用被忽略, 必须用 max_completion_tokens
         }
         _raw_cfg = getattr(self, "_raw_config", None)
-        _params = model_params.resolve(self.model, _raw_cfg)
-        _effort = model_params.reasoning_effort_for(
-            _params,
-            {"reasoning_effort": getattr(self, "_reasoning_effort_cfg", None)},
-            default="low",
+        # llm.py 只认**显式配置**的 effort。E1 / 抽取 / session_summary 走 131k 输出
+        # 预算, 没有质量对照就不该被 models: 表里的默认档静默统一降档; 需要压思考的
+        # 观察者路径有自己的解析 (表 + 默认 low)。
+        _effort = model_params.explicit_reasoning_effort(
+            {"reasoning_effort": getattr(self, "_reasoning_effort_cfg", None)}
         )
         thinking_payload = _thinking_payload(self.model, self._thinking_mode, _raw_cfg)
         if thinking_payload is not None:
@@ -370,11 +372,12 @@ class LLMClient:
                     adaptive_fallback_attempted = True
                     retry_body = dict(body)
                     retry_body.pop("thinking", None)
-                    # 服务端要 adaptive = 表判断被推翻, 这一发按 adaptive 补齐 effort
-                    retry_body.setdefault(
-                        "reasoning_effort",
-                        str(getattr(self, "_reasoning_effort_cfg", "") or "low"),
-                    )
+                    # 服务端要 adaptive = 表判断被推翻, 这一发按 adaptive 补齐 effort。
+                    # reasoning_effort 是 MiniMax 专属字段: 只对 minimax 家族/官方端点补,
+                    # 免得把第三方网关原样回显的同一句话变成另一个 400。
+                    _retry_effort = str(getattr(self, "_reasoning_effort_cfg", "") or "low")
+                    if "minimax" in (self.provider or "").lower() or "minimaxi" in (url or "").lower():
+                        retry_body.setdefault("reasoning_effort", _retry_effort)
                     logger.warning(
                         "MiniMax rejected thinking with requires adaptive thinking; retrying once without it (model=%s)",
                         self.model,

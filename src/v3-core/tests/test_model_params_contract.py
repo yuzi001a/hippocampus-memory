@@ -129,7 +129,11 @@ def test_reasoning_effort_precedence():
 
 # ── 3. 两条真实调用路径 ─────────────────────────────────────────────────────
 
-def test_llm_chat_sends_effort_and_no_thinking_for_adaptive(monkeypatch):
+def test_llm_chat_does_not_downgrade_effort_from_the_table(monkeypatch):
+    """llm.py 只认显式配置: E1/抽取走 131k 预算, 表里的默认档不许替它们决定。
+
+    观察者路径有自己的解析 (表 + low), 这里只保证"没写配置 = 不发该字段"。
+    """
     seen = []
     monkeypatch.setattr(requests, "post", lambda url, **kw: (seen.append(kw["json"]), _ok())[1])
 
@@ -139,7 +143,38 @@ def test_llm_chat_sends_effort_and_no_thinking_for_adaptive(monkeypatch):
 
     body = seen[0]
     assert "thinking" not in body
-    assert body["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in body
+
+
+def test_llm_chat_sends_effort_when_explicitly_configured(monkeypatch):
+    seen = []
+    monkeypatch.setattr(requests, "post", lambda url, **kw: (seen.append(kw["json"]), _ok())[1])
+
+    llm.LLMClient({"llm": {"provider": "minimax", "model": "MiniMax-M3.1-Flash",
+                           "api_key": "k", "base_url": "https://example.test/v1",
+                           "reasoning_effort": "high"}}).chat(
+        "sys", [{"role": "user", "content": "hi"}])
+
+    assert seen[0]["reasoning_effort"] == "high"
+    assert "thinking" not in seen[0]
+
+
+def test_v3config_carries_llm_reasoning_effort():
+    """V3Config 路径上这个键必须是活的 (否则写了也没用, 而且没人报错)。"""
+    from v3core.config_model import from_legacy_dict
+
+    cfg = from_legacy_dict({"llm": {"provider": "minimax", "model": "MiniMax-M3.1-Flash",
+                                    "reasoning_effort": "High"}})
+    assert cfg.llm.reasoning_effort == "high"
+    assert llm.LLMClient(cfg)._reasoning_effort_cfg == "high"
+
+
+def test_explicit_effort_off_is_honoured_on_the_observer_table():
+    """表里写 null/omit = 就是不发, 不许再回落到调用方的 default。"""
+    params = model_params.resolve(
+        "acme-1", {"models": {"acme": {"thinking": "adaptive", "reasoning_effort": None}}})
+    assert params.effort_declared is True
+    assert model_params.reasoning_effort_for(params, {}, default="low") is None
 
 
 def test_llm_chat_keeps_thinking_for_classic_and_never_adds_effort(monkeypatch):
