@@ -201,9 +201,26 @@ jobs:
           uv pip install --python "${HERMES_VENV}/Scripts/python.exe" \
             "${SMOKE_ROOT}/dist/v3-core"/*.whl \
             "${SMOKE_ROOT}/dist/v3-hermes-plugin"/*.whl
-          # `uv pip check` proves no two distributions disagree about
-          # a dependency version. Hard-fails on broken graphs.
-          uv pip check --python "${HERMES_VENV}/Scripts/python.exe"
+          # `uv pip check` proves no two distributions disagree about a
+          # dependency version. It has to be scoped to *our* two distributions:
+          # the host venv is `uv sync` of upstream Hermes @ main, and upstream's
+          # own pins drift (as of 2026-10-23: `browser-harness` requires
+          # `pillow==12.3.0` while the resolver installs 13.x), which made this
+          # gate red for every PR for a month without telling us anything about
+          # this repo. A broken graph involving v3-core / v3-hermes-plugin still
+          # fails the step.
+          set +e
+          _pip_check_out="$(uv pip check --python "${HERMES_VENV}/Scripts/python.exe" 2>&1)"
+          _pip_check_rc=$?
+          set -e
+          echo "${_pip_check_out}"
+          if [ "${_pip_check_rc}" -ne 0 ]; then
+            if echo "${_pip_check_out}" | grep -Eiq "v3-core|v3-hermes-plugin|v3_core|v3_hermes_plugin"; then
+              echo "::error::our distributions have unsatisfied requirements"
+              exit 1
+            fi
+            echo "::warning::pre-existing incompatibility in the upstream Hermes host venv (not our distributions); not failing this gate"
+          fi
 
       # ─────────────────────────────────────────────────────────────────
       # 4. Assert both packages import from site-packages (not the repo),
