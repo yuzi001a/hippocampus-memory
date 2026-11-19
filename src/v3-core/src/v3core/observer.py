@@ -372,6 +372,10 @@ _DEFAULT_OBSERVER_CONFIG: dict[str, Any] = {
     # ---- LLM / prompt 配置 ----
     "max_completion_tokens": 32768,  # phase6 提至 32768: 8000字 输出 + tokens 余量
     "thinking": "disabled",       # phase0e 定案: 禁用思考
+    # 2026-11-19: 仅对"省略 thinking"的模型族 (M3.1) 生效。不压低时 adaptive 思考会
+    # 吃满输出预算 (实测 30 QA 批次 reasoning 56,547 字符 / 16384 上限, JSON 未闭合,
+    # 表现为每轮静默超时或写不出印)。M3.1 只收 low/medium/high/xhigh/max。
+    "reasoning_effort": "low",
     "reasoning_split": True,      # phase0e 定案
     "debounce_seconds": 10,       # 触发节流, 防高频
     "model": None,                # None → 用 llm.model
@@ -852,6 +856,9 @@ def call_m3(
     # 2026-08-09: timeout 支持 cfg 配置 — 大输入+大输出 (印 2-3万字 + 50 QA) M3 处理慢,
     # 默认 180s 不够 (实测连续超时); 生产可配 timeout: 300
     timeout = int(cfg.get("timeout", timeout) or timeout)
+    # 2026-11-19: M3.1 的 adaptive thinking 需要显式 effort。只在"不下发 thinking"的
+    # 路径使用; 显式 thinking={type:...} 的模型族保持原行为。cfg 可覆盖。
+    _reasoning_effort = str(cfg.get("reasoning_effort") or "low").strip().lower()
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
@@ -863,6 +870,11 @@ def call_m3(
     _thinking_field = _m3_thinking_payload(model, thinking)
     if _thinking_field is not None:
         payload["thinking"] = _thinking_field
+    else:
+        # 2026-11-19: 省略 thinking 的族 (M3.1) 默认走 adaptive thinking —
+        # 必须显式压 effort, 否则长 prompt 的思考会把输出预算吃光, 表现为
+        # "每轮静默超时 / JSON 未闭合"。cfg 可覆盖 (reasoning_effort)。
+        payload["reasoning_effort"] = _reasoning_effort
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -884,7 +896,11 @@ def call_m3(
                 "observer: M3 拒绝 thinking 参数(requires adaptive thinking), 去掉该字段重试一次 model=%s",
                 model,
             )
-            resp = _post({k: v for k, v in payload.items() if k != "thinking"})
+            # 重试体同样要压 effort: 去掉 thinking 后走的就是 adaptive 默认档,
+            # 不压会重演"思考吃满输出预算"的静默失败。
+            _retry_body = {k: v for k, v in payload.items() if k != "thinking"}
+            _retry_body.setdefault("reasoning_effort", _reasoning_effort)
+            resp = _post(_retry_body)
         latency = time.time() - t0
     except Exception as e:
         return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
@@ -1425,6 +1441,7 @@ def _observer_prompt(
 - 本轮信息少就写短; 本轮只有一两条变化时, 几句话或一两个小段完全足够。长度按变化量伸缩, 不要按 note_min / note_max 填充。
 - 上一轮观察快照和人格层只用于理解变化, 不能替代本轮 QA; 候选主题只用于主题动作判断 (update/create)。
 - 每条关键事实、决策、教训或偏好在原文旁紧跟 `[ #N ]` 的无空格形式 `[#N]`, N 是本轮 QA 序号。
+- 决策行与进展行按 `[归属] …〔状态〕[#N]` 的固定顺序写: 归属在最前, 状态紧贴 `[#N]` 之前 (状态词由模型自行判断, 写不准就省, 不要为凑格式牺牲内容)。
 - 主题卡只记录值得长期检索的变化: 可匹配已有候选时 update, 否则确有独立价值时 create; 纯寒暄和重复确认可以不建卡。
 - new_facts 只写最重要的新事实并保留原词, tags 保留用户可能实际搜索的原词或专名; 不要把主题动作重复写成 note 正文, 不写入 note.content 的事实。
 

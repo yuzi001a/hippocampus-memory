@@ -66,6 +66,9 @@ def test_call_m3_omits_thinking_for_m31_disabled(monkeypatch):
     assert result["text"] == "ok"
     assert len(seen) == 1
     assert "thinking" not in seen[0], "M3.1 收到 thinking=disabled 会 400，必须省略该字段"
+    # 省略 thinking 后服务端默认 adaptive，必须显式压低 effort：实测 30 条 QA 批次
+    # 不压时 reasoning 56,547 字符吃满输出预算、JSON 未闭合 → 每轮静默超时/写不出印。
+    assert seen[0]["reasoning_effort"] == "low"
     # 其余历史字段不受影响
     assert seen[0]["model"] == "MiniMax-M3.1-Flash"
     assert seen[0]["reasoning_split"] is True
@@ -104,7 +107,11 @@ def test_call_m3_retries_once_without_thinking_on_adaptive_400(monkeypatch):
     assert result["text"] == "recovered"
     assert len(seen) == 2
     assert seen[0]["thinking"] == {"type": "enabled"}
+    # 显式下发 thinking 的请求不加 effort（那个族有自己的开关）
+    assert "reasoning_effort" not in seen[0]
+    # 重试体去掉 thinking 后走 adaptive 默认档，必须补 effort
     assert "thinking" not in seen[1]
+    assert seen[1]["reasoning_effort"] == "low"
 
 
 def test_call_m3_does_not_retry_other_400(monkeypatch):
@@ -122,3 +129,41 @@ def test_call_m3_does_not_retry_other_400(monkeypatch):
 
     assert "error" in result
     assert len(seen) == 1, "非 adaptive-thinking 的 4xx 不允许重试"
+
+
+def test_call_m3_reasoning_effort_is_configurable(monkeypatch):
+    """effort 是配置项，不是硬编码常量 — 换档位只改 config。"""
+    seen = []
+
+    def fake_post(url, **kwargs):
+        seen.append(kwargs["json"])
+        return _FakeResponse(200, data={"choices": [{"message": {"content": "ok"}}], "usage": {}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    observer_mod.call_m3(
+        {"model": "MiniMax-M3.1-Flash", "reasoning_effort": "medium"},
+        "test-secret-key",
+        "hello",
+        thinking="disabled",
+    )
+
+    assert seen[0]["reasoning_effort"] == "medium"
+
+
+def test_legacy_models_never_receive_reasoning_effort(monkeypatch):
+    """M3 等老模型走 thinking={type:disabled}，不应被塞 effort（未知参数风险）。"""
+    seen = []
+
+    def fake_post(url, **kwargs):
+        seen.append(kwargs["json"])
+        return _FakeResponse(200, data={"choices": [{"message": {"content": "ok"}}], "usage": {}})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    observer_mod.call_m3(
+        {"model": "MiniMax-M3"}, "test-secret-key", "hello", thinking="disabled"
+    )
+
+    assert seen[0]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in seen[0]
