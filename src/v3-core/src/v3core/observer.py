@@ -1156,7 +1156,7 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
         "section": "关键决策（拍板的决策 + 理由）",
         # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
         "define": (
-            "写方向 / 口径 / 取舍的最后结论 + 理由, 每条带归属标记; 我提出但用户还没表态的方案标 [建议] 也要写, 不能因为没拍板就不记; 悬而未决的问题写进「进行中状态」, 不放进本节"
+            "写方向 / 口径 / 取舍的最后结论 + 理由, 每条带归属标记; 我提出但用户还没表态的方案标 [建议] 也要写, 不能因为没拍板就不记; 悬而未决的问题写进「进行中状态」, 不放进本节。只要本段出现拍板、提案或纠正之一, 本节就要写 (只有提案时全部标 [建议])"
         ),
         "prompt": (
             "**仅在本段 QA 出现新的拍板决策时输出**, 没新决策就省略该节。\n"
@@ -1237,7 +1237,7 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
         "section": "关系记忆",
         # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
         "define": (
-            "用户与「我」的关系定义变化; 保留双方原词, 不抽象成规则"
+            "用户与「{_id}」的关系定义变化; 保留双方原词, 不抽象成规则"
         ),
         "prompt": (
             "**仅在本段 QA 改变用户与{_id}的关系定义时输出**, 没变化就省略该节。\n"
@@ -1290,12 +1290,14 @@ def _build_dimensions_block(dims: dict[str, dict], _id: str) -> str:
     return "\n\n".join(sections)
 
 
-def _collapse_dim_prompt(text: str) -> str:
+def _collapse_dim_prompt(text: str, identity: str = "我", limit: int = 120) -> str:
     """把维度指导语压成一句话定义 (自定义维度的兜底, 2026-11-19)。
 
     默认 8 个维度带显式 ``define``; 用户自定义维度按 2026-08-08 积木化契约
     只提供 ``prompt``。这里把它的多行指导语压成一行, 让「该节收什么」不至于
-    在 prompt 里整段丢失。只做去格式化, 不改语义, 不设长度上限。
+    在 prompt 里整段丢失。只做去格式化, 不改语义; 超过 ``limit`` 字截断 —
+    定义行的职责是一句话说明, 长指导语由 ``prompt`` 原样保留, 不要在定义行
+    里复活 v4 想去掉的长篇指导。
     """
     if not text:
         return ""
@@ -1303,14 +1305,20 @@ def _collapse_dim_prompt(text: str) -> str:
     # 这条口径。先按行丢掉纯口径行, 再按句号丢掉内联口径段, 避免同一句出现两次、
     # 也避免整节定义被它连坐吞掉 (行内混排时按行丢会和下一行粘成一句)。
     raw_lines = [seg.strip() for seg in str(text).splitlines() if seg.strip()]
-    kept = [
-        ln for ln in raw_lines
-        if "仅在本段 QA" not in ln and "仅在本轮" not in ln
-    ]
-    line = " ".join(kept).replace("**", "").replace("{_id}", "我")
+
+    def _is_on_demand_clause(line: str) -> bool:
+        # 只认"以口径开头"的行, 不要因为用户指导语里顺带提到这几个字就整行删掉
+        head = line.lstrip("*").lstrip()
+        return head.startswith("仅在本段 QA") or head.startswith("仅在本轮")
+
+    kept = [ln for ln in raw_lines if not _is_on_demand_clause(ln)]
+    line = " ".join(kept).replace("**", "").replace("{_id}", identity or "我")
     segs = [seg.strip() for seg in line.split("。") if seg.strip()]
-    segs = [seg for seg in segs if "仅在本段 QA" not in seg and "仅在本轮" not in seg]
-    return "。".join(segs).strip(" ,;，。;、")
+    segs = [seg for seg in segs if not _is_on_demand_clause(seg)]
+    out = "。".join(segs).strip(" ,;，。;、")
+    if limit and len(out) > limit:
+        out = out[:limit].rstrip(" ,;，。;、") + "…"
+    return out
 
 
 def _observer_prompt(
@@ -1410,12 +1418,11 @@ def _observer_prompt(
         #  217 条自带「尚未/计划」; 进行中状态 2585 条里 533 条是完成项)。
         # 定义 ≠ 槽位: 仍然按需输出, 没变化就省略该节。
         _define = str(
-            _ds.get("define") or _collapse_dim_prompt(_ds.get("prompt", ""))
-        ).strip()
-        _head = f"- {_sec}" + (f": {_define}" if _define else "")
-        _dim_block_lines.append(
-            f"{_head}。**仅在本段 QA 出现该类变化时输出**, 没变化就省略该节 (按需, 可选)。"
-        )
+            _ds.get("define") or _collapse_dim_prompt(_ds.get("prompt", ""), _id)
+        ).strip().replace("{_id}", _id)
+        _on_demand = "**仅在本段 QA 出现该类变化时输出**, 没变化就省略该节 (按需, 可选)。"
+        _body = f"{_define}。{_on_demand}" if _define else _on_demand
+        _dim_block_lines.append(f"- {_sec}: {_body}")
     _dim_block = "\n".join(_dim_block_lines) or "- 本轮只写 QA 明确支持的变化; 没变化就省略该节 (按需, 可选)。"
     # v4 第三轮收口 (2026-08-20): _v4_context_block 只包含人格层 section。
     # 7 天内观察者快照印 section 已删除 — snapshot_text 形参仅作旧调用兼容
@@ -1451,8 +1458,9 @@ def _observer_prompt(
 
 ## 证据归属与状态 (决策 / 进展 必须能回答「谁说的、到哪一步」)
 - 归属标记写在条目最前: `[用户]` 用户拍板 / 授权 / 明确接受; `[建议]` 我提出但用户还没表态; `[共同]` 讨论后双方确定。归属不确定时用 `[建议]` 或 `[共同]` 并写清不确定在哪 — **归属不确定不是删掉这条事实的理由**。
-- 状态标记写在结论旁 (来源 `[#N]` 仍在行尾): `〔已实施〕` `〔已验证〕` `〔计划中〕` `〔未完成〕` `〔已推翻〕`, 需要时括注依据 (用户自述 / 执行结果 / 仅讨论)。没有执行或验证证据时, 不写「已完成」「已修复」「已验证」。
-- 本段内用户后置的说法取代先前说法时, 写成 `原为 X → 改为 Y` 并把旧值保留为一行, 不要并列成两条互不相干的事实; 用户没推翻的旧结论不要改写。用户本轮的一次性要求不升级为长期偏好 (只有明确说到「以后 / 总是 / 一律」才算)。
+- 状态标记写在结论旁 (来源 `[#N]` 仍在行尾): `〔已实施〕` `〔已验证〕` `〔计划中〕` `〔未完成〕` `〔已推翻〕`, 依据可括注 (用户自述 / 执行结果 / 仅讨论)。状态只由本轮 qa_text 判定, 不从上一版印继承: 上一版标〔计划中〕的项, 本轮没有新证据就照写〔计划中〕, 只有出现相反证据才改; 没有执行或验证证据时, 不写「已完成」「已修复」「已验证」。
+- 本段内用户后置的说法取代先前说法时, 写成 `原为 X → 改为 Y` 并把旧值保留为一行, 不要并列成两条互不相干的事实; 用户没推翻的旧结论不要改写。
+- 偏好边界: 一次性任务参数 (这次 / 这份 / 这个文件) 不记成长期偏好; 但用户在评价我的做法 (「我不喜欢这种写法」「别再默认开思考」「这个风格保持住」) 就是偏好, 直接记为偏好, 不要求出现「以后 / 总是 / 一律」。
 - 格式示例:
   `- [用户] 候选池 top_k 从 5 调到 15〔已实施〕[#12]`
   `- [建议] 下一步先补向量再跑全量〔计划中〕[#29]`

@@ -167,3 +167,15 @@ def test_legacy_models_never_receive_reasoning_effort(monkeypatch):
 
     assert seen[0]["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in seen[0]
+
+
+def test_thinking_mode_is_normalized_instead_of_passed_through():
+    """历史行为是把配置字符串原样塞进 {"type": ...}; 现在只认三种意图。
+
+    auto / 未知值 在 classic 族折成 disabled, 在 adaptive 族折成"省略该字段"。
+    旧行为会把 {"type": "auto"} 发给服务端 (M3 无此取值), 本来就是错的。
+    """
+    assert observer_mod._m3_thinking_payload("MiniMax-M3", "auto") == {"type": "disabled"}
+    assert observer_mod._m3_thinking_payload("MiniMax-M3", "garbage") == {"type": "disabled"}
+    assert observer_mod._m3_thinking_payload("MiniMax-M3.1-Flash", "auto") is None
+    assert observer_mod._m3_thinking_payload("MiniMax-M3.1-Flash", "garbage") is None

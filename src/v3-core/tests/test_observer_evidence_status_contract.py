@@ -45,7 +45,8 @@ def test_every_default_dimension_renders_its_section_and_definition():
     prompt = _prompt()
     for name, spec in observer_mod.OBSERVER_DIMENSIONS.items():
         assert spec["section"] in prompt, f"节名缺失: {name}"
-        assert spec["define"] in prompt, f"节定义缺失: {name}"
+        # define 里的 {_id} 占位在渲染时会换成身份名 (默认 "我")
+        assert spec["define"].replace("{_id}", "我") in prompt, f"节定义缺失: {name}"
 
 
 def test_disabled_dimension_disappears_from_prompt():
@@ -71,6 +72,14 @@ def test_custom_dimension_with_only_prompt_still_gets_a_definition():
     assert "- 自定义节: 只写 X 相关的变化" in prompt
     # 「按需输出」口径只由渲染处追加一次，不重复
     assert prompt.count("仅在本段 QA 出现该类变化时输出") == 1
+
+
+def test_collapse_helper_only_strips_lines_that_start_with_the_clause():
+    # 用户指导语里顺带提到口径词, 不能整行被吞掉
+    text = "写作时不要照抄「仅在本段 QA 出现该类变化时输出」这句话。\n保留本节其余指导"
+    collapsed = observer_mod._collapse_dim_prompt(text)
+    assert "写作时不要照抄" in collapsed
+    assert "保留本节其余指导" in collapsed
 
 
 def test_collapse_helper_strips_on_demand_clause_from_custom_prompt():
@@ -104,8 +113,9 @@ def test_supersede_rule_keeps_the_superseded_value_marked():
 
 def test_task_scope_is_not_promoted_to_long_term_preference():
     prompt = _prompt()
-    assert "一次性要求不升级为长期偏好" in prompt
-    assert "以后 / 总是 / 一律" in prompt
+    assert "一次性任务参数 (这次 / 这份 / 这个文件) 不记成长期偏好" in prompt
+    # 反向约束: 用户的明确否定/肯定本身就是偏好, 不许按关键词过滤掉
+    assert "不要求出现「以后 / 总是 / 一律」" in prompt
 
 
 def test_uncertainty_is_preserved_instead_of_claimed():
@@ -140,3 +150,41 @@ def test_identity_name_is_rendered_and_rules_stay_name_agnostic():
     # 规则块本身不写死身份名 — 换了身份名不该出现半替换的文案
     block = prompt[prompt.index("## 证据归属与状态"):prompt.index("## 时间锚点")]
     assert "小柚" not in block
+
+
+def test_relationship_definition_uses_the_identity_name_not_a_hardcoded_pronoun():
+    prompt = _prompt(identity_name="柚")
+    assert "用户与「柚」的关系定义变化" in prompt
+    assert "用户与「我」的关系定义变化" not in prompt
+
+
+def test_custom_dimension_without_prompt_has_no_stray_period():
+    dims = {"x": {"section": "自定义节"}}
+    prompt = _prompt(dims=dims)
+    assert "- 自定义节: **仅在本段 QA" in prompt
+    assert "自定义节。" not in prompt
+
+
+def test_collapse_helper_caps_runaway_custom_guidance():
+    text = "这里写很长的用户指导语。" * 40
+    collapsed = observer_mod._collapse_dim_prompt(text)
+    assert len(collapsed) <= 121
+    assert collapsed.endswith("…")
+
+
+def test_status_markers_are_not_inherited_from_the_previous_note():
+    # 上一版印就摆在 prompt 里且带状态词, 不写死"不继承"模型会顺手把〔计划中〕升格成〔已实施〕
+    prompt = _prompt()
+    assert "不从上一版印继承" in prompt
+    assert "没有新证据就照写" in prompt
+
+
+def test_preference_boundary_keeps_explicit_dislike_as_a_preference():
+    prompt = _prompt()
+    assert "我不喜欢这种写法" in prompt
+    assert "不要求出现「以后 / 总是 / 一律」" in prompt
+
+
+def test_decisions_section_is_written_even_when_there_is_only_a_proposal():
+    prompt = _prompt()
+    assert "只要本段出现拍板、提案或纠正之一, 本节就要写" in prompt
