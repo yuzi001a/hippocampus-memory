@@ -146,6 +146,12 @@ ALTER TABLE public.qa_pairs
     ADD COLUMN IF NOT EXISTS embed_model  TEXT NOT NULL DEFAULT '';
 ALTER TABLE public.qa_pairs
     ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW();
+-- Legacy observer row shape column. Nullable, never written by the live path,
+-- but the file-import writer (importers/qa_pairing.emit_qa_pairs) still names
+-- it in its INSERT — an install without it fails every import with 42703.
+-- Additive and nullable, so adding it to a populated table rewrites nothing.
+ALTER TABLE public.qa_pairs
+    ADD COLUMN IF NOT EXISTS chars        INTEGER;
 -- P0-A: per-QA membership ledger of assistant events already merged into the
 -- answer row (same DDL as alpha_bootstrap.sql). Existing rows default to an
 -- empty ledger.
@@ -191,7 +197,29 @@ CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
     ON public.conversation_stream (session_id, host_turn_id)
     WHERE host_turn_id IS NOT NULL;
 
+-- Session provenance (additive only, 2026-11-11): same DDL as
+-- alpha_bootstrap.sql. session_source = host-native "how was this session
+-- created" (tool/cron/oneshot/subagent = machine, desktop/tui/feishu = human).
+-- Pairing excludes machine sessions from the QA layer; NULL rows stay
+-- fail-open so upgraded installs keep their historic pairing behaviour.
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS session_source TEXT;
+CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
+    ON public.conversation_stream (host, session_source)
+    WHERE session_source IS NOT NULL;
+
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
+
+-- -----------------------------------------------------------------------------
+-- embedding_failures — durable retry ledger for failed embedding writes.
+--
+-- This table is declared by alpha_bootstrap.sql but was missing from the
+-- upgrade path until v0.4: an existing install could never obtain it through
+-- the formal additive upgrade, so `hippocampus upgrade` reported success while
+-- the failure ledger stayed unbuildable. Same single-source marker as the other
+-- sidecars; additive and idempotent (CREATE TABLE / INDEX IF NOT EXISTS only).
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/embedding_failures.sql <<<
 
 -- -----------------------------------------------------------------------------
 -- assistant_deliveries — P0-C2 autonomous/async assistant delivery (derived).
@@ -203,6 +231,47 @@ CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
 -- and are left untouched — no backfill, no data rewrite.
 -- -----------------------------------------------------------------------------
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/assistant_deliveries.sql <<<
+
+-- -----------------------------------------------------------------------------
+-- v0.4 — the cumulative schema revision this upgrade brings an existing
+-- install to. Recorded LAST, inside the same transaction, so the row can only
+-- exist if every statement above committed.
+--
+-- Why a new row instead of relying on v0.2: v0.2 does not describe the columns
+-- and tables added after 2026-09-18 (merged_event_ids, the F2 identity
+-- columns, note_ref/last_observer_ts, the sidecars). An install that carries
+-- only v0.2 is NOT current, and the doctor now says so instead of treating any
+-- ledger row as proof of a healthy schema.
+-- -----------------------------------------------------------------------------
+INSERT INTO public.schema_versions (version, description)
+VALUES ('v0.4', 'cumulative existing-install contract: P0-A merged_event_ids + F2 identity columns + qa_pairs.chars + memory_relations/derived_memory_invalidations/assistant_deliveries/embedding_failures sidecars')
+ON CONFLICT (version) DO NOTHING;
+
+
+-- Full-text yin tables (E1 identity layer). Same DDL as e1._ensure_yin_tables():
+-- E1 creates them itself so a fresh database can dual-write before bootstrap runs,
+-- but an upgraded install must get them from here as well — otherwise the schema
+-- contract reports "these tables exist in the DDL but no upgrade path creates them".
+CREATE TABLE IF NOT EXISTS public.yin (
+    id BIGSERIAL PRIMARY KEY,
+    version TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_current BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS yin_version_idx ON public.yin (version);
+CREATE INDEX IF NOT EXISTS yin_is_current_idx ON public.yin (id DESC) WHERE is_current = TRUE;
+CREATE TABLE IF NOT EXISTS public.yin_history (
+    id BIGSERIAL PRIMARY KEY,
+    version TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_current BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS yin_history_version_idx ON public.yin_history (version);
+CREATE INDEX IF NOT EXISTS yin_history_is_current_idx ON public.yin_history (id DESC) WHERE is_current = TRUE;
 
 COMMIT;
 

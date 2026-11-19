@@ -11,7 +11,7 @@ Strategy:
       gzipped. Restoration: ``gunzip | psql -d <db>``.
     * Table allow-list focused on the alpha working set:
           explicit_memories, qa_pairs, conversation_stream, topics,
-          topic_entries, observation_notes, yin_paragraphs
+          topic_entries, observation_notes, yin_paragraphs, yin, yin_history
       plus the supported ``--include-source-raw`` extra
       (``source_raw_messages`` is not in the alpha working set — see the
       refusal note in the help text).
@@ -68,6 +68,8 @@ ALPHA_TABLES: tuple[str, ...] = (
     "topic_entries",
     "observation_notes",
     "yin_paragraphs",
+    "yin",
+    "yin_history",
 )
 
 

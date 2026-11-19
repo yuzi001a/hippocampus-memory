@@ -97,6 +97,12 @@ class ImportItem:
     host: str | None = None
     event_id: str | None = None
     identity_kind: str | None = None
+    # Hermes `sessions.source` for this message's session ('desktop', 'cron',
+    # 'tool', 'oneshot', 'subagent', ...). Native provenance, NOT a text
+    # heuristic: a `tool` session is one scripted CLI call (max 2 messages),
+    # a `cron` session is a scheduler run. Pairing uses it to keep machine
+    # dispatch out of the conversational QA layer while raw keeps everything.
+    session_source: str | None = None
 
 
 @dataclass
@@ -115,6 +121,7 @@ class ImportStats:
     # I01 additive counters:
     identity_derived: int = 0  # event_id generated as 'derived:…'
     qa_pairs_derived: int = 0  # qa_pairs rows derived from raw history
+    nul_sanitized: int = 0  # rows whose text contained NUL (0x00) and was cleaned
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -192,6 +199,20 @@ class Importer(abc.ABC):
 
 
 _NUMBER_RE = re.compile(r"-?\d")
+
+
+def sanitize_nul(text: str) -> tuple[str, int]:
+    """PostgreSQL ``text`` cannot store NUL (0x00).
+
+    A single NUL byte in a session body makes the whole INSERT fail — with
+    the batched writer that means an entire 500-row batch (and its QA
+    pairs) is rolled back. Stripping the byte keeps the remaining text
+    verbatim and makes the loss visible through ``stats.nul_sanitized``
+    instead of turning into a silent gap.
+    """
+    if not text or "\x00" not in text:
+        return text, 0
+    return text.replace("\x00", ""), 1
 
 
 def _to_iso8601(value: Any) -> str | None:
@@ -315,14 +336,25 @@ _RAW_DEDUPE_SQL = """
 _RAW_DEDUPE_SQL_F2 = """
     INSERT INTO public.conversation_stream
         (session_id, role, content, trigger, turn_id, timestamp, source,
-         tool_calls, tool_results, host, event_id)
+         tool_calls, tool_results, host, event_id, session_source)
     SELECT %s, %s, %s, 'import', %s, %s::timestamptz, %s,
-           %s::jsonb, %s::jsonb, %s, %s
+           %s::jsonb, %s::jsonb, %s, %s, %s
     WHERE NOT EXISTS (
         SELECT 1 FROM public.conversation_stream
          WHERE host = %s
            AND session_id = %s
            AND event_id = %s
+    )
+      -- 同一个库在多个快照里给同一条消息两个身份（原生自增 id vs uid/内容指纹），
+      -- 只按 event_id 判重会把同一条消息再插一遍。实测这样堆出 62,951 行重复
+      -- （占 28%）。语义判据兜底：同 host+会话+角色+时间+内容 = 同一条消息。
+      AND NOT EXISTS (
+        SELECT 1 FROM public.conversation_stream
+         WHERE host = %s
+           AND session_id = %s
+           AND role = %s
+           AND timestamp = %s::timestamptz
+           AND md5(content) = md5(%s)
     )
 """
 
@@ -352,16 +384,24 @@ def _emit_raw_messages(
     Connection contract: ``pool`` is any object that yields an object with
     ``.cursor()``, ``.commit()``, and ``.close()`` (a real PgPool lease, or
     a hermetic fake — same surface as v3core.pg_pool.PgPool.lease()).
+
+    This is the per-row-commit path kept for the legacy single-source
+    import. Full-history rebuilds use ``_emit_raw_messages_bulk`` (one
+    lease + one commit per batch) so a 10^5-10^6 row corpus does not pay a
+    transaction per message.
     """
     sessions_seen: set[str] = set()
     oldest_ts: str | None = None
     newest_ts: str | None = None
+    ordinals = _OrdinalCounter()
 
     for idx, it in enumerate(items, start=1):
         if it.kind != KIND_RAW:
             continue
         if not it.text:
             continue
+        text, nul = sanitize_nul(it.text)
+        stats.nul_sanitized += nul
         ts = _to_iso8601(it.occurred_at)
         if ts:
             oldest_ts = ts if oldest_ts is None or ts < oldest_ts else oldest_ts
@@ -386,9 +426,11 @@ def _emit_raw_messages(
 
         host = (it.host or "").strip() or None
         event_id = (it.event_id or "").strip() or None
+        session_source = (getattr(it, "session_source", None) or "").strip() or None
         if host and not event_id:
-            # Import-derived identity — stable, visibly not-native.
-            event_id = f"derived:{host}:{sess}:{idx}"
+            # Import-derived identity — stable, visibly not-native, and
+            # counted per session (not per call): see _OrdinalCounter.
+            event_id = f"derived:{host}:{sess}:{ordinals.next(host, sess)}"
             stats.identity_derived += 1
 
         lease = pool.lease(timeout=5.0)
@@ -398,16 +440,18 @@ def _emit_raw_messages(
                 cur.execute(
                     _RAW_DEDUPE_SQL_F2,
                     (
-                        sess, role, it.text, turn_id, ts, source_tag,
+                        sess, role, text, turn_id, ts, source_tag,
                         tool_calls, tool_results, host, event_id,
+                        session_source,
                         host, sess, event_id,
+                        host, sess, role, ts, text,
                     ),
                 )
             elif ts:
                 cur.execute(
                     _RAW_DEDUPE_SQL,
                     (
-                        sess, role, it.text, turn_id, ts, source_tag,
+                        sess, role, text, turn_id, ts, source_tag,
                         tool_calls, tool_results,
                         sess, role, ts,
                     ),
@@ -415,7 +459,7 @@ def _emit_raw_messages(
             else:
                 cur.execute(
                     _RAW_DEDUPE_SQL_NO_TS,
-                    (sess, role, it.text, turn_id, source_tag,
+                    (sess, role, text, turn_id, source_tag,
                      tool_calls, tool_results),
                 )
             inserted = bool(getattr(cur, "rowcount", 0))
@@ -442,6 +486,175 @@ def _emit_raw_messages(
         stats.oldest = oldest_ts
     if newest_ts is not None:
         stats.newest = newest_ts
+
+
+class _OrdinalCounter:
+    """Per-(host, session) ordinal for import-derived event ids.
+
+    The ordinal must count messages **within a session**, never within the
+    write batch. With ``batch_size=500`` the 501st message of a session used
+    to get ``derived:<host>:<sess>:1`` again — colliding with a row that
+    already existed, so the raw insert deduped it away *and* its QA pair
+    inherited the wrong ``q_event_id`` (identity silently pointed at another
+    message). One counter is shared by every batch and by every flush call
+    of the same import run.
+    """
+
+    def __init__(self) -> None:
+        self._n: dict[tuple[str, str], int] = {}
+
+    def next(self, host: str, sess: str) -> int:
+        key = (host, sess)
+        self._n[key] = self._n.get(key, 0) + 1
+        return self._n[key]
+
+
+def _raw_params(it: ImportItem, *, idx: int, source_tag: str,
+                ordinals: "_OrdinalCounter | None" = None):
+    """Build the bound parameters for one raw item (shared by both writers).
+
+    ``idx`` is only used when the item has no session ordinal available.
+    """
+    ts = _to_iso8601(it.occurred_at)
+    role = (it.role or "").strip()
+    sess = (it.source_ref or "").strip() or "imported"
+    prov = it.provenance or {}
+    tool_calls = "[]"
+    tool_results = "[]"
+    if isinstance(prov.get("tool_calls"), (list, dict)):
+        tool_calls = json.dumps(prov["tool_calls"], ensure_ascii=False)
+    if isinstance(prov.get("tool_results"), (list, dict)):
+        tool_results = json.dumps(prov["tool_results"], ensure_ascii=False)
+    turn_id = prov.get("turn_id")
+    try:
+        turn_id = int(turn_id) if turn_id is not None else None
+    except (TypeError, ValueError):
+        turn_id = None
+    host = (it.host or "").strip() or None
+    event_id = (it.event_id or "").strip() or None
+    derived = False
+    if host and not event_id:
+        n = ordinals.next(host, sess) if ordinals is not None else idx
+        event_id = f"derived:{host}:{sess}:{n}"
+        derived = True
+    return {
+        "ts": ts,
+        "role": role,
+        "sess": sess,
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "turn_id": turn_id,
+        "host": host,
+        "event_id": event_id,
+        "session_source": (getattr(it, "session_source", None) or "").strip() or None,
+        "derived": derived,
+        "source_tag": source_tag,
+    }
+
+
+def _emit_raw_messages_bulk(
+    *,
+    pool: Any,
+    items: list[ImportItem],
+    source_tag: str,
+    stats: ImportStats,
+    batch_size: int = 500,
+    ordinals: "_OrdinalCounter | None" = None,
+) -> int:
+    """Batched F2-identity raw writer (one lease + one commit per batch).
+
+    Semantics are identical to ``_emit_raw_messages`` — same dedupe
+    predicate, same counters — but a full-history rebuild no longer pays a
+    transaction per message. A failing batch is rolled back as a unit and
+    every item in it is recorded in ``stats.errors`` (never silently lost).
+
+    Returns the number of raw items whose batch failed. Callers that derive
+    rows from these messages (QA pairing) MUST NOT write those derived rows:
+    a QA pair whose source message is missing is an orphan.
+    """
+    sessions_seen: set[str] = set()
+    oldest_ts: str | None = None
+    newest_ts: str | None = None
+    batch: list[ImportItem] = []
+    ordinals = ordinals or _OrdinalCounter()
+    failed_items = 0
+
+    def _flush(chunk: list[ImportItem]) -> None:
+        nonlocal oldest_ts, newest_ts, failed_items
+        if not chunk:
+            return
+        lease = pool.lease(timeout=10.0)
+        try:
+            cur = lease.connection.cursor()
+            inserted_total = 0
+            for offset, it in enumerate(chunk):
+                idx = offset + 1
+                p = _raw_params(it, idx=idx, source_tag=source_tag, ordinals=ordinals)
+                text, nul = sanitize_nul(it.text)
+                stats.nul_sanitized += nul
+                if p["ts"]:
+                    oldest_ts = p["ts"] if oldest_ts is None or p["ts"] < oldest_ts else oldest_ts
+                    newest_ts = p["ts"] if newest_ts is None or p["ts"] > newest_ts else newest_ts
+                sessions_seen.add(p["sess"])
+                if p["derived"]:
+                    stats.identity_derived += 1
+                if p["host"] and p["event_id"]:
+                    cur.execute(
+                        _RAW_DEDUPE_SQL_F2,
+                        (p["sess"], p["role"], text, p["turn_id"], p["ts"], source_tag,
+                         p["tool_calls"], p["tool_results"], p["host"], p["event_id"],
+                         p["session_source"],
+                         p["host"], p["sess"], p["event_id"],
+                         p["host"], p["sess"], p["role"], p["ts"], text),
+                    )
+                elif p["ts"]:
+                    cur.execute(
+                        _RAW_DEDUPE_SQL,
+                        (p["sess"], p["role"], text, p["turn_id"], p["ts"], source_tag,
+                         p["tool_calls"], p["tool_results"], p["sess"], p["role"], p["ts"]),
+                    )
+                else:
+                    cur.execute(
+                        _RAW_DEDUPE_SQL_NO_TS,
+                        (p["sess"], p["role"], text, p["turn_id"], source_tag,
+                         p["tool_calls"], p["tool_results"]),
+                    )
+                inserted_total += 1 if getattr(cur, "rowcount", 0) else 0
+            lease.connection.commit()
+            stats.raw_messages += inserted_total
+            stats.deduped += len(chunk) - inserted_total
+        except Exception as exc:
+            try:
+                lease.connection.rollback()
+            except Exception:
+                pass
+            failed_items += len(chunk)
+            stats.skipped += len(chunk)
+            first = chunk[0]
+            stats.errors.append(
+                f"raw batch failed ({len(chunk)} items, first {first.source_ref}/{first.role}): {exc!r}"
+            )
+        finally:
+            try:
+                lease.close()
+            except Exception:
+                pass
+
+    for it in items:
+        if it.kind != KIND_RAW or not it.text:
+            continue
+        batch.append(it)
+        if len(batch) >= batch_size:
+            _flush(batch)
+            batch = []
+    _flush(batch)
+
+    stats.sessions = max(stats.sessions, len(sessions_seen))
+    if oldest_ts is not None:
+        stats.oldest = oldest_ts
+    if newest_ts is not None:
+        stats.newest = newest_ts
+    return failed_items
 
 
 # ── curated/legacy writes (explicit_memories) ───────────────────────────
@@ -550,6 +763,7 @@ def _build_registry() -> dict[str, type[Importer]]:
     # Imported lazily so a half-installed environment still imports
     # cleanly (the cost is one extra import per .Importer subclass).
     from .hermes_sessions import HermesSessionImporter
+    from .legacy_sources import LegacySourcesImporter
     from .memory_md import MemoryMarkdownImporter
     from .openclaw import OpenClawImporter
     from .hindsight import HindsightImporter
@@ -561,6 +775,7 @@ def _build_registry() -> dict[str, type[Importer]]:
     # submodules explicitly.
     globals().update({
         "HermesSessionImporter": HermesSessionImporter,
+        "LegacySourcesImporter": LegacySourcesImporter,
         "MemoryMarkdownImporter": MemoryMarkdownImporter,
         "OpenClawImporter": OpenClawImporter,
         "HindsightImporter": HindsightImporter,
@@ -569,6 +784,7 @@ def _build_registry() -> dict[str, type[Importer]]:
     })
     return {
         "hermes": HermesSessionImporter,
+        "legacy_sources": LegacySourcesImporter,
         "memory-md": MemoryMarkdownImporter,
         "openclaw": OpenClawImporter,
         "hindsight": HindsightImporter,
@@ -815,7 +1031,11 @@ def import_source(  # noqa: PLR0915 - linear pipeline by design
     )
 
     if raw_items:
-        _emit_raw_messages(
+        # Full-history rebuilds (10^5-10^6 rows) take the batched writer: same
+        # dedupe predicate and counters, but one transaction per batch instead
+        # of one per message. Small imports keep the per-row path.
+        emit = _emit_raw_messages_bulk if len(raw_items) >= 1000 else _emit_raw_messages
+        emit(
             pool=pool,
             items=raw_items,
             source_tag=f"import:{importer.name}",

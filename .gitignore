@@ -67,3 +67,6 @@ snapshot_*/
 # uv lockfile — this project does not use uv; the file only appears when a
 # developer runs `uv run --project` for ad-hoc tooling. It is not a build input.
 uv.lock
+
+# 测试夹具里的二进制 SQLite 是契约测试的输入（*.db 全局忽略会把它挡掉）
+!src/v3-core/tests/fixtures/**/*.db

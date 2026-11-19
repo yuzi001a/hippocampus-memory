@@ -20,6 +20,10 @@ from typing import Any
 
 from .config_model import V3Config, format_status, validate_config, from_legacy_dict
 
+#: MiniMax OpenAI 兼容端点的**唯一**默认值。llm.py / observer.py 都不再各写一份
+#: 字面量 —— 换端点只改配置 (llm.base_url / observer.base_url)。
+DEFAULT_LLM_BASE_URL = "https://api.minimaxi.com/v1"
+
 __all__ = [
     "V3Config",
     "resolve_config",
@@ -420,6 +424,10 @@ _LEGACY_DEFAULT_CONFIG: dict[str, Any] = {
     "tkg": {"enabled": False, "conflict_threshold": 0.85},
     "e1": {"enabled": True},
     "llm": {"provider": "", "model": "", "api_key": ""},
+    # 2026-11-19: 模型参数形状表 — 按模型名前缀声明 thinking / reasoning_effort 等
+    # "接口契约" (内置表见 v3core.model_params.DEFAULT_MODEL_TABLE)。这里留空即可,
+    # 用户按需覆盖或新增; 表里没有的模型会走保守默认并打 WARNING。
+    "models": {},
     "prefetch": {"enabled": True, "default_limit": 5, "dual_path": True,
                      "rrf_k": 60, "include_message_vector": True,
                      # 2026-09-03 P1.3.1: 长 term 时启用 QA snapshot 路径的阈值;

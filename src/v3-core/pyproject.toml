@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "v3-core"
-version = "4.0.1"
+version = "4.0.4"
 description = "v3 memory core engine — PostgreSQL/pgvector source ingest and explicit-memory storage"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -102,6 +102,10 @@ packages = {find = {where = ["src"]}}
     "schema/derived_memory_invalidations.sql",
     "schema/assistant_deliveries.sql",
     "schema/upgrade_v0_2.sql",
+    # Manual DDL: not auto-applied by bootstrap, but the runtime tells users
+    # "先执行 schema/task_events.sql" — a wheel install has to ship it.
+    "schema/task_events.sql",
+    "schema/session_policies.sql",
 ]
 
 [tool.pytest.ini_options]

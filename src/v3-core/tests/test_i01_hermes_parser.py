@@ -3,7 +3,9 @@
 Fixture: tests/fixtures/i01/hermes/state.db (synthetic rows on the real
 schema — see fixtures README). Contract under test:
 
-  * host="hermes", event_id = native messages.id, identity_kind="native".
+  * host="hermes", event_id 跨快照稳定: 有 message_uid 用 ``uid:<uid>``
+    (identity_kind="native"), 没有则用内容指纹 ``h:<sha1>``
+    (identity_kind="content-hash")。native 自增 id 只留在 provenance.raw_id。
   * Kept: user/assistant rows with real text — including steer rows,
     archived rows (active=0/compacted=1) and folded rows (0/0).
   * Excluded: system-generated pseudo messages (compaction summaries,
@@ -39,15 +41,22 @@ def test_hermes_exclusions_and_counts():
     assert counts.get("skipped_display_kind", 0) == 5
 
 
-def test_hermes_native_identity_and_host():
+def test_hermes_identity_is_snapshot_stable():
+    """身份不能拿各快照的自增 id：同一消息换个库就换身份（还会撞车）。
+
+    夹具没有 message_uid，所以走内容指纹；同一个库解析两次必须完全一致，
+    且 raw_id 仍保留在 items 里供回查。
+    """
     imp = _importer()
     imp.reset_excluded_counts()
     items = list(imp.parse(DB))
     assert all(it.host == "hermes" for it in items)
-    assert all(it.identity_kind == "native" for it in items)
-    assert all(it.event_id and str(it.event_id).isdigit() for it in items)
+    assert all(it.identity_kind == "content-hash" for it in items)
+    assert all(str(it.event_id).startswith("h:") for it in items)
+    again = [it.event_id for it in _importer().parse(DB)]
+    assert [it.event_id for it in items] == again
+    assert len({it.event_id for it in items}) == len(items)
     first = items[0]
-    assert first.event_id == "1"
     assert first.source_ref == "sess-ginkgo-a"
     assert "银杏" in first.text
 

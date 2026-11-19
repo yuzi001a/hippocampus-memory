@@ -163,7 +163,15 @@ def _reset_installed_pool(importer_module):
 def test_importers_registered_with_known_capabilities(importer_module):
     listing = importer_module.list_importers()
     names = [e["name"] for e in listing]
-    assert set(names) == {"hermes", "memory-md", "openclaw", "hindsight", "dsh", "pi"}
+    assert set(names) == {
+        "hermes",
+        "legacy_sources",
+        "memory-md",
+        "openclaw",
+        "hindsight",
+        "dsh",
+        "pi",
+    }
 
     by_name = {e["name"]: e for e in listing}
     # Honest capability flags.
@@ -174,6 +182,9 @@ def test_importers_registered_with_known_capabilities(importer_module):
     # I01: first-class host importers.
     assert by_name["dsh"]["capability"] == "production"
     assert by_name["pi"]["capability"] == "production"
+    # OpenClaw-era conversation stores (honcho / lcm / trajectory / markdown)
+    # are raw turns, not derived summaries — production capable.
+    assert by_name["legacy_sources"]["capability"] == "production"
     # Each framework_ready entry carries a reason from its NotImplementedError.
     assert "reason" in by_name["openclaw"]
     assert "framework_ready" in by_name["openclaw"]["reason"].lower() or \
@@ -544,7 +555,7 @@ def test_limit_caps_parsed_items(importer_module, fake_pool):
 
 def test_list_importers_includes_descriptions(importer_module):
     listing = importer_module.list_importers()
-    assert len(listing) == 6
+    assert len(listing) == 7
     for entry in listing:
         assert entry["name"]
         assert entry["class"]

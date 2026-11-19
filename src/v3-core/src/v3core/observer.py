@@ -55,6 +55,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import model_params
+
 # v3core.__init__._safe_err 模块级函数, 同包内直接相对导入即可。
 # 避免 daemon 线程异常时 NameError → 静默死 → 整条观察者链路断。
 from . import _safe_err
@@ -372,6 +374,10 @@ _DEFAULT_OBSERVER_CONFIG: dict[str, Any] = {
     # ---- LLM / prompt 配置 ----
     "max_completion_tokens": 32768,  # phase6 提至 32768: 8000字 输出 + tokens 余量
     "thinking": "disabled",       # phase0e 定案: 禁用思考
+    # 2026-11-19: adaptive 族的思考档位。None = 用 models: 表声明的默认值
+    # (M3.1 内置为 low); 显式配置("low"/"medium"/…)优先。不压档会让思考吃满
+    # 输出预算 (实测 30 QA 批次 reasoning 56,547 字符 / 16384 上限, JSON 未闭合)。
+    "reasoning_effort": None,
     "reasoning_split": True,      # phase0e 定案
     "debounce_seconds": 10,       # 触发节流, 防高频
     "model": None,                # None → 用 llm.model
@@ -651,6 +657,16 @@ def _load_observer_config() -> dict[str, Any]:
             obs = legacy.get("observer")
             if isinstance(obs, dict):
                 cfg.update(obs)
+            # 2026-11-19: 模型参数形状表 + llm 段兜底 — observer 段与 llm 段互不继承,
+            # 以前缺键就静默回落调用点字面量; 现在统一在配置层解析 (models: 表见
+            # v3core.model_params), 缺模型名时 call_m3 fail-loud, 不再猜一个模型。
+            cfg["models"] = legacy.get("models") or {}
+            _llm_sec = legacy.get("llm") or {}
+            if isinstance(_llm_sec, dict):
+                if not cfg.get("model"):
+                    cfg["llm_model"] = _llm_sec.get("model") or ""
+                if not cfg.get("base_url"):
+                    cfg["llm_base_url"] = _llm_sec.get("base_url") or ""
     except Exception as e:
         logger.warning("读 observer 配置失败, 用兜底默认: %s", _safe_err(e)[:120])
     return cfg
@@ -809,6 +825,28 @@ def _observer_resolve_api_key() -> tuple[str, str | None]:
 # M3 调用 — 复制 phase0_m3_length_test.py 的 call_m3 (参数已实验定案)
 # ────────────────────────────────────────────────────────────
 
+def _m3_thinking_payload(model: str, thinking: str, cfg: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Observer 的 thinking 决策 — 形状查 ``model_params`` 表, 这里只拼 payload。
+
+    模型参数差异 (哪些族要求 adaptive / 能不能发 disabled / 默认 effort) 只有一个
+    来源: ``model_params.DEFAULT_MODEL_TABLE`` + config 的 ``models:`` 段。历史上
+    llm.py 与 observer.py 各写一份模型名子串判断, 漏改一处就是"某条路径静默用错
+    参数" (Y400 那次 400 就是这样)。
+    """
+    params = model_params.resolve(model, cfg)
+    return model_params.thinking_field(params, thinking or "disabled")
+
+
+def _llm_base_url_default() -> str:
+    """配置层唯一的端点默认值 (与 llm.py 共用), 调用点不再各写字面量。
+
+    故意不吞 import 异常: 返回空串会把 URL 拼成 "/chat/completions", 报出来是
+    MissingSchema, 看起来像网络问题。配置层坏了就该启动失败。
+    """
+    from .config import DEFAULT_LLM_BASE_URL
+    return DEFAULT_LLM_BASE_URL
+
+
 def call_m3(
     cfg: dict[str, Any],
     api_key: str,
@@ -823,38 +861,76 @@ def call_m3(
 
     实验定案参数 (phase0_m3_length_test.py L95 + phase0e 验证):
     - max_completion_tokens=16384 (旧 max_tokens 已弃用)
-    - thinking={"type": "disabled"} — 跳过思考直接答
+    - thinking={"type": "disabled"} — 跳过思考直接答（M3.1 家族改为省略该字段，
+      见 ``_m3_thinking_payload``）
     - reasoning_split=True — thinking 拆到 reasoning_content, 不进 content
     """
     import requests
-    base_url = cfg.get("base_url") or cfg.get("llm_base_url") or "https://api.minimaxi.com/v1"
-    model = cfg.get("model") or cfg.get("llm_model") or "MiniMax-M3"
+    model = cfg.get("model") or cfg.get("llm_model") or ""
+    if not model:
+        # 没有模型名就不发请求: 静默回落到字面量会掩盖配置错误 (2026-11-19 起 fail-loud)
+        return {"error": "config_error: 未配置模型 (observer.model / llm.model)", "latency": 0.0}
+    base_url = (
+        cfg.get("base_url") or cfg.get("llm_base_url")
+        or _llm_base_url_default()
+    )
     proxy = cfg.get("proxy") or cfg.get("llm_proxy")
     # 2026-08-09: timeout 支持 cfg 配置 — 大输入+大输出 (印 2-3万字 + 50 QA) M3 处理慢,
     # 默认 180s 不够 (实测连续超时); 生产可配 timeout: 300
     timeout = int(cfg.get("timeout", timeout) or timeout)
+    # 2026-11-19: adaptive 族 (省略 thinking) 需要显式 effort, 否则长 prompt 的思考
+    # 吃满输出预算。默认档来自 models: 表; cfg.reasoning_effort 显式覆盖。
+    _params = model_params.resolve(model, cfg)
+    _reasoning_effort = model_params.reasoning_effort_for(
+        _params, cfg, default="low")
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": cfg.get("temperature", 0.3),
         "max_completion_tokens": max_completion_tokens,
-        "thinking": {"type": thinking},
         "reasoning_split": reasoning_split,
     }
+    _thinking_field = _m3_thinking_payload(model, thinking, cfg)
+    if _thinking_field is not None:
+        payload["thinking"] = _thinking_field
+    else:
+        # 2026-11-19: 省略 thinking 的族 (M3.1) 默认走 adaptive thinking —
+        # 必须显式压 effort, 否则长 prompt 的思考会把输出预算吃光, 表现为
+        # "每轮静默超时 / JSON 未闭合"。cfg 可覆盖, 表里写 null/omit 表示显式不发。
+        if _reasoning_effort:
+            payload["reasoning_effort"] = _reasoning_effort
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+
+    def _post(body: dict[str, Any]):
+        return requests.post(url, json=body, headers=headers, timeout=timeout, proxies=proxies)
+
     t0 = time.time()
     try:
-        if proxy:
-            resp = requests.post(
-                url, json=payload, headers=headers, timeout=timeout,
-                proxies={"http": proxy, "https": proxy},
+        resp = _post(payload)
+        # 服务端口径再次变化时的一次有界重试（与 llm.LLMClient 的 fallback 同义）：
+        # 只有明确要求 adaptive thinking 时才去掉该字段重发，不重试其他 4xx。
+        if (resp.status_code == 400
+                and "requires adaptive thinking" in (resp.text or "").lower()
+                and "thinking" in payload):
+            logger.warning(
+                "observer: M3 拒绝 thinking 参数(requires adaptive thinking), 去掉该字段重试一次 model=%s",
+                model,
             )
-        else:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            # 重试体同样要压 effort: 去掉 thinking 后走的就是 adaptive 默认档,
+            # 不压会重演"思考吃满输出预算"的静默失败。
+            _retry_body = {k: v for k, v in payload.items() if k != "thinking"}
+            # 服务端说"要 adaptive" = 运行时证据推翻了表里的 classic 判断;
+            # 这一发必须按 adaptive 走, 所以 effort 兜到 low/cfg, 不能省。
+            _retry_body.setdefault(
+                "reasoning_effort",
+                str(cfg.get("reasoning_effort") or _params.reasoning_effort or "low"),
+            )
+            resp = _post(_retry_body)
         latency = time.time() - t0
     except Exception as e:
         return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
@@ -1064,6 +1140,10 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
     # 不再硬性要求每节必备。旧调用方按节名引用仍能命中。
     "story": {
         "section": "我的故事（时间线叙事, 动机优先）",
+        # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
+        "define": (
+            "只写身份 / 关系 / 判断的延伸 — 本段 QA 让故事线如何续了一笔; 不写任务流水和操作清单"
+        ),
         "prompt": (
             "**仅在本段 QA 改变了{_id}的故事线时输出** (身份 / 关系 / 判断的延伸), "
             "没变化就省略该节。\n"
@@ -1076,6 +1156,10 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
     },
     "decisions": {
         "section": "关键决策（拍板的决策 + 理由）",
+        # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
+        "define": (
+            "写方向 / 口径 / 取舍的最后结论 + 理由, 每条带归属标记; 我提出但用户还没表态的方案标 [建议] 也要写, 不能因为没拍板就不记; 悬而未决的问题写进「进行中状态」, 不放进本节。只要本段出现拍板、提案或纠正之一, 本节就要写 (只有提案时全部标 [建议])"
+        ),
         "prompt": (
             "**仅在本段 QA 出现新的拍板决策时输出**, 没新决策就省略该节。\n"
             "拍板的决策 + 决策理由; 每行一个 `[#N]` 来源。"
@@ -1084,6 +1168,10 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
     },
     "progress": {
         "section": "进行中状态（未完事项）",
+        # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
+        "define": (
+            "写还没完成 / 待验证 / 待决策的条目 (问题-当前状态-下一步) + 状态标记; 也写本轮已完成 / 已验证的交付 (带〔已验证〕并说明它对后续的影响), 只有改变了系统当前配置/状态时才另写「系统状态摘要」"
+        ),
         "prompt": (
             "**仅在本段 QA 改变进行中状态时输出**, 没变化就省略该节。\n"
             "未完成的 / 待验证的 / 下一步要做的, 按「问题-当前状态-下一步」三个角度写。"
@@ -1092,6 +1180,10 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
     },
     "lessons": {
         "section": "教训与踩坑",
+        # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
+        "define": (
+            "踩到的坑 + 可复用的教训 (判断 / 做法); 不写没有证据支持的猜测"
+        ),
         "prompt": (
             "**仅在本段 QA 出现新的踩坑 / 教训时输出**, 没新教训就省略该节。\n"
             "踩的坑 + 学到的教训, 每条 `[#N]`。"
@@ -1100,6 +1192,10 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
     },
     "ops": {
         "section": "操作知识（路径/命令/端口/容器名）",
+        # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
+        "define": (
+            "可复用的操作知识: 命令 / 路径 / 端口 / 容器名 / 配置位置, 一条一行"
+        ),
         "prompt": (
             "**仅在本段 QA 出现新的可复用操作知识时输出**, 没新知识就省略该节。\n"
             "可复用的操作知识, 每行一个, 带 `[#N]` 来源。\n"
@@ -1109,6 +1205,10 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
     },
     "topics": {
         "section": "主题变化",
+        # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
+        "define": (
+            "本段对话对主题卡内容的影响 (一句话概括); 结构化细节走 topic_updates"
+        ),
         "prompt": (
             "**仅在本段 QA 影响主题卡内容时输出**, 没影响就省略该节。\n"
             "一段文字概括这段对话带来的主题更新; 但**结构化细节走 topic_updates**, "
@@ -1118,6 +1218,10 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
     },
     "state": {
         "section": "系统状态摘要（状态卡输入源）",
+        # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
+        "define": (
+            "系统 / 项目在当前时点的状态快照, 含本轮已实施 / 已验证的结果; 不写关系与情感"
+        ),
         "prompt": (
             "**仅在本段 QA 改变系统/项目当前状态时输出**, 没系统状态变化就省略"
             "该节\n"
@@ -1133,6 +1237,10 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
     },
     "relationship": {
         "section": "关系记忆",
+        # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
+        "define": (
+            "用户与「{_id}」的关系定义变化; 保留双方原词, 不抽象成规则"
+        ),
         "prompt": (
             "**仅在本段 QA 改变用户与{_id}的关系定义时输出**, 没变化就省略该节。\n"
             "写时保留对话里的原词原意 (双方约定怎么称呼就怎么写), 不抽象成「规则/机制」。"
@@ -1162,9 +1270,14 @@ def _resolve_observer_dimensions(cfg) -> dict[str, dict]:
             if spec is False or (isinstance(spec, dict) and spec.get("enabled") is False):
                 dims.pop(name, None)
             elif isinstance(spec, dict):
+                _base = dims.get(name, {})
                 dims[name] = {
-                    "section": spec.get("section", dims.get(name, {}).get("section", name)),
-                    "prompt": spec.get("prompt", dims.get(name, {}).get("prompt", "")),
+                    "section": spec.get("section", _base.get("section", name)),
+                    "prompt": spec.get("prompt", _base.get("prompt", "")),
+                    # define 必须一起带过来: 只保留 section/prompt 会让任何
+                    # observer.dimensions 覆盖 (哪怕只是 {enabled: true}) 把每节
+                    # "该收什么"的定义静默丢掉, 退回 v4 的精简语义。
+                    "define": spec.get("define", _base.get("define", "")),
                     "default": True,
                 }
     except Exception:
@@ -1182,6 +1295,37 @@ def _build_dimensions_block(dims: dict[str, dict], _id: str) -> str:
         else:
             sections.append(f"## {sec}\n[按主题填写]")
     return "\n\n".join(sections)
+
+
+def _collapse_dim_prompt(text: str, identity: str = "我", limit: int = 120) -> str:
+    """把维度指导语压成一句话定义 (自定义维度的兜底, 2026-11-19)。
+
+    默认 8 个维度带显式 ``define``; 用户自定义维度按 2026-08-08 积木化契约
+    只提供 ``prompt``。这里把它的多行指导语压成一行, 让「该节收什么」不至于
+    在 prompt 里整段丢失。只做去格式化, 不改语义; 超过 ``limit`` 字截断 —
+    定义行的职责是一句话说明, 长指导语由 ``prompt`` 原样保留, 不要在定义行
+    里复活 v4 想去掉的长篇指导。
+    """
+    if not text:
+        return ""
+    # 自定义维度常把「仅在本段 QA …就省略该节」写在指导语最前面; 渲染处会统一追加
+    # 这条口径。先按行丢掉纯口径行, 再按句号丢掉内联口径段, 避免同一句出现两次、
+    # 也避免整节定义被它连坐吞掉 (行内混排时按行丢会和下一行粘成一句)。
+    raw_lines = [seg.strip() for seg in str(text).splitlines() if seg.strip()]
+
+    def _is_on_demand_clause(line: str) -> bool:
+        # 只认"以口径开头"的行, 不要因为用户指导语里顺带提到这几个字就整行删掉
+        head = line.lstrip("*").lstrip()
+        return head.startswith("仅在本段 QA") or head.startswith("仅在本轮")
+
+    kept = [ln for ln in raw_lines if not _is_on_demand_clause(ln)]
+    line = " ".join(kept).replace("**", "").replace("{_id}", identity or "我")
+    segs = [seg.strip() for seg in line.split("。") if seg.strip()]
+    segs = [seg for seg in segs if not _is_on_demand_clause(seg)]
+    out = "。".join(segs).strip(" ,;，。;、")
+    if limit and len(out) > limit:
+        out = out[:limit].rstrip(" ,;，。;、") + "…"
+    return out
 
 
 def _observer_prompt(
@@ -1275,9 +1419,17 @@ def _observer_prompt(
     _dim_block_lines = []
     for _dn, _ds in _dims.items():
         _sec = _ds.get("section", _dn)
-        _dim_block_lines.append(
-            f"- {_sec}: **仅在本段 QA 出现该类变化时输出**, 没变化就省略该节 (按需, 可选)。"
-        )
+        # 2026-11-19: 恢复每节的「收什么」定义。v4 第三轮把节定义连同槽位一起删掉,
+        # 模型只剩节名可依 → 提案落进「关键决策」、已完成项落进「进行中状态」
+        # (生产 617 条印实测: 关键决策 2905 条里只有 15.4% 能看出是用户拍板,
+        #  217 条自带「尚未/计划」; 进行中状态 2585 条里 533 条是完成项)。
+        # 定义 ≠ 槽位: 仍然按需输出, 没变化就省略该节。
+        _define = str(
+            _ds.get("define") or _collapse_dim_prompt(_ds.get("prompt", ""), _id)
+        ).strip().replace("{_id}", _id)
+        _on_demand = "**仅在本段 QA 出现该类变化时输出**, 没变化就省略该节 (按需, 可选)。"
+        _body = f"{_define}。{_on_demand}" if _define else _on_demand
+        _dim_block_lines.append(f"- {_sec}: {_body}")
     _dim_block = "\n".join(_dim_block_lines) or "- 本轮只写 QA 明确支持的变化; 没变化就省略该节 (按需, 可选)。"
     # v4 第三轮收口 (2026-08-20): _v4_context_block 只包含人格层 section。
     # 7 天内观察者快照印 section 已删除 — snapshot_text 形参仅作旧调用兼容
@@ -1311,6 +1463,16 @@ def _observer_prompt(
 3. 【本轮新 QA / qa_text】本轮新事实唯一真值来源 / 本轮事实唯一来源 / 本轮新事实唯一。所有事件、决策、教训、偏好、操作知识都必须能在这里找到依据。
 4. 【候选主题 / candidates_text】只用于决定 topic_updates 是 update 还是 create; 候选主题不写入 note.content, 也不把候选主题本身当事实来源, 不写入 note.content。
 
+## 证据归属与状态 (决策 / 进展 必须能回答「谁说的、到哪一步」)
+- 归属标记写在条目最前: `[用户]` 用户拍板 / 授权 / 明确接受; `[建议]` 我提出但用户还没表态; `[共同]` 用户与我各有明确表态且一致。**判不准归属时只能用 `[建议]`**, 不许拿 `[共同]` 兜底 — [共同] 是个肯定断言, 当兜底用会把归属标记变成噪音; 判不准也**不是删掉这条事实的理由**。用户的「授权我处理」算 [用户], 但一句「帮我查一下」不是授权。
+- 状态标记写在结论旁 (来源 `[#N]` 仍在行尾): `〔已实施〕` `〔已验证〕` `〔计划中〕` `〔未完成〕` `〔已推翻〕`, 依据可括注 (用户自述 / 执行结果 / 仅讨论)。状态只由本轮 qa_text 判定, 不从上一版印继承: 上一版标〔计划中〕的项, 本轮没有新证据就照写〔计划中〕, 只有出现相反证据才改; 没有执行或验证证据时, 不写「已完成」「已修复」「已验证」。
+- 本段内用户后置的说法取代先前说法时, 写成 `原为 X → 改为 Y` 并把旧值保留为一行, 不要并列成两条互不相干的事实; 用户没推翻的旧结论不要改写。
+- 偏好边界: 一次性任务参数 (这次 / 这份 / 这个文件) 不记成长期偏好; 但用户在评价我的做法 (「我不喜欢这种写法」「别再默认开思考」「这个风格保持住」) 就是偏好, 直接记为偏好, 不要求出现「以后 / 总是 / 一律」。
+- 格式示例:
+  `- [用户] 候选池 top_k 从 5 调到 15〔已实施〕[#12]`
+  `- [建议] 下一步先补向量再跑全量〔计划中〕[#29]`
+  `- 原为 X → 改为 Y〔已实施〕[#N]` (旧值保留在这一行里, 不另起一条)
+
 ## 时间锚点
 当前时间: {now_str}
 本次 QA 时间范围: {qa_time_range}
@@ -1322,8 +1484,9 @@ def _observer_prompt(
 - 本轮信息少就写短; 本轮只有一两条变化时, 几句话或一两个小段完全足够。长度按变化量伸缩, 不要按 note_min / note_max 填充。
 - 上一轮观察快照和人格层只用于理解变化, 不能替代本轮 QA; 候选主题只用于主题动作判断 (update/create)。
 - 每条关键事实、决策、教训或偏好在原文旁紧跟 `[ #N ]` 的无空格形式 `[#N]`, N 是本轮 QA 序号。
+- 决策行与进展行按 `[归属] …〔状态〕[#N]` 的固定顺序写: 归属在最前, 状态紧贴 `[#N]` 之前 (状态词由模型自行判断, 写不准就省, 不要为凑格式牺牲内容)。
 - 主题卡只记录值得长期检索的变化: 可匹配已有候选时 update, 否则确有独立价值时 create; 纯寒暄和重复确认可以不建卡。
-- new_facts 只写最重要的新事实并保留原词, tags 保留用户可能实际搜索的原词或专名; 不要把主题动作重复写成 note 正文, 不写入 note.content 的事实。
+- new_facts 只写最重要的新事实并保留原词; 属于决策 / 进展类的事实同样带归属前缀 (`[用户]` / `[建议]` / `[共同]`) 与状态词 (〔已实施〕等), 判不准只能用 `[建议]`; tags 保留用户可能实际搜索的原词或专名; 不要把主题动作重复写成 note 正文, 不写入 note.content 的事实。
 
 ## 维度节 (按 evidence 输出, 没变化就省略该节, 按需, 可选)
 {_dim_block}
@@ -2405,6 +2568,80 @@ def _filter_keywords(tags):
     return out or None
 
 
+_FACT_CITATION_RE = re.compile(r"\[\s*#\s*(\d+)\s*\]")
+_FACT_NORM_STRIP = re.compile(r"[\s\u3000，。、；：·\-—…“”‘’（）()\[\]【】\"']+")
+
+
+def _title_for_update(old_title: str, model_title: str) -> str:
+    """update 分支的标题选择: 已有标题优先, 不被当轮模型标题覆盖。
+
+    2026-11-13: 之前每轮 update 都写模型当轮的 title, 一张卡会被最后一次讨论的
+    子话题改名 (「Honcho 本地部署与插件接入」→「本地消息上限评估与调整」),
+    卡名从此只代表最后一轮。建卡定名, 之后不改名。
+    """
+    return (old_title or "").strip() or (model_title or "").strip()
+
+
+def _norm_fact_text(s: str) -> str:
+    """事实文本归一化: 去空白/标点/大小写差异, 只留可比较的字面。
+
+    用途: 判断"这条新事实是不是旧 body 里已经写过的那件事"。
+    2026-11-12: body 是滚动累积的, 归一化后子串包含足以拦住"同义改写"这一档,
+    不做语义裁判 — 拿不准的一律保留 (宁可留重复, 不丢事实)。
+    """
+    return _FACT_NORM_STRIP.sub("", (s or "").lower())
+
+
+def _dedupe_facts(old_body: str, facts: list[str]) -> list[str]:
+    """追加前拦截 body 里已有的事实 (完全相同 / 轻微改写 / 批内重复)。
+
+    只做字面级判断, 不做语义裁判: 归一化后被已有文本包含 → 判定重复丢弃。
+    宁可留下一条措辞不同的新事实, 也不因为"看起来像"把真新内容删掉。
+    """
+    old_norm = _norm_fact_text(old_body)
+    kept: list[str] = []
+    kept_norm: list[str] = []
+    for f in facts or []:
+        nf = _norm_fact_text(f)
+        if not nf or nf in old_norm:
+            continue
+        if any(nf in kn or kn in nf for kn in kept_norm):
+            continue
+        kept.append(f)
+        kept_norm.append(nf)
+    return kept
+
+
+def _fact_refs_from_text(fact_text: str, qa_rows: list[Any] | None) -> tuple[list[int], str]:
+    """解析 fact 里全部 [#N] → 本批真实 qa_pairs.id 列表 + source 后缀。
+
+    2026-11-12 断链修正: 之前只用第一条引用去复用向量, 引用关系用完就丢,
+    结果 topic_entries 只知道"来自哪张印", 回不到具体 QA。现在:
+      · 恰好一条引用 → 写 source_qa_id (source 前缀 obs:fact 已标明它是派生事实,
+        不是 QA 原话 — 回查语义是"由这条 QA 归纳而来")
+      · 多条引用 → 不伪造单一来源, 在 source 后缀记可核实集合 `:qa=12,37`
+      · 没有引用 → 维持空, 只靠 obs:fact:{note_id} 回查印
+    """
+    if not qa_rows:
+        return [], ""
+    ids: list[int] = []
+    for m in _FACT_CITATION_RE.finditer(fact_text or ""):
+        try:
+            n = int(m.group(1))
+        except Exception:
+            continue
+        if n < 1 or n > len(qa_rows):
+            continue
+        row = qa_rows[n - 1]
+        qid = row.get("id") if isinstance(row, dict) else None
+        if qid is None:
+            continue
+        qi = int(qid)
+        if qi not in ids:
+            ids.append(qi)
+    return ids, (f":qa={','.join(str(i) for i in ids)}" if len(ids) > 1 else "")
+
+
 def _apply_topic_updates(
     pg,
     note_id: int,
@@ -2559,6 +2796,10 @@ def _apply_topic_updates(
         if emb is None:
             return None, "missing_embedding"
         return emb, None
+
+    def _resolve_fact_refs(fact_text: str) -> tuple[list[int], str]:
+        return _fact_refs_from_text(fact_text, qa_rows)
+
     for upd in updates:
         if not isinstance(upd, dict):
             continue
@@ -2566,6 +2807,8 @@ def _apply_topic_updates(
         title = (upd.get("title") or "").strip()[:200]
         summary = (upd.get("summary") or "").strip()[:500]
         new_facts = (upd.get("new_facts") or "").strip()[:8000]
+        _fact_items_all = [f.strip() for f in re.split(r'[\n；;]+', new_facts) if f.strip()]
+        _facts_for_entries: list[str] | None = None
         tags = upd.get("tags") or []
         if not isinstance(tags, list):
             tags = []
@@ -2582,19 +2825,21 @@ def _apply_topic_updates(
                 # 读 SQLite 找不到 → 误转 create → 制造重复卡）; PG 无则转 create
                 old_body = ""
                 old_summary = ""
+                old_title = ""
                 _found = False
                 if pg is not None:
                     try:
                         _conn_pg = pg._connect() if hasattr(pg, "_connect") else pg
                         with _conn_pg.cursor() as _cur:
                             _cur.execute(
-                                f"SELECT body, summary FROM {topics_table} WHERE topic_id=%s",
+                                f"SELECT body, summary, title FROM {topics_table} WHERE topic_id=%s",
                                 (topic_id_in,),
                             )
                             _row = _cur.fetchone()
                             if _row:
                                 old_body = _row[0] or ""
                                 old_summary = _row[1] or ""
+                                old_title = _row[2] or ""
                                 _found = True
                     except Exception:
                         _found = False
@@ -2608,10 +2853,16 @@ def _apply_topic_updates(
                         old_summary = cur[1] or ""
                         _found = True
                 if _found:
+                    # 2026-11-12 追加前去重: body 是滚动累积的, LLM 每轮会把上一版印里
+                    # 已经写过的事实换个说法再给一遍; 直 append 会在 3000 字上限以内
+                    # 反复堆同一件事 (实测某卡 13 段里 2 段同义)。这里按归一化后
+                    # 子串包含拦截"完全相同 + 轻微改写", 拿不准的一律保留。
+                    _facts_to_add = _dedupe_facts(old_body, _fact_items_all)
+                    _facts_for_entries = _facts_to_add
+                    _new_body = (old_body + "\n\n" + "\n".join(_facts_to_add)).strip() if _facts_to_add else old_body
                     # 2026-08-12 v2 修正: body 追加限量 — 第二轮事实级改造发现 new_facts 全追加
                     # 导致单卡膨胀 (6975字) 超注入预算 4000 → 截断 → 关键事实不可见 (conv-26 75%→64%)
                     # 小粒度主题卡覆盖更好 (对照组 31 卡 45.8% vs 实验组 23 卡 44.1%)
-                    _new_body = (old_body + "\n\n" + new_facts).strip()
                     if len(_new_body) > 3000:
                         # body 超限: 不追加, 事实只走 entries (chain 链路), 保持小粒度
                         appended = old_body
@@ -2619,8 +2870,13 @@ def _apply_topic_updates(
                     else:
                         appended = _new_body
                     new_summary = summary or old_summary
+                    # 2026-11-13 标题锁定: 每轮 update 都把模型当轮写的 title 覆盖回去,
+                    # 实测一张卡会被后来讨论的子话题改名 (「Honcho 本地部署与插件接入」
+                    # → 「本地消息上限评估与调整」), 卡名从此只代表最后一轮。
+                    # 建卡时定名, update 不改名 — 除非模型显式给 rename (本版未开放)。
+                    _kept_title = _title_for_update(old_title, title)
                     store.upsert_topic(
-                        title=title,
+                        title=_kept_title,
                         summary=new_summary,
                         body=appended[:16000],
                         keywords=_filter_keywords(tags),
@@ -2660,7 +2916,10 @@ def _apply_topic_updates(
             # 解析不到引用的事实走"skip + warning + 累计计数"; strict_pg 下绝不静默
             # 写 NULL embedding (避免断链残留); 非 strict 模式下允许 NULL 但仍记录。
             if (new_facts or '').strip():
-                _fact_items = [f.strip() for f in re.split(r'[\n；;]+', new_facts) if f.strip()]
+                # 2026-11-12: update 分支已做过追加前去重 — 已写进 body 的事实不再重复落
+                # entry, 否则同一件事会既在 body 又在 entries 里各来一遍。
+                _fact_items = (_facts_for_entries if _facts_for_entries is not None
+                               else _fact_items_all)
                 for _fi in _fact_items[:20]:
                     _fact_emb, _reason = _resolve_fact_embedding(_fi)
                     if _fact_emb is None:
@@ -2671,12 +2930,16 @@ def _apply_topic_updates(
                                 f"[{_reason}] {_fi[:80]}"
                             )
                         continue
+                    # 2026-11-12: 把 [#N] 引用落成可核实来源 —
+                    # 单引用写 source_qa_id, 多引用写 source 后缀 :qa=a,b (不伪造单一来源)
+                    _fact_ids, _ref_suffix = _resolve_fact_refs(_fi)
                     try:
                         store.add_entry(
                             topic_id_in,
-                            source=f'obs:fact:{note_id}',
+                            source=f'obs:fact:{note_id}{_ref_suffix}',
                             question=_fi[:300],
                             answer='',
+                            source_qa_id=(_fact_ids[0] if len(_fact_ids) == 1 else None),
                             pg_conn=pg,
                             embedding=_fact_emb,
                             embed_cfg=embed_cfg,
@@ -3262,6 +3525,259 @@ def _record_skipped_sensitive(
             "记录 skipped_sensitive 审计失败 (不阻塞): %s", _safe_err(e)[:120])
 
 
+_BLOCKED_QA_CAP = 20000
+
+
+def _blocked_qa_path(cfg: dict[str, Any] | None = None):
+    """毒条黑名单文件路径 (与 observer_state.json 同目录)。"""
+    return _state_path(cfg).parent / "observer_blocked_qa_ids.json"
+
+
+def _load_blocked_qa_ids(cfg: dict[str, Any] | None = None) -> list[int]:
+    """读取「输入侧内容过滤确定性拒绝」的 QA id 黑名单。
+
+    设计动机 (2026-11-12): 一批 30 条 QA 里只要有一条被平台输入侧过滤
+    (422 new_sensitive / 1026), 整批就废; 旧逻辑只能自适应减半 30→15→7→3→1,
+    结果每份 note 只覆盖 1-3 条, 印退化成几十字的碎片。把毒条拉黑后按 30 条
+    重新取批, 批次粒度与生产一致, note 不被稀释。
+    只影响"是否送进 note"这一步 — raw / qa_pairs / 主题卡层完全不动。
+    """
+    p = _blocked_qa_path(cfg)
+    try:
+        if not p.exists():
+            return []
+        data = json.loads(p.read_text(encoding="utf-8")) or {}
+        ids = data.get("qa_ids") if isinstance(data, dict) else data
+        if not isinstance(ids, list):
+            return []
+        return [int(i) for i in ids]
+    except Exception as e:
+        logger.warning("读取 blocked_qa_ids 失败 (按空处理): %s", _safe_err(e)[:120])
+        return []
+
+
+def _add_blocked_qa_ids(
+    ids: list[int],
+    *,
+    reason: str,
+    cfg: dict[str, Any] | None = None,
+) -> None:
+    """把确定性触发内容过滤的 QA id 追加进黑名单。写失败只警告, 不阻塞主流程。"""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return
+    p = _blocked_qa_path(cfg)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {}
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8")) or {}
+            except Exception:
+                data = {}
+        cur_ids = data.get("qa_ids") if isinstance(data, dict) else data
+        if not isinstance(cur_ids, list):
+            cur_ids = []
+        seen = {int(i) for i in cur_ids}
+        for i in ids:
+            if i not in seen:
+                cur_ids.append(i)
+                seen.add(i)
+        if len(cur_ids) > _BLOCKED_QA_CAP:
+            cur_ids = cur_ids[-_BLOCKED_QA_CAP:]
+        payload = {
+            "qa_ids": cur_ids,
+            "count": len(cur_ids),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "last_reason": str(reason)[:200],
+        }
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("写 blocked_qa_ids 失败 (不阻塞): %s", _safe_err(e)[:120])
+
+
+def _probe_qa_rows_sensitive(
+    rows: list[Any],
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+) -> bool:
+    """用同一模型对一组 QA 做最小探测: 是否触发输入侧内容过滤。
+
+    探测文本只含该组 QA 的问答正文, 不含上一版印 —— 目的是把"毒条"归因到
+    具体 QA, 而不是判断整份 prompt 的可用性。平台的内容过滤在推理前完成
+    (0.4-0.6s 返回 422), 因此探测基本不消耗输出额度。
+    """
+    parts: list[str] = []
+    for r in rows:
+        try:
+            q = r[3]
+            a = r[4]
+        except Exception:
+            q, a = "", ""
+        parts.append(f"Q: {q or ''}\nA: {a or ''}")
+    text = "\n\n".join(parts).strip()
+    if not text:
+        return False
+    try:
+        res = call_m3(
+            llm_cfg, api_key, text,
+            max_completion_tokens=16,
+            thinking=thinking, reasoning_split=reasoning_split,
+        )
+    except Exception as e:
+        logger.warning("observer: 敏感探测调用异常 (按未命中处理): %s", _safe_err(e)[:120])
+        return False
+    if "error" not in res:
+        return False
+    return _is_m3_sensitive_error(str(res.get("error", "")))
+
+
+def _find_sensitive_rows(
+    rows: list[Any],
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+    _depth: int = 0,
+) -> list[Any]:
+    """二分定位批内触发内容过滤的 QA 行。返回被拒行; 空列表 = 与具体 QA 无关。
+
+    bounded: 深度上限 6 (2**6=64 分片), 单批最多数十条, 足够覆盖;
+    探测次数约 2k·log(n) (k=毒条数), 相比旧逻辑"整批重试必败 + 降批"
+    既省调用又保住批次粒度。
+    """
+    if not rows or _depth > 6:
+        return []
+    if len(rows) == 1:
+        hit = _probe_qa_rows_sensitive(
+            rows, llm_cfg, api_key,
+            thinking=thinking, reasoning_split=reasoning_split,
+        )
+        return list(rows) if hit else []
+    mid = len(rows) // 2
+    out: list[Any] = []
+    for part in (rows[:mid], rows[mid:]):
+        if _probe_qa_rows_sensitive(
+            part, llm_cfg, api_key,
+            thinking=thinking, reasoning_split=reasoning_split,
+        ):
+            out.extend(_find_sensitive_rows(
+                part, llm_cfg, api_key,
+                thinking=thinking, reasoning_split=reasoning_split,
+                _depth=_depth + 1,
+            ))
+    return out
+
+
+def _probe_text_sensitive(
+    text: str,
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+) -> bool:
+    """对任意文本做一次最小探测: 是否被平台输入侧内容过滤确定性拒绝。"""
+    text = (text or "").strip()
+    if not text:
+        return False
+    try:
+        res = call_m3(
+            llm_cfg, api_key, text,
+            max_completion_tokens=16,
+            thinking=thinking, reasoning_split=reasoning_split,
+        )
+    except Exception as e:
+        logger.warning("observer: 文本探测异常 (按未命中): %s", _safe_err(e)[:120])
+        return False
+    if "error" not in res:
+        return False
+    return _is_m3_sensitive_error(str(res.get("error", "")))
+
+
+def _bisect_refused_text(
+    paras: list[str],
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+    _depth: int = 0,
+) -> list[str]:
+    """在段落粒度上二分定位被拒文本的最小区块。"""
+    if not paras or _depth > 12:
+        return []
+    if len(paras) == 1:
+        return list(paras) if _probe_text_sensitive(
+            paras[0], llm_cfg, api_key,
+            thinking=thinking, reasoning_split=reasoning_split,
+        ) else []
+    mid = len(paras) // 2
+    out: list[str] = []
+    for part in (paras[:mid], paras[mid:]):
+        if _probe_text_sensitive(
+            "\n\n".join(part), llm_cfg, api_key,
+            thinking=thinking, reasoning_split=reasoning_split,
+        ):
+            out.extend(_bisect_refused_text(
+                part, llm_cfg, api_key,
+                thinking=thinking, reasoning_split=reasoning_split,
+                _depth=_depth + 1,
+            ))
+    return out
+
+
+def _find_sensitive_rows_in_prompt(
+    prompt: str,
+    rows: list[Any],
+    llm_cfg: dict[str, Any],
+    api_key: str,
+    *,
+    thinking: str = "disabled",
+    reasoning_split: bool = True,
+) -> list[Any]:
+    """在被拒的真实 prompt 上二分, 把最小触发块映射回具体 QA 行。
+
+    为什么必须用 prompt 而不是"重新渲染 QA 文本": 平台过滤按输入原文匹配,
+    换成另一种包法 (裸 Q/A、无前缀、不同分隔符) 可能就不触发 —— 实测同一批
+    在真实 prompt 里必拒、在裸问答里全过。只有对同一份文本二分才可靠。
+
+    返回空列表的两种情况 (调用方据此回落旧的自适应减半):
+      ① 触发块落在 prompt 骨架/上一版印/候选主题里, 映射不到具体 QA;
+      ② 探测本身没复现拒绝 (过滤概率性)。
+    """
+    if not prompt or not rows:
+        return []
+    paras = [p for p in prompt.split("\n\n") if p.strip()]
+    bad_spans = _bisect_refused_text(
+        paras, llm_cfg, api_key,
+        thinking=thinking, reasoning_split=reasoning_split,
+    )
+    if not bad_spans:
+        return []
+    joined = "\n\n".join(bad_spans)
+    offenders: list[Any] = []
+    seen: set[int] = set()
+    for r in rows:
+        try:
+            qa_id = int(r[0])
+            q = str(r[3] or "")
+            a = str(r[4] or "")
+        except Exception:
+            continue
+        if qa_id in seen:
+            continue
+        probes = [s[:60] for s in (q.strip(), a.strip()) if len(s.strip()) >= 8]
+        if probes and any(s in joined for s in probes):
+            offenders.append(r)
+            seen.add(qa_id)
+    return offenders
+
+
 def _segment_id_from_range(qa_range_start: int, qa_range_end: int) -> str:
     """生成 failed_segment / stalled_state 的稳定 segment_id。
 
@@ -3627,6 +4143,17 @@ def _compute_snapshot_budget(
 # ────────────────────────────────────────────────────────────
 # 后台 worker — 核心流水线
 # ────────────────────────────────────────────────────────────
+
+def _is_config_error_result(result: Any) -> bool:
+    """``call_m3`` 的失败 dict 里区分"配置错了"和"provider 挂了"。
+
+    配置错误必须在写任何持久状态之前拦下: 自适应批大小、failed_segment 和
+    cursor 都不该因为一个拼错的模型名而变化。
+    """
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("error") or "").startswith("config_error")
+
 
 def _observe_worker(
     cfg: dict[str, Any],
@@ -4031,6 +4558,9 @@ def _observe_worker(
         # v5.2 (2026-08-21): last_qa_id 已在 1.4 步加载, 这里不再重复 _load_cursor。
         try:
             with pg.cursor() as cur:
+                # 2026-11-12: 毒条黑名单 — 被平台输入侧内容过滤确定性拒绝的 QA
+                # 不进 note 批次 (仍在 raw/qa_pairs/主题卡层)。空列表时该条件恒真。
+                _blocked_ids = _load_blocked_qa_ids(cfg)
                 cur.execute(
                     """
                     SELECT id, session_id, timestamp,
@@ -4039,10 +4569,11 @@ def _observe_worker(
                     FROM qa_pairs
                     WHERE id > %s AND answer IS NOT NULL
                       AND session_id NOT LIKE '%%.trajectory%%'
+                      AND NOT (id = ANY(%s::bigint[]))
                     ORDER BY timestamp ASC NULLS LAST, id ASC
                     LIMIT %s
                     """,
-                    (last_qa_id, max_qa_per_run),
+                    (last_qa_id, _blocked_ids, max_qa_per_run),
                 )
                 rows = cur.fetchall()
         except Exception as e:
@@ -4378,6 +4909,20 @@ def _observe_worker(
         # 只跳过, 永不拆。修复: 用统一的 _m3_failed_path 标志, 失败时一次进入
         # 自适应拆批逻辑 (近似 JSON 解析失败的分叉: 多条拆批, 单条只跳过)。
         _m3_failed_path: str | None = None  # None=成功; "primary"=主失败; "fallback"=主+fallback均失败
+        # 配置错误 (缺 model / 非法 settings) 不是 provider 故障: 一旦走进下面的
+        # 统一失败段, 就会自适应拆批 (批大小减半) + 写失败段, 于是一个拼错的模型名
+        # 会把自适应批大小永久减半直到 stalled。这里直接停: 不写 note, 不动自适应
+        # 状态, 不推进 cursor, 只把错误打进日志等人修配置。
+        if _is_config_error_result(result):
+            logger.error(
+                "observer: 配置错误 (不是网络/模型故障), 本轮不作任何状态变更: %s",
+                str(result.get("error"))[:300],
+            )
+            try:
+                pg.close()
+            except Exception:
+                pass
+            return
         if "error" in result:
             err_str = str(result["error"])
             try:
@@ -4417,6 +4962,53 @@ def _observe_worker(
                                err_str, latency)
         # 统一失败态分支: primary 失败 / fallback 失败 都过这里
         if _m3_failed_path is not None and "error" in result:
+            # 诊断留痕 (2026-11-12): 被拒时把实际 prompt 落盘, 供离线二分定位触发源。
+            # 只在显式开 V3CORE_OBSERVER_DUMP_REFUSED=1 时写, 默认零副作用。
+            if os.environ.get("V3CORE_OBSERVER_DUMP_REFUSED") == "1":
+                try:
+                    from .config import _resolve_data_dir as _rdd
+                    _dump_dir = _rdd(cfg)
+                    _dump_dir.mkdir(parents=True, exist_ok=True)
+                    _dump = _dump_dir / f"refused_prompt_{first_qa_id}_{last_qa_id_now}.txt"
+                    _dump.write_text(prompt, encoding="utf-8")
+                    logger.warning("observer: 被拒 prompt 已落盘 %s (%d 字)", _dump, len(prompt))
+                except Exception as _e_dump:
+                    logger.warning("observer: 落盘被拒 prompt 失败: %s", _safe_err(_e_dump)[:120])
+            # 敏感项隔离 (2026-11-12): 批内确定性内容过滤 → 二分定位毒条并拉黑,
+            # 保持批次粒度不变 (不降批, 不用 1-3 条凑 note)。定位不到具体 QA
+            # (说明是上一版印/候选等其它输入触发) 才回落旧的自适应减半。
+            if len(rows) > 1 and _is_m3_sensitive_error(str(result.get("error", ""))):
+                try:
+                    _offenders = _find_sensitive_rows_in_prompt(
+                        prompt, rows, merged, api_key,
+                        thinking=thinking, reasoning_split=reasoning_split,
+                    )
+                except Exception as _e_iso:
+                    _offenders = []
+                    logger.warning(
+                        "observer: 敏感项隔离探测失败 (回落自适应减半): %s",
+                        _safe_err(_e_iso)[:120],
+                    )
+                if _offenders:
+                    _bad_ids = [int(r[0]) for r in _offenders]
+                    _iso_reason = str(result.get("error", ""))[:200]
+                    _add_blocked_qa_ids(_bad_ids, reason=_iso_reason, cfg=cfg)
+                    for _bid in _bad_ids:
+                        _record_skipped_sensitive(_bid, _bid, reason=_iso_reason, cfg=cfg)
+                    logger.warning(
+                        "observer: 敏感项隔离 — 批内 %d/%d 条被平台确定性拒绝, 已拉黑留档 "
+                        "(ids=%s); 本批不降批、不推进 cursor, 下轮按 %d 条重新取批",
+                        len(_bad_ids), len(rows), _bad_ids[:10], max_qa_per_run,
+                    )
+                    try:
+                        pg.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        pg.close()
+                    except Exception:
+                        pass
+                    return
             if len(rows) > 1:
                 # 多条 QA: 复用现有 _save_adaptive_batch (与 JSON 解析失败 / 多条超长
                 # 输出走同一契约), 把 batch 减半 → 下次 worker 按 adaptive reason

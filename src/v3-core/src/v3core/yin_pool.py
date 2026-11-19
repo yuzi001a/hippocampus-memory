@@ -16,6 +16,7 @@ E1 写印后切段入库 (PG yin_paragraphs): 每段 embedding — 向量+关键
 import logging
 import re
 from ._deadline import PrefetchDeadlineExceeded
+from .vector_recall import query_with_exact_fallback
 
 logger = logging.getLogger("v3core.yin_pool")
 
@@ -197,14 +198,17 @@ def search_yin(query_emb: list[float] | None, keyword: str = "", pg=None, limit:
         if query_emb:
             emb_str = "[" + ",".join(str(x) for x in query_emb) + "]"
             with conn.cursor() as cur:
-                cur.execute(
+                rows, _ = query_with_exact_fallback(
+                    cur,
                     "SELECT yin_version, section, content, "
                     " 1 - (embedding <=> %s::vector) AS cosine "
                     " FROM yin_paragraphs WHERE embedding IS NOT NULL "
                     " ORDER BY embedding <=> %s::vector LIMIT %s",
                     (emb_str, emb_str, limit),
+                    table="yin_paragraphs",
+                    context="yin_pool.search_yin",
                 )
-                for row in cur.fetchall():
+                for row in rows:
                     out.append({
                         "yin_version": row[0], "section": row[1],
                         "content": row[2], "score": round(float(row[3] or 0), 4),

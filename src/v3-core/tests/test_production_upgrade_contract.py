@@ -146,45 +146,17 @@ def _ns(
 
 
 def _full_shape():
-    tables = {
-        "qa_pairs",
-        "conversation_stream",
-        "topics",
-        "topic_entries",
-        "observation_notes",
-        "yin_paragraphs",
-        # extras from the upgrade-required + optional sets:
-        "explicit_memories",
-        "memory_relations",
-        "schema_versions",
-        "qa_embedding_chunks",
-        "observation_embedding_chunks",
-        "assistant_deliveries",
-    }
+    # Derived from the shipped contract, not hand-listed: the required set grew
+    # (derived_memory_invalidations, embedding_failures) and a hand-written
+    # fixture silently stopped modelling a "complete" install.
+    from v3core import schema_contract as _sc
+
+    contract = _sc.load_contract()
+    tables = set(contract.required_tables())
     cols = {
-        ("qa_pairs", "source_id"),
-        ("qa_pairs", "turn_id"),
-        ("qa_pairs", "source"),
-        ("qa_pairs", "tool_calls"),
-        ("qa_pairs", "tool_results"),
-        ("qa_pairs", "embed_model"),
-        ("qa_pairs", "created_at"),
-        ("topics", "note_ref"),
-        ("topics", "last_observer_ts"),
-        ("topics", "embed_model"),
-        ("topic_entries", "source_qa_id"),
-        ("topic_entries", "embed_model"),
-        ("observation_notes", "embed_model"),
-        ("yin_paragraphs", "embed_model"),
-        ("assistant_deliveries", "source_id"),
-        ("assistant_deliveries", "host"),
-        ("assistant_deliveries", "session_id"),
-        ("assistant_deliveries", "trigger_event_id"),
-        ("assistant_deliveries", "trigger_kind"),
-        ("assistant_deliveries", "content"),
-        ("assistant_deliveries", "event_ids"),
-        ("assistant_deliveries", "started_at"),
-        ("assistant_deliveries", "created_at"),
+        (table, column)
+        for table, columns in contract.required_columns().items()
+        for column in columns
     }
     return tables, cols
 

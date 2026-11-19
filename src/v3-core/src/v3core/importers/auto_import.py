@@ -27,9 +27,7 @@ from . import (
     KIND_LEGACY,
     KIND_RAW,
     _current_pool,
-    _emit_curated_or_legacy,
-    _emit_raw_messages,
-    _resolve_writer,
+    _OrdinalCounter,
     get_importer,
 )
 from . import discovery as _discovery
@@ -55,6 +53,8 @@ def import_auto(
     platform: str | None = None,
     dry_run: bool = False,
     profile_dir: Path | None = None,
+    batch_size: int = 500,
+    on_session=None,
     out=None,
 ) -> dict:
     """Run discovery + import for every requested host. Returns the report."""
@@ -86,7 +86,15 @@ def import_auto(
             requested, overrides=overrides, env=env, platform=platform
         )
         for src in detected:
-            sources.append(_process_source(src, pool=pool, dry_run=dry_run))
+            sources.append(
+                _process_source(
+                    src,
+                    pool=pool,
+                    dry_run=dry_run,
+                    batch_size=batch_size,
+                    on_session=on_session,
+                )
+            )
 
     totals = _totals(sources)
     duration = round(time.monotonic() - started, 3)
@@ -130,7 +138,7 @@ def import_auto(
 # ── per-source pipeline ───────────────────────────────────────────────
 
 
-def _process_source(src, *, pool, dry_run: bool) -> dict:
+def _process_source(src, *, pool, dry_run: bool, batch_size: int = 500, on_session=None) -> dict:
     entry: dict = {
         "host": src.host,
         "root": str(src.root) if src.root is not None else None,
@@ -152,6 +160,7 @@ def _process_source(src, *, pool, dry_run: bool) -> dict:
         "newest": src.newest,
         "recall_ready": False,
         "errors": [],
+        "reopened_sessions": 0,
     }
 
     if not src.found:
@@ -160,69 +169,201 @@ def _process_source(src, *, pool, dry_run: bool) -> dict:
     imp = get_importer(src.host)
     imp.reset_excluded_counts()
 
-    parsed = []
+    from . import _emit_curated_or_legacy, _emit_raw_messages_bulk, _resolve_writer
+    from . import qa_pairing as _qa
+
+    stats = _Stats()
+    pending: dict[str, list] = {}
+    order: list[str] = []
+    reopened = 0
+    seen_sessions: set[str] = set()
+    items_seen = 0
+    pairs_seen = 0
+    curated_items: list = []
+    ordinals = _OrdinalCounter()
+    # A rebuild must not hold the whole corpus in memory — and neither may a
+    # single huge session. Buffer caps are per session; at most
+    # ``max_open_sessions`` sessions stay open, so peak retention is
+    # ``max_open_sessions * max_session_items`` messages (plus one in flight).
+    max_open_sessions = 3
+    max_session_items = 2_000
+    max_session_chars = 4_000_000
+    # 硬上限：某些会话整段都是 assistant/tool 行，永远等不到"下一条是 user"的
+    # 安全边界。到硬上限必须切，否则单会话内存无界。切了就如实记一笔，
+    # 不静默截断答案链。
+    max_session_hard_items = 8_000
+    max_session_hard_chars = 16_000_000
+    open_chars: dict[str, int] = {}
+    forced_splits = 0
+
+    def _safe_boundary(buf: list, nxt) -> bool:
+        """Splitting here never separates a question from its answer."""
+        if not buf or nxt is None:
+            return True
+        prev_role = (buf[-1].role or "").strip().lower()
+        next_role = (nxt.role or "").strip().lower()
+        return next_role == "user" and prev_role != "user"
+
+    def _assign_identities(sid: str, items: list) -> list:
+        """Give every host-carrying raw item its final event id **before**
+        pairing, so the raw row and its QA pair agree on identity.
+
+        Previously the raw writer invented ``derived:<host>:<sess>:<n>``
+        while the pairing layer invented ``…:turn-<k>`` — for sources with
+        no native event id (honcho, trajectory, old OpenClaw) the QA
+        ``source_id`` therefore pointed at a message that never existed.
+        ``ordinals`` is shared across segments and batches, so the number is
+        a per-session ordinal, not a per-chunk one.
+        """
+        from dataclasses import replace
+
+        out = []
+        for it in items:
+            host = (it.host or "").strip()
+            if it.kind == KIND_RAW and host and not (it.event_id or "").strip():
+                it = replace(it, event_id=f"derived:{host}:{sid}:{ordinals.next(host, sid)}")
+                stats.identity_derived += 1
+            out.append(it)
+        return out
+
+    def _flush_session(sid: str, *, keep_open: bool = False) -> None:
+        nonlocal pairs_seen
+        items = pending.pop(sid, []) if not keep_open else pending.get(sid, [])
+        if not items:
+            return
+        if keep_open:
+            pending[sid] = []
+            open_chars[sid] = 0
+        else:
+            open_chars.pop(sid, None)
+        items = _assign_identities(sid, items)
+        pairs = _qa.pair_items(items)
+        pairs_seen += len(pairs)
+        if not dry_run:
+            failed = _emit_raw_messages_bulk(
+                pool=pool,
+                items=items,
+                source_tag=f"import:{imp.name}",
+                stats=stats,
+                batch_size=batch_size,
+                ordinals=ordinals,
+            )
+            if failed:
+                # Dependency contract: QA is derived from raw. If the raw
+                # write failed, writing QA would leave orphans that point at
+                # messages which do not exist. Withhold and say so.
+                stats.skipped += len(pairs)
+                stats.errors.append(
+                    f"{sid}: {len(pairs)} QA pair(s) withheld — raw write failed "
+                    f"for {failed} message(s)"
+                )
+            elif pairs:
+                _qa.emit_qa_pairs_bulk(
+                    pool=pool, pairs=pairs, stats=stats, batch_size=batch_size
+                )
+        if on_session is not None:
+            try:
+                on_session(sid, len(items), len(pairs))
+            except Exception:  # progress callbacks never break an import
+                pass
+
     for artifact in src.artifacts:
         try:
-            for item in imp.parse(artifact):
-                parsed.append(item)
+            for it in imp.parse(artifact):
+                if it.kind != KIND_RAW:
+                    # 用户维护的长期记忆（MEMORY.md / USER.md …）走
+                    # explicit_memories，不能因为"不是 raw"就静默跳过。
+                    if it.kind in (KIND_CURATED, KIND_LEGACY):
+                        if (it.text or "").strip():
+                            curated_items.append(it)
+                    continue
+                if not (it.text or "").strip():
+                    continue
+                sid = (it.source_ref or "").strip() or "imported"
+                items_seen += 1
+                if sid not in pending:
+                    if sid in seen_sessions:
+                        reopened += 1
+                    seen_sessions.add(sid)
+                    while len(pending) >= max_open_sessions and order:
+                        _flush_session(order.pop(0))
+                    pending[sid] = []
+                    open_chars[sid] = 0
+                    order.append(sid)
+                buf = pending[sid]
+                # Bound the buffer at a safe boundary: flush what we have
+                # before appending a message that would exceed the cap.
+                if buf and (
+                    len(buf) >= max_session_items
+                    or open_chars.get(sid, 0) >= max_session_chars
+                ) and _safe_boundary(buf, it):
+                    _flush_session(sid, keep_open=True)
+                    buf = pending[sid]
+                elif buf and (
+                    len(buf) >= max_session_hard_items
+                    or open_chars.get(sid, 0) >= max_session_hard_chars
+                ):
+                    # 没有安全边界也只能切：内存必须封顶。切点会让一条回答链
+                    # 分成两段（后半段没有提问，只留 raw），所以必须可见。
+                    forced_splits += 1
+                    _flush_session(sid, keep_open=True)
+                    buf = pending[sid]
+                buf.append(it)
+                open_chars[sid] = open_chars.get(sid, 0) + len(it.text or "")
         except Exception as exc:
             entry["errors"].append(f"{artifact.name}: {exc!r}")
 
-    raw_items = [it for it in parsed if it.kind == KIND_RAW and (it.text or "").strip()]
-    curated_items = [it for it in parsed if it.kind in (KIND_CURATED, KIND_LEGACY)]
+    for sid in list(order):
+        _flush_session(sid)
 
-    entry["messages"] = len(raw_items)
-    entry["skipped"] = dict(imp.excluded_counts)
-    entry["unsupported_skipped"] = sum(imp.excluded_counts.values())
-
-    # deterministic recall-ready derivation (no LLM — §9/§10)
-    from . import qa_pairing as _qa
-
-    pairs = _qa.pair_items(raw_items)
-
-    # oldest/newest from raw items when discovery could not fill them
-    occurred = [it.occurred_at for it in raw_items if it.occurred_at]
-    if occurred:
-        entry["oldest"] = entry["oldest"] or min(occurred)
-        entry["newest"] = entry["newest"] or max(occurred)
-
-    if dry_run:
-        entry["qa_pairs_derived"] = len(pairs)
-        entry["recall_ready"] = bool(raw_items) and bool(pairs)
-        return entry
-
-    # ── live writes ────────────────────────────────────────────────────
-    stats = _Stats()
-    if raw_items:
-        _emit_raw_messages(
-            pool=pool,
-            items=raw_items,
-            source_tag=f"import:{imp.name}",
-            stats=stats,
-        )
-        if pairs:
-            _qa.emit_qa_pairs(pool=pool, pairs=pairs, stats=stats)
-        for e in stats.errors:
-            entry["errors"].append(e)
-
-    if curated_items:
+    if curated_items and not dry_run:
         writer = _resolve_writer(pool=pool)
-        if writer is not None:
+        if writer is None:
+            entry["errors"].append(
+                f"{len(curated_items)} curated item(s) found but no ActiveMemoryWriter — skipped"
+            )
+        else:
             _emit_curated_or_legacy(
                 writer=writer,
                 items=curated_items,
                 imported_at=_now_iso(),
                 stats=stats,
             )
-        else:
-            entry["errors"].append(
-                "curated write skipped: explicit-memory writer unavailable"
-            )
+    entry["curated_found"] = len(curated_items)
+
+    if forced_splits:
+        entry["errors"].append(
+            f"{forced_splits} segment(s) force-flushed at the hard cap "
+            f"({max_session_hard_items} items / {max_session_hard_chars} chars): "
+            "an answer chain that long is split, the tail stays raw-only"
+        )
+    entry["reopened_sessions"] = reopened
+    if reopened:
+        # A session that shows up again after being flushed can only mean the
+        # source is not session-contiguous; its QA pairs may be incomplete.
+        # Surface it as an error instead of letting the count shrink silently.
+        entry["errors"].append(
+            f"{reopened} session(s) reappeared after flush — QA pairs for those "
+            "sessions may be incomplete (source not session-contiguous)"
+        )
+    entry["messages"] = items_seen
+    entry["skipped"] = dict(imp.excluded_counts)
+    entry["unsupported_skipped"] = sum(imp.excluded_counts.values())
+
+    entry["qa_pairs_derived"] = pairs_seen if dry_run else stats.qa_pairs_derived
+    if dry_run:
+        entry["recall_ready"] = bool(items_seen) and bool(pairs_seen)
+        return entry
 
     entry["raw_imported"] = stats.raw_messages
-    entry["qa_pairs_derived"] = stats.qa_pairs_derived
     entry["duplicates_skipped"] = stats.deduped
-    entry["user_curated_imported"] = stats.user_curated + stats.legacy_derived
+    entry["nul_sanitized"] = stats.nul_sanitized
+    entry["user_curated_imported"] = stats.user_curated
+    for e in stats.errors:
+        entry["errors"].append(e)
+
+    entry["oldest"] = stats.oldest or entry["oldest"]
+    entry["newest"] = stats.newest or entry["newest"]
     entry["recall_ready"] = stats.raw_messages > 0 and stats.qa_pairs_derived > 0
     return entry
 
@@ -243,6 +384,7 @@ class _Stats:
         self.dry_run = False
         self.identity_derived = 0
         self.qa_pairs_derived = 0
+        self.nul_sanitized = 0
         self.errors: list[str] = []
 
 

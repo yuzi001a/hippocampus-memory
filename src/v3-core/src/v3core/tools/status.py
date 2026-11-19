@@ -72,6 +72,17 @@ def _probe_pg(pg_cfg: dict | None = None, pool: Any = None) -> dict:
             )
         try:
             cur = conn.cursor()
+            # Schema contract verdict on the same connection: a table count of
+            # zero is not "healthy", and a missing column makes every insert
+            # fail while the tables are all present.
+            try:
+                from .. import schema_contract as _sc
+                result["schema"] = _sc.probe(conn).as_dict()
+            except Exception as e:  # noqa: BLE001
+                result["schema"] = {
+                    "ready": False,
+                    "probe_error": _safe_err(e)[:200],
+                }
             for table in CURRENT_TABLES:
                 try:
                     cur.execute(f"SELECT count(*) FROM {table}")

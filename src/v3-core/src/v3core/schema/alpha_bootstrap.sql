@@ -15,7 +15,8 @@
 --                                       topics note_ref + last_observer_ts)
 --       - src/v3core/active_memory_store.py (public.explicit_memories only —
 --                                            see explicit_memories.sql)
---       - src/v3core/yin_pool.py        (yin_paragraphs)
+--       - src/v3core/e1.py          (yin, yin_history)
+--       - src/v3core/yin_pool.py     (yin_paragraphs)
 --       - src/v3core/__init__.py        (conversation_stream by session_id,
 --                                       qa_pairs by id)
 --   * This file does NOT recreate the legacy archived tables
@@ -242,6 +243,19 @@ CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
     ON public.conversation_stream (session_id, host_turn_id)
     WHERE host_turn_id IS NOT NULL;
 
+-- P0-A session provenance (additive only, 2026-11-11): session_source carries
+-- the host's native answer to "how was this session created" (Hermes
+-- `sessions.source`: desktop / tui / feishu / weixin = a human; tool / cron /
+-- oneshot / subagent = a program). Pairing reads it to keep machine dispatch
+-- ("one scripted call per judge case") out of the conversational QA layer while
+-- raw keeps every message. Nullable with a partial index; historic rows (NULL)
+-- are untouched and stay fail-open (they keep pairing as before).
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS session_source TEXT;
+CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
+    ON public.conversation_stream (host, session_source)
+    WHERE session_source IS NOT NULL;
+
 -- -----------------------------------------------------------------------------
 -- topics — observer topic card (replaces the archived v3_cards). Evidence:
 -- pg_store.insert_card INSERT (topic_id, title, summary, body, keywords,
@@ -397,6 +411,41 @@ CREATE INDEX IF NOT EXISTS yin_paragraphs_embedding_ivfflat
     ON public.yin_paragraphs
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
+
+-- -----------------------------------------------------------------------------
+-- yin + yin_history — E1 full-text 印 and append-only version history.
+-- E1 writes version/title/content/created_at/is_current; topic_recall reads
+-- public.yin.content for the one current version. E1 first clears the prior
+-- current row, then inserts the new version in the same transaction.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.yin (
+    id          BIGSERIAL    PRIMARY KEY,
+    version     TEXT         NOT NULL,
+    title       TEXT         NOT NULL DEFAULT '',
+    content     TEXT         NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    is_current  BOOLEAN      NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS public.yin_history (
+    id          BIGSERIAL    PRIMARY KEY,
+    version     TEXT         NOT NULL,
+    title       TEXT         NOT NULL DEFAULT '',
+    content     TEXT         NOT NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    is_current  BOOLEAN      NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS yin_version_idx
+    ON public.yin (version);
+CREATE INDEX IF NOT EXISTS yin_is_current_idx
+    ON public.yin (id DESC)
+    WHERE is_current = TRUE;
+CREATE INDEX IF NOT EXISTS yin_history_version_idx
+    ON public.yin_history (version);
+CREATE INDEX IF NOT EXISTS yin_history_is_current_idx
+    ON public.yin_history (id DESC)
+    WHERE is_current = TRUE;
 
 -- -----------------------------------------------------------------------------
 -- embedding_failures — durable accounting for embedding failures.

@@ -7,6 +7,8 @@ import time
 import requests
 from typing import Any
 
+from . import model_params
+
 
 try:
     from . import _safe_err
@@ -75,6 +77,37 @@ def _looks_like_rejected_extra(err: Exception) -> bool:
                                        "unexpected", "field required", "invalid_request"))
 
 
+def _thinking_payload(model: str, mode: str, cfg: Any = None) -> dict[str, Any] | None:
+    """Resolve the ``thinking`` field without making a provider request.
+
+    模型形状 (哪些族要求 adaptive / 能不能发 disabled) 由 ``model_params`` 表决定;
+    这里只负责 payload 形状。返回 ``None`` = 省略该字段。
+    """
+    params = model_params.resolve(model, cfg)
+    field = model_params.thinking_field(params, mode)
+    if field is not None and field.get("type") == "enabled":
+        # 历史形状: 显式开启时带思考预算 (与 _chat_minimax 的旧行为一致)
+        field = {"type": "enabled", "budget_tokens": 32768}
+    return field
+
+
+def _classify_openai_error(err: Exception) -> str:
+    """Classify an OpenAI SDK error without including sensitive error text."""
+    if isinstance(err, (TimeoutError, requests.exceptions.Timeout)) or "timeout" in type(err).__name__.lower():
+        return "llm_timeout"
+    response = getattr(err, "response", None)
+    status = getattr(err, "status_code", None) or getattr(response, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError, OverflowError):
+        status = None
+    if status is not None and 400 <= status < 500:
+        return "http_4xx"
+    if status is not None and 500 <= status < 600:
+        return "http_5xx"
+    return "other"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Per-call output budget (additive; default path unchanged)
 #
@@ -123,16 +156,36 @@ def validate_output_tokens(value: int | None) -> int | None:
     return value
 
 
+def _default_base_url() -> str:
+    """配置层唯一的 MiniMax 端点默认值 — 调用点不再各写一份字面量。"""
+    from .config import DEFAULT_LLM_BASE_URL
+    return DEFAULT_LLM_BASE_URL
+
+
 class LLMClient:
     """统一 LLM 客户端"""
 
     def __init__(self, config):
         """接受 V3Config | dict | LLMConfig 任意形态, 提取 llm 子配置."""
         llm_cfg = self._extract_llm_cfg(config)
+        # 原始配置留着查 models: 表 (模型参数形状), 不是 llm 子段的一部分
+        self._raw_config = config
         self.provider = llm_cfg.get("provider", "") or ""
         self.model = llm_cfg.get("model", "")
         # thinking 开关: config llm.thinking (bool, 默认 True) 或构造参数
         self._thinking = bool(llm_cfg.get("thinking", True))
+        self._thinking_mode = llm_cfg.get("thinking_mode", "auto") or "auto"
+        # None = 用 models: 表声明的档位; 显式配置优先
+        self._reasoning_effort_cfg = llm_cfg.get("reasoning_effort")
+        try:
+            raw_timeout = llm_cfg.get("timeout", 600)
+            if isinstance(raw_timeout, bool):
+                raise ValueError("boolean is not a timeout")
+            self._timeout = float(raw_timeout)
+            if self._timeout <= 0:
+                self._timeout = 600
+        except (TypeError, ValueError, OverflowError):
+            self._timeout = 600
         # Output cap. 131072 assumed a 128k-output model; most OpenAI-compatible
         # providers reject it outright, so it is configurable per profile.
         try:
@@ -169,18 +222,25 @@ class LLMClient:
             # states `thinking: false` / `max_tokens: 8192` silently inherits
             # defaults meant for another vendor (131072 got rejected with
             # "exceeded max_seq_len" on SiliconFlow).
-            for opt in ("thinking", "max_tokens", "temperature", "timeout"):
+            for opt in ("thinking", "thinking_mode", "max_tokens", "temperature", "timeout",
+                        "reasoning_effort"):
                 value = getattr(config.llm, opt, None)
                 if value is not None:
                     out[opt] = value
             return out
         if hasattr(config, "provider") and hasattr(config, "model"):
-            return {
+            out = {
                 "provider": config.provider,
                 "model": config.model,
                 "api_key": getattr(config, "api_key", ""),
                 "base_url": getattr(config, "base_url", "") or "",
             }
+            for opt in ("thinking", "thinking_mode", "max_tokens", "timeout",
+                        "reasoning_effort"):
+                value = getattr(config, opt, None)
+                if value is not None:
+                    out[opt] = value
+            return out
         # raw dict — 保持原行为
         if isinstance(config, dict):
             return config.get("llm", {}) or {}
@@ -262,7 +322,7 @@ class LLMClient:
         url = (
             f"{self.base_url.rstrip('/')}/chat/completions"
             if self.base_url
-            else "https://api.minimaxi.com/v1/chat/completions"
+            else _default_base_url().rstrip("/") + "/chat/completions"
         )
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -278,8 +338,20 @@ class LLMClient:
             "messages": [{"role": "system", "content": system}] + messages,
             "temperature": temperature,
             "max_completion_tokens": _output_budget,  # M3 铁律: max_tokens 已弃用被忽略, 必须用 max_completion_tokens
-            "thinking": {"type": "disabled"},  # 稳定 M3 输出
         }
+        _raw_cfg = getattr(self, "_raw_config", None)
+        # llm.py 只认**显式配置**的 effort。E1 / 抽取 / session_summary 走 131k 输出
+        # 预算, 没有质量对照就不该被 models: 表里的默认档静默统一降档; 需要压思考的
+        # 观察者路径有自己的解析 (表 + 默认 low)。
+        _effort = model_params.explicit_reasoning_effort(
+            {"reasoning_effort": getattr(self, "_reasoning_effort_cfg", None)}
+        )
+        thinking_payload = _thinking_payload(self.model, self._thinking_mode, _raw_cfg)
+        if thinking_payload is not None:
+            body["thinking"] = thinking_payload
+        elif _effort:
+            # 省略 thinking 的族 (adaptive) 必须显式压 effort, 否则思考吃满输出预算。
+            body["reasoning_effort"] = _effort
         proxies = {"https": self._proxy} if self._proxy else None
         prompt_len = len(json.dumps(body, ensure_ascii=False))
         logger.info("LLM call: provider=minimax model=%s prompt_len=%d temperature=%.2f "
@@ -288,11 +360,33 @@ class LLMClient:
                     "" if max_output_tokens is None else " (per-call override)")
 
         last_err = None
+        adaptive_fallback_attempted = False
         for attempt in range(_MAX_RETRIES):
             try:
                 t0 = time.time()
                 resp = requests.post(url, json=body, headers=headers, timeout=600, proxies=proxies)
+                if (resp.status_code == 400
+                        and "requires adaptive thinking" in (resp.text or "").lower()
+                        and "thinking" in body
+                        and not adaptive_fallback_attempted):
+                    adaptive_fallback_attempted = True
+                    retry_body = dict(body)
+                    retry_body.pop("thinking", None)
+                    # 服务端要 adaptive = 表判断被推翻, 这一发按 adaptive 补齐 effort。
+                    # reasoning_effort 是 MiniMax 专属字段: 只对 minimax 家族/官方端点补,
+                    # 免得把第三方网关原样回显的同一句话变成另一个 400。
+                    _retry_effort = str(getattr(self, "_reasoning_effort_cfg", "") or "low")
+                    if "minimax" in (self.provider or "").lower() or "minimaxi" in (url or "").lower():
+                        retry_body.setdefault("reasoning_effort", _retry_effort)
+                    logger.warning(
+                        "MiniMax rejected thinking with requires adaptive thinking; retrying once without it (model=%s)",
+                        self.model,
+                    )
+                    resp = requests.post(url, json=retry_body, headers=headers, timeout=600, proxies=proxies)
                 latency = time.time() - t0
+
+                if adaptive_fallback_attempted and resp.status_code >= 400:
+                    resp.raise_for_status()
 
                 if resp.status_code == 429:
                     wait = _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 10
@@ -322,6 +416,9 @@ class LLMClient:
 
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as _net_err:
                 last_err = _net_err
+                if adaptive_fallback_attempted:
+                    logger.error("MiniMax thinking fallback failed; not retrying to avoid a retry storm")
+                    raise
                 if attempt < _MAX_RETRIES - 1:
                     wait = _RETRY_BACKOFF[attempt]
                     logger.warning("LLM net error (attempt %d/%d): %s — retry in %ds",
@@ -342,6 +439,11 @@ class LLMClient:
                     status = 0
                     body_text = ""
                 status_class = classify_status(status if status else None)
+                # An adaptive-thinking fallback is a single bounded request; do
+                # not combine its failure with the normal 5xx retry loop.
+                if adaptive_fallback_attempted:
+                    logger.error("MiniMax thinking fallback failed: status=%d class=%s", status, status_class)
+                    raise
                 # 5xx 重试, 4xx 不重试（429 已在上面处理）
                 if 500 <= status < 600 and attempt < _MAX_RETRIES - 1:
                     wait = _RETRY_BACKOFF[attempt]
@@ -359,7 +461,13 @@ class LLMClient:
     def _chat_openai(self, system: str, messages: list[dict], temperature: float,
                      max_output_tokens: int | None = None) -> str:
         import openai
-        client_kwargs = {"api_key": self.api_key}
+        client_kwargs = {
+            "api_key": self.api_key,
+            # The SDK's default timeout/retries can block for many minutes; use
+            # the configured deadline and let this method own the bounded retry loop.
+            "timeout": self._timeout,
+            "max_retries": 0,
+        }
         if self.base_url:
             # 用户在 config.yaml llm.base_url 配置自定义端点（兼容硅基流动/自建）
             client_kwargs["base_url"] = self.base_url
@@ -372,56 +480,92 @@ class LLMClient:
                     "max_tokens=%d%s",
                     self.model, prompt_len, temperature, _output_budget,
                     "" if max_output_tokens is None else " (per-call override)")
-        t0 = time.time()
-        try:
-            # 思考链: 默认开启 (deepseek reasoning 提升长输入覆盖完整性, 8/6 实测
-            # 131 条输入关闭思考 2/2 只中 1 次惩罚线 → 开启后 2/2 全中)。
-            # 通过 LLMClient(thinking=True/False) 或 config llm.thinking 控制。
-            extra = {}
+        # 思考链: 默认开启 (deepseek reasoning 提升长输入覆盖完整性, 8/6 实测
+        # 131 条输入关闭思考 2/2 只中 1 次惩罚线 → 开启后 2/2 全中)。
+        # 通过 LLMClient(thinking=True/False) 或 config llm.thinking 控制。
+        extra = {}
+        if getattr(self, "_thinking", True):
+            extra = {"thinking": {"type": "enabled", "budget_tokens": 32768}}
+        else:
+            extra = {"thinking": {"type": "disabled"}}
+        call_kwargs = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system}] + messages,
+            "temperature": temperature,
+            "max_tokens": _output_budget,
+        }
+        if extra:
+            call_kwargs["extra_body"] = extra
+
+        call_started = time.monotonic()
+        thinking_fallback_used = False
+        current_kwargs = call_kwargs
+        last_error = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            attempt_started = time.monotonic()
             try:
-                if getattr(self, "_thinking", True):
-                    extra = {"thinking": {"type": "enabled", "budget_tokens": 32768}}
-                else:
-                    extra = {"thinking": {"type": "disabled"}}
-            except Exception:
-                pass
-            call_kwargs = {
-                "model": self.model,
-                "messages": [{"role": "system", "content": system}] + messages,
-                "temperature": temperature,
-                "max_tokens": _output_budget,
-            }
-            if extra:
-                call_kwargs["extra_body"] = extra
-            try:
-                resp = client.chat.completions.create(**call_kwargs)
-            except Exception as first_err:
-                # A provider that does not understand the optional thinking
-                # parameter answers 4xx here. Retry exactly once WITHOUT it
-                # instead of failing the memory call for the whole install.
-                if not extra or not _looks_like_rejected_extra(first_err):
-                    raise
-                logger.warning(
-                    "LLM provider rejected the optional thinking parameter; retrying without it "
-                    "(model=%s): %s", self.model, _safe_err(first_err)[:160],
+                resp = client.chat.completions.create(**current_kwargs)
+                content = resp.choices[0].message.content or ""
+                if not content.strip():
+                    # deepseek 思考模式把输出放 reasoning_content — 兜底提取
+                    rc = getattr(resp.choices[0].message, "reasoning_content", None) or ""
+                    if rc.strip():
+                        content = rc
+                latency = time.monotonic() - attempt_started
+                logger.info(
+                    "LLM attempt: provider=openai model=%s attempt=%d/%d elapsed=%.1fs result=success",
+                    self.model, attempt, _MAX_RETRIES, latency,
                 )
-                retry_kwargs = dict(call_kwargs)
-                retry_kwargs.pop("extra_body", None)
-                resp = client.chat.completions.create(**retry_kwargs)
-            latency = time.time() - t0
-            content = resp.choices[0].message.content or ""
-            if not content.strip():
-                # deepseek 思考模式把输出放 reasoning_content — 兜底提取
-                rc = getattr(resp.choices[0].message, "reasoning_content", None) or ""
-                if rc.strip():
-                    content = rc
-            logger.info("LLM success: provider=openai tokens_in=%s tokens_out=%s latency=%.1fs",
-                        resp.usage.prompt_tokens if resp.usage else "?",
-                        resp.usage.completion_tokens if resp.usage else "?",
-                        latency)
-            return content
-        except Exception as e:
-            latency = time.time() - t0
-            logger.error("LLM failed: provider=openai model=%s latency=%.1fs error=%s",
-                         self.model, latency, _safe_err(e)[:200])
-            raise
+                logger.info("LLM success: provider=openai tokens_in=%s tokens_out=%s latency=%.1fs",
+                            resp.usage.prompt_tokens if resp.usage else "?",
+                            resp.usage.completion_tokens if resp.usage else "?",
+                            latency)
+                return content
+            except Exception as err:
+                last_error = err
+                latency = time.monotonic() - attempt_started
+                classification = _classify_openai_error(err)
+                logger.warning(
+                    "LLM attempt: provider=openai model=%s attempt=%d/%d elapsed=%.1fs result=%s",
+                    self.model, attempt, _MAX_RETRIES, latency, classification,
+                )
+
+                if (extra and not thinking_fallback_used
+                        and _looks_like_rejected_extra(err)):
+                    thinking_fallback_used = True
+                    current_kwargs = dict(call_kwargs)
+                    current_kwargs.pop("extra_body", None)
+                    logger.warning(
+                        "LLM provider rejected optional thinking; retrying once without it (model=%s)",
+                        self.model,
+                    )
+                    if attempt < _MAX_RETRIES:
+                        continue
+
+                retryable = classification in ("llm_timeout", "http_5xx") or "connection" in type(err).__name__.lower()
+                if retryable and attempt < _MAX_RETRIES:
+                    wait = _RETRY_BACKOFF[min(attempt - 1, len(_RETRY_BACKOFF) - 1)]
+                    logger.warning(
+                        "LLM retry scheduled: provider=openai attempt=%d/%d result=%s wait=%ds",
+                        attempt, _MAX_RETRIES, classification, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+
+                total_elapsed = time.monotonic() - call_started
+                logger.error(
+                    "LLM failed: provider=openai model=%s attempt=%d/%d elapsed=%.1fs result=%s",
+                    self.model, attempt, _MAX_RETRIES, total_elapsed, classification,
+                )
+                raise RuntimeError(
+                    f"LLM provider=openai model={self.model} failed: classification={classification} "
+                    f"elapsed={total_elapsed:.1f}s attempts={attempt}"
+                ) from err
+
+        # The loop always returns or raises. Retain a defensive bounded failure.
+        total_elapsed = time.monotonic() - call_started
+        classification = _classify_openai_error(last_error) if last_error else "other"
+        raise RuntimeError(
+            f"LLM provider=openai model={self.model} failed: classification={classification} "
+            f"elapsed={total_elapsed:.1f}s attempts={_MAX_RETRIES}"
+        ) from last_error

@@ -4,7 +4,7 @@ scripts/bootstrap_alpha_db.py, and scripts/backup_alpha.py.
 
 Scope (RED→GREEN anchors; never pretend to substitute real PG):
 
-    1. alpha_bootstrap.sql exists, is parseable, contains exactly the seven
+    1. alpha_bootstrap.sql exists, is parseable, contains the nine
        alpha tables in the supported order, embeds pgvector, references
        explicit_memories.sql (the canonical artifact) by include marker, and
        has NO DROP / TRUNCATE / DELETE statements.
@@ -301,8 +301,8 @@ class TestAlphaBootstrapSQL:
             m = re.search(pat, non_comment, re.IGNORECASE)
             assert not m, f"alpha_bootstrap.sql 含破坏性 DDL: {pat} → {m.group(0)!r}"
 
-    def test_combined_ddl_has_seven_alpha_tables(self, bootstrap_mod):
-        """The seven supported alpha tables, in canonical order, must each
+    def test_combined_ddl_has_nine_alpha_tables(self, bootstrap_mod):
+        """The nine supported alpha tables, in canonical order, must each
         have a ``CREATE TABLE IF NOT EXISTS public.<name>`` in the COMBINED
         DDL (alpha_bootstrap.sql + explicit_memories.sql via marker)."""
         combined, includes = bootstrap_mod.load_alpha_ddl(REPO_ROOT)
@@ -315,6 +315,8 @@ class TestAlphaBootstrapSQL:
             "public.topic_entries",
             "public.observation_notes",
             "public.yin_paragraphs",
+            "public.yin",
+            "public.yin_history",
         ]
         positions = []
         for name in expected:
@@ -1221,6 +1223,8 @@ class TestBackupScript:
             "topic_entries",
             "observation_notes",
             "yin_paragraphs",
+            "yin",
+            "yin_history",
         )
 
     def test_refuses_source_raw_extras(self, backup_mod, tmp_path, capsys):

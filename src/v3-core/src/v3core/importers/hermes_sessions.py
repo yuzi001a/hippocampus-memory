@@ -40,6 +40,7 @@ caller (``import_source``) owns the pool / lease lifecycle.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import sqlite3
@@ -61,6 +62,7 @@ _MSG_COL_CANDIDATES = {
     "tool_calls": ("tool_calls", "tool_call", "toolcall_json"),
     "tool_results": ("tool_results", "tool_result"),
     "display_kind": ("display_kind",),
+    "message_uid": ("message_uid", "uid"),
 }
 
 _SESSION_COL_CANDIDATES = {
@@ -132,6 +134,12 @@ class HermesSessionImporter(Importer):
         suffix = path.suffix.lower()
         if suffix == ".db" or path.name in _STATE_DB_NAMES:
             yield from self._parse_state_db(path)
+        elif self._is_sqlite_state_store(path):
+            # Renamed backups (``state.db.bak-20260920-092212``,
+            # ``*.pre-optimize*.bak``) keep the suffix of the rename, so the
+            # filename check above misses them. Sniff the content instead of
+            # refusing a perfectly importable store.
+            yield from self._parse_state_db(path)
         elif suffix in _JSONL_NAMES:
             yield from self._parse_jsonl(path)
         elif suffix in _JSON_NAMES:
@@ -175,6 +183,12 @@ class HermesSessionImporter(Importer):
 
             msg_cols = self._table_columns(conn, msg_table)
             mapping = self._map_columns(msg_cols, _MSG_COL_CANDIDATES)
+            # `sessions.source` is native provenance for how the session was
+            # created ('desktop' | 'cron' | 'tool' | 'oneshot' | 'subagent' | …).
+            # A `tool` session is one scripted CLI call (max 2 messages) — the
+            # batch judge runs live there. Dropping this field at import forced
+            # every downstream filter to guess from text prefixes instead.
+            sess_meta = self._read_session_meta(conn, sess_table) if sess_table else {}
             if "content" not in mapping or "role" not in mapping:
                 raise ValueError(
                     f"hermes importer: {msg_table!r} lacks role/content "
@@ -189,6 +203,7 @@ class HermesSessionImporter(Importer):
             tc_col = mapping.get("tool_calls")
             tr_col = mapping.get("tool_results")
             dk_col = mapping.get("display_kind")
+            uid_col = mapping.get("message_uid")
 
             select_cols = [role_col, content_col]
             if sess_id_col:
@@ -197,6 +212,8 @@ class HermesSessionImporter(Importer):
                 select_cols.append(ts_col)
             if id_col:
                 select_cols.append(id_col)
+            if uid_col:
+                select_cols.append(uid_col)
             if tc_col:
                 select_cols.append(tc_col)
             if tr_col:
@@ -204,7 +221,19 @@ class HermesSessionImporter(Importer):
             if dk_col:
                 select_cols.append(dk_col)
 
-            order_clause = f"ORDER BY {id_col}" if id_col else ""
+            # Session-contiguous ordering is a hard requirement of the streaming
+            # import pipeline: it pairs QA per session and flushes a session as
+            # soon as the next one starts, so the working set stays bounded.
+            # Real Hermes state.db files interleave sessions heavily in id order
+            # (110k switches over 3.6k sessions on the 2026-10-19 corpus), so
+            # ordering by id alone would split a session across flushes and
+            # silently drop QA pairs. `id` remains the tiebreak inside a session.
+            if id_col and sess_id_col:
+                order_clause = f"ORDER BY {sess_id_col}, {id_col}"
+            elif id_col:
+                order_clause = f"ORDER BY {id_col}"
+            else:
+                order_clause = ""
             sql = (
                 f"SELECT {', '.join(select_cols)} "
                 f"FROM {msg_table} {order_clause}"
@@ -239,17 +268,37 @@ class HermesSessionImporter(Importer):
                 raw_id = row[id_col] if id_col else None
                 tc_raw = row[tc_col] if tc_col else None
                 tr_raw = row[tr_col] if tr_col else None
-                event_id = str(raw_id) if raw_id is not None else None
+                uid_raw = row[uid_col] if uid_col else None
+                uid_s = str(uid_raw).strip() if uid_raw is not None else ""
+                # 身份必须跨快照稳定：同一份 Hermes 库在 09-20 / 11-08 / 今天三个
+                # 快照里自增 id 完全不同，直接拿 id 当 event_id 会让不同消息撞车。
+                if uid_s:
+                    event_id = f"uid:{uid_s}"
+                    identity_kind = "native"
+                else:
+                    # 旧快照没有 message_uid：用内容指纹，保证同一消息在任何快照里
+                    # 都得到同一个身份（各库自增 id 彼此完全不相干，不能拿来当身份）。
+                    event_id = "h:" + hashlib.sha1(
+                        f"{session_id}|{role_s}|{occurred}|{text}".encode("utf-8", "replace")
+                    ).hexdigest()[:24]
+                    identity_kind = "content-hash"
                 provenance = {
                     "session_id": session_id,
                     "schema_columns": sorted(msg_cols),
                     "raw_id": raw_id,
                     "native_id": event_id,
-                    "identity_kind": "native" if event_id else "import-derived",
+                    "identity_kind": identity_kind,
                     "tool_calls": _coerce_json(tc_raw) if tc_raw else None,
                     "tool_results": _coerce_json(tr_raw) if tr_raw else None,
                     "artifact": path.name,
                 }
+                meta = sess_meta.get(session_id) or {}
+                if meta:
+                    provenance["session_source"] = meta.get("source")
+                    provenance["session_end_reason"] = meta.get("end_reason")
+                    provenance["session_message_count"] = meta.get("message_count")
+                    if meta.get("parent_session_id"):
+                        provenance["parent_session_id"] = meta["parent_session_id"]
                 # Strip None-valued tool fields so the downstream writer
                 # doesn't serialize 'null'.
                 provenance = {k: v for k, v in provenance.items() if v not in (None, "")}
@@ -267,10 +316,67 @@ class HermesSessionImporter(Importer):
                     provenance=provenance,
                     host="hermes",
                     event_id=event_id,
-                    identity_kind="native" if event_id else "import-derived",
+                    identity_kind=identity_kind,
+                    session_source=(meta.get("source") if meta else None),
                 )
         finally:
             conn.close()
+
+    def _read_session_meta(
+        self, conn: sqlite3.Connection, sess_table: str | None
+    ) -> dict[str, dict]:
+        """Read ``sessions`` metadata keyed by session id.
+
+        Only the columns that describe *how a session came to exist* matter
+        downstream: ``source`` (desktop/cron/tool/...), ``end_reason``,
+        ``message_count`` and ``parent_session_id``. Missing columns are
+        tolerated — an old store simply yields fewer keys, never an error.
+        """
+        if not sess_table:
+            return {}
+        cols = {c.lower(): c for c in self._table_columns(conn, sess_table)}
+        if "id" not in cols:
+            return {}
+        wanted = [k for k in ("source", "end_reason", "message_count", "parent_session_id") if k in cols]
+        if not wanted:
+            return {}
+        select = ", ".join(cols[k] for k in wanted)
+        try:
+            rows = conn.execute(f"SELECT {cols['id']}, {select} FROM {sess_table}").fetchall()
+        except sqlite3.Error:
+            return {}
+        out: dict[str, dict] = {}
+        for row in rows:
+            out[str(row[0])] = {k: row[i + 1] for i, k in enumerate(wanted)}
+        return out
+
+    @staticmethod
+    def _is_sqlite_state_store(path: Path) -> bool:
+        """True when ``path`` is a SQLite file shaped like a Hermes state.db.
+
+        Backups are routinely renamed (``state.db.bak-2026…``,
+        ``state.db.pre-optimize-….bak``), so dispatch cannot rely on the
+        filename. Opening the file only reads the header + schema.
+        """
+        if not path.is_file():
+            return False
+        try:
+            with open(path, "rb") as fh:
+                if fh.read(16) != b"SQLite format 3\x00":
+                    return False
+        except OSError:
+            return False
+        try:
+            conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return False
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+        except sqlite3.Error:
+            return False
+        finally:
+            conn.close()
+        return {"session_id", "role", "content"} <= cols
 
     def _locate_messages_table(
         self, conn: sqlite3.Connection, tables: set[str]

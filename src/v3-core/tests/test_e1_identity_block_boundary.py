@@ -205,7 +205,7 @@ class _FakeLLMClient:
             "temperature": temperature,
             "max_output_tokens": max_output_tokens,
         })
-        if system == e1_mod.IDENTITY_SHORT_PROMPT:
+        if system.startswith(e1_mod.IDENTITY_SHORT_PROMPT):
             return self.identity_payload
         if system == e1_mod.SITUATION_OVERVIEW_PROMPT:
             return _VALID_SITUATION

@@ -118,6 +118,11 @@ class LLMConfig:
     # got rejected by SiliconFlow with "exceeded max_seq_len").
     thinking: bool | None = None
     max_tokens: int | None = None
+    thinking_mode: str = "auto"
+    timeout: int = 600
+    # adaptive-thinking 族 (M3.1) 的思考档位。None = 不显式下发 (llm.py 只认显式配置)。
+    # 没有字段时 `llm.reasoning_effort: high` 会被解析层静默丢掉, 表现为"写了没用"。
+    reasoning_effort: str | None = None
 
     def __repr__(self):
         return f"LLMConfig(provider={self.provider!r}, model={self.model!r}, api_key='***')"
@@ -250,6 +255,8 @@ class V3Config:
     prefetch: PrefetchConfig = field(default_factory=PrefetchConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     prompts: dict[str, str] = field(default_factory=dict)
+    # 模型参数形状表 (config.yaml 的 models: 段) — 见 v3core.model_params
+    models: dict[str, dict] = field(default_factory=dict)
     # 兼容老字段 cfg.get("prompts", {}).get("extract") — 仍可单值配置到 prompts_extract
     prompts_extract: str = ""
     half_life: int = 30  # P3 — 时间衰减半衰期 (recall_pool)
@@ -277,6 +284,9 @@ class V3Config:
                 else {}
             )},
             "half_life": self.half_life,
+            # models: 是用户可见的配置面; escape hatch 丢了它, 任何走 to_legacy_dict
+            # 的下游 (迁移脚本 / LLMClient / init 重写 config.yaml) 都会退回内置表。
+            "models": {k: dict(v) for k, v in (self.models or {}).items()},
             "storage": {
                 "pg": self.pg.to_legacy_dict() if self.pg else {},
                 "embed": self.embed.to_legacy_dict() if self.embed else {},
@@ -356,6 +366,13 @@ def from_legacy_dict(src: dict | None) -> V3Config:
     prefetch_raw = src.get("prefetch") or {}
     ingest_raw = src.get("ingest") or {}
     prompts = src.get("prompts") or {}
+    models_raw = src.get("models") or {}
+    if not isinstance(models_raw, dict):
+        logger.warning(
+            "config: models: 段应该是 mapping (模型名 → {thinking, reasoning_effort}), "
+            "收到 %s — 已忽略, 全部按内置表解析", type(models_raw).__name__,
+        )
+        models_raw = {}
 
     # -- LLM --
     _llm_max_tokens = llm_raw.get("max_tokens")
@@ -369,7 +386,13 @@ def from_legacy_dict(src: dict | None) -> V3Config:
         api_key=str(llm_raw.get("api_key", "") or llm_raw.get("apiKey", "")),
         base_url=str(llm_raw.get("base_url", "") or llm_raw.get("baseUrl", "") or ""),
         thinking=(bool(llm_raw["thinking"]) if "thinking" in llm_raw else None),
+        thinking_mode=str(llm_raw.get("thinking_mode", "auto") or "auto").strip().lower(),
         max_tokens=_llm_max_tokens,
+        timeout=_coerce_int(llm_raw.get("timeout"), 600),
+        reasoning_effort=(
+            str(llm_raw.get("reasoning_effort")).strip().lower()
+            if llm_raw.get("reasoning_effort") not in (None, "") else None
+        ),
     )
 
     # -- PG --
@@ -481,6 +504,7 @@ def from_legacy_dict(src: dict | None) -> V3Config:
         # 兼容老字段: extract 单值同时保留在 prompts_extract
         prompts_extract=str(prompts.get("extract", "") or ""),
         half_life=half_life if half_life > 0 else 30,
+        models={str(k): dict(v) for k, v in models_raw.items() if isinstance(v, dict)},
     )
 
 
@@ -493,6 +517,14 @@ def validate_config(cfg: V3Config) -> list[str]:
     这些警告适合注入到 status prompt, 让运维一眼看到系统缺口.
     """
     warnings: list[str] = []
+
+    if cfg.llm.thinking_mode not in ("auto", "enabled", "disabled"):
+        warnings.append("llm.thinking_mode 应为 auto/enabled/disabled")
+
+    # 2026-11-19: 模型参数形状 (thinking / reasoning_effort) 由 models: 表声明。
+    # 表里没有的模型会走保守默认, 在配置校验阶段就说清楚, 不要等运行期才发现。
+    from . import model_params as _model_params
+    warnings.extend(_model_params.warnings_for(cfg, getattr(cfg.llm, "model", "") or ""))
 
     if cfg.mode not in ("cloud", "local"):
         warnings.append(f"未知 mode '{cfg.mode}'，默认 cloud")

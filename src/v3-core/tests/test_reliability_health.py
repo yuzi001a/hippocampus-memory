@@ -54,6 +54,7 @@ class FakeCursor:
     def __init__(self, pg: "FakePg") -> None:
         self.pg = pg
         self._result: Any = None
+        self._rows: list = []
 
     # Context-manager shims — many drivers expose them; harmless here.
     def __enter__(self):
@@ -101,6 +102,10 @@ class FakeCursor:
             else:
                 self._result = None
             return
+        # information_schema.columns — ST06 (one statement for every table).
+        if "from information_schema.columns" in s:
+            self._rows = sorted(self.pg.columns)
+            return
         # pg_indexes — ST05.
         if "from pg_indexes" in s:
             if params and params[0] in self.pg.indexes:
@@ -147,6 +152,9 @@ class FakeCursor:
     def fetchone(self):
         return self._result
 
+    def fetchall(self):
+        return list(self._rows)
+
     def close(self):
         pass
 
@@ -171,8 +179,9 @@ class FakePg:
     """
 
     def __init__(self) -> None:
-        # SELECT-able set: tables / indexes / schema_versions.
+        # SELECT-able set: tables / columns / indexes / schema_versions.
         self.tables: set[str] = set()
+        self.columns: set[tuple[str, str]] = set()
         self.indexes: set[str] = set()
         self.schema_versions: set[str] = set()
 
@@ -262,18 +271,23 @@ class FakePg:
 
 
 def _full_pg() -> FakePg:
+    from v3core import schema_contract as _sc
+
+    # A "complete install" is whatever the shipped contract says it is.
+    contract = _sc.load_contract()
     pg = FakePg()
-    pg.tables = {
-        "conversation_stream", "qa_pairs", "topics", "topic_entries",
-        "observation_notes", "yin_paragraphs", "explicit_memories",
-        "qa_embedding_chunks", "schema_versions",
+    pg.tables = set(contract.required_tables())
+    pg.columns = {
+        (table, column)
+        for table, columns in contract.required_columns().items()
+        for column in columns
     }
     pg.indexes = {
         "explicit_memories_embedding_ivfflat", "explicit_memories_status_active_idx",
         "explicit_memories_created_at_idx", "explicit_memories_tags_gin",
         "qa_embedding_chunks_qa_id_idx", "qa_embedding_chunks_embedding_ivfflat",
     }
-    pg.schema_versions = {"v0.2"}
+    pg.schema_versions = set(contract.ledger_versions)
     return pg
 
 
