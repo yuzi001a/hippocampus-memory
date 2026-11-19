@@ -7,6 +7,54 @@
 
 ---
 
+## [4.0.4] — Observer says who decided what, and models become config
+
+> **Scope:** one round of "read the real source, fix the real defect". Prompt-shaped
+> changes only where a real corpus showed the failure; no new tables, no new engine.
+
+### Observer: evidence attribution and work status
+
+- Every section carries a one-line definition again (the v4 prompt diet had removed
+  them, leaving section names only). Measured on 617 production notes: of 2,905
+  「关键决策」 bullets only 15.4% were recognisably a user decision, 217 carried
+  「尚未/计划」, and 533 of 2,585 「进行中状态」 bullets were finished work.
+- Decision/progress bullets carry `[用户]` / `[建议]` / `[共同]` (uncertainty may only
+  be `[建议]`), and `〔已实施〕〔已验证〕〔计划中〕〔未完成〕〔已推翻〕` sits next to the
+  conclusion. Status is decided by the current QA only — it is never inherited from
+  the previous note.
+- Corrections inside one batch are written `原为 X → 改为 Y`, keeping the superseded
+  value in the same line instead of appending a second "fact".
+- One-off task parameters are not promoted to long-term preferences; an explicit
+  「我不喜欢这种写法」/「别再默认开思考」 is a preference without needing a keyword.
+- `new_facts` (the layer that becomes topics.body / topic_entries) carries the same
+  attribution, and E1 compression is told to preserve the markers.
+
+### Models: request shape is configuration
+
+- New `v3core/model_params.py`: built-in table + user `models:` section, longest
+  prefix match, vendor-namespace tolerant (`MiniMax/MiniMax-M3.1` and bare `M3.1`
+  still resolve), one WARNING per undeclared model, `v3-core config validate`
+  lists them.
+- `reasoning_effort` is configurable per model and overridable per consumer
+  (`llm.reasoning_effort` / `observer.reasoning_effort`); `null`/`omit` means "do not
+  send the field". `llm.py` only applies an effort that was explicitly configured —
+  E1/extract run at a 131k budget and have no quality evidence for a global downgrade.
+- A missing model is a configuration error that stops the round without touching
+  adaptive batch state, failed-segment counters or the cursor.
+
+### Packaging
+
+- The packaged DDL now carries `conversation_stream.session_source` in both
+  `alpha_bootstrap.sql` and `upgrade_v0_2.sql`. `importers._RAW_DEDUPE_SQL_F2`
+  INSERTs that column, so a wheel install previously failed on first import while a
+  hand-migrated production database hid it.
+- `task_events.sql` / `session_policies.sql` ship with the package (the runtime tells
+  users to execute them).
+- `tests/test_schema_packaged_parity.py` pins "every column the importer writes must be
+  creatable from the packaged bootstrap".
+- Packaging tests now derive the expected version from `pyproject.toml` instead of
+  hardcoding it, and `plugin.yaml` / docs pins are back in sync.
+
 ## [4.0.2] — one runtime schema contract, and an upgrade gate that cannot be bypassed
 
 > **Scope:** the 2026-10-19 existing-install compatibility incident. The engine

@@ -197,6 +197,17 @@ CREATE INDEX IF NOT EXISTS conversation_stream_host_turn_idx
     ON public.conversation_stream (session_id, host_turn_id)
     WHERE host_turn_id IS NOT NULL;
 
+-- Session provenance (additive only, 2026-11-11): same DDL as
+-- alpha_bootstrap.sql. session_source = host-native "how was this session
+-- created" (tool/cron/oneshot/subagent = machine, desktop/tui/feishu = human).
+-- Pairing excludes machine sessions from the QA layer; NULL rows stay
+-- fail-open so upgraded installs keep their historic pairing behaviour.
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS session_source TEXT;
+CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
+    ON public.conversation_stream (host, session_source)
+    WHERE session_source IS NOT NULL;
+
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/observation_embedding_chunks.sql <<<
 
 -- -----------------------------------------------------------------------------
@@ -237,16 +248,30 @@ VALUES ('v0.4', 'cumulative existing-install contract: P0-A merged_event_ids + F
 ON CONFLICT (version) DO NOTHING;
 
 
--- Session provenance (additive only, 2026-11-11): same DDL as
--- alpha_bootstrap.sql. session_source = host-native "how was this session
--- created" (tool/cron/oneshot/subagent = machine, desktop/tui/feishu = human).
--- Pairing excludes machine sessions from the QA layer; NULL rows stay
--- fail-open so upgraded installs keep their historic pairing behaviour.
-ALTER TABLE public.conversation_stream
-    ADD COLUMN IF NOT EXISTS session_source TEXT;
-CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
-    ON public.conversation_stream (host, session_source)
-    WHERE session_source IS NOT NULL;
+-- Full-text yin tables (E1 identity layer). Same DDL as e1._ensure_yin_tables():
+-- E1 creates them itself so a fresh database can dual-write before bootstrap runs,
+-- but an upgraded install must get them from here as well — otherwise the schema
+-- contract reports "these tables exist in the DDL but no upgrade path creates them".
+CREATE TABLE IF NOT EXISTS public.yin (
+    id BIGSERIAL PRIMARY KEY,
+    version TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_current BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS yin_version_idx ON public.yin (version);
+CREATE INDEX IF NOT EXISTS yin_is_current_idx ON public.yin (id DESC) WHERE is_current = TRUE;
+CREATE TABLE IF NOT EXISTS public.yin_history (
+    id BIGSERIAL PRIMARY KEY,
+    version TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_current BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS yin_history_version_idx ON public.yin_history (version);
+CREATE INDEX IF NOT EXISTS yin_history_is_current_idx ON public.yin_history (id DESC) WHERE is_current = TRUE;
 
 COMMIT;
 

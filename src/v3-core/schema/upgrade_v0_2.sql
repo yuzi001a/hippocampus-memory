@@ -247,6 +247,32 @@ INSERT INTO public.schema_versions (version, description)
 VALUES ('v0.4', 'cumulative existing-install contract: P0-A merged_event_ids + F2 identity columns + qa_pairs.chars + memory_relations/derived_memory_invalidations/assistant_deliveries/embedding_failures sidecars')
 ON CONFLICT (version) DO NOTHING;
 
+
+-- Full-text yin tables (E1 identity layer). Same DDL as e1._ensure_yin_tables():
+-- E1 creates them itself so a fresh database can dual-write before bootstrap runs,
+-- but an upgraded install must get them from here as well — otherwise the schema
+-- contract reports "these tables exist in the DDL but no upgrade path creates them".
+CREATE TABLE IF NOT EXISTS public.yin (
+    id BIGSERIAL PRIMARY KEY,
+    version TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_current BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS yin_version_idx ON public.yin (version);
+CREATE INDEX IF NOT EXISTS yin_is_current_idx ON public.yin (id DESC) WHERE is_current = TRUE;
+CREATE TABLE IF NOT EXISTS public.yin_history (
+    id BIGSERIAL PRIMARY KEY,
+    version TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_current BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS yin_history_version_idx ON public.yin_history (version);
+CREATE INDEX IF NOT EXISTS yin_history_is_current_idx ON public.yin_history (id DESC) WHERE is_current = TRUE;
+
 COMMIT;
 
 -- =============================================================================
