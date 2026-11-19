@@ -236,14 +236,6 @@ INSERT INTO public.schema_versions (version, description)
 VALUES ('v0.4', 'cumulative existing-install contract: P0-A merged_event_ids + F2 identity columns + qa_pairs.chars + memory_relations/derived_memory_invalidations/assistant_deliveries/embedding_failures sidecars')
 ON CONFLICT (version) DO NOTHING;
 
-COMMIT;
-
--- =============================================================================
--- End of artifact. The apply path appends the qa_embedding_chunks.sql artifact
--- (when present) BEFORE this COMMIT, in a separate transaction that records
--- its own schema_versions row. See distribution_cli._upgrade_apply for the
--- orchestration.
--- =============================================================================
 
 -- Session provenance (additive only, 2026-11-11): same DDL as
 -- alpha_bootstrap.sql. session_source = host-native "how was this session
@@ -255,3 +247,12 @@ ALTER TABLE public.conversation_stream
 CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
     ON public.conversation_stream (host, session_source)
     WHERE session_source IS NOT NULL;
+
+COMMIT;
+
+-- =============================================================================
+-- End of artifact. The apply path appends the qa_embedding_chunks.sql artifact
+-- (when present) BEFORE this COMMIT, in a separate transaction that records
+-- its own schema_versions row. See distribution_cli._upgrade_apply for the
+-- orchestration.
+-- =============================================================================

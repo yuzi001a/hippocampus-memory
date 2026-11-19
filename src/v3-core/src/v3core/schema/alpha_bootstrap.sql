@@ -462,12 +462,6 @@ CREATE INDEX IF NOT EXISTS yin_history_is_current_idx
 -- -----------------------------------------------------------------------------
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/assistant_deliveries.sql <<<
 
-COMMIT;
-
--- =============================================================================
--- End of artifact. No DDL below this line. Apply via scripts/bootstrap_alpha_db.py
--- only. Do NOT add DROP / TRUNCATE / DELETE — this file is bootstrap-only.
--- =============================================================================
 
 -- P0-A session provenance (additive only, 2026-11-11): session_source carries
 -- the host's native answer to "how was this session created" (Hermes
@@ -481,3 +475,10 @@ ALTER TABLE public.conversation_stream
 CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
     ON public.conversation_stream (host, session_source)
     WHERE session_source IS NOT NULL;
+
+COMMIT;
+
+-- =============================================================================
+-- End of artifact. No DDL below this line. Apply via scripts/bootstrap_alpha_db.py
+-- only. Do NOT add DROP / TRUNCATE / DELETE — this file is bootstrap-only.
+-- =============================================================================
