@@ -4137,6 +4137,17 @@ def _compute_snapshot_budget(
 # 后台 worker — 核心流水线
 # ────────────────────────────────────────────────────────────
 
+def _is_config_error_result(result: Any) -> bool:
+    """``call_m3`` 的失败 dict 里区分"配置错了"和"provider 挂了"。
+
+    配置错误必须在写任何持久状态之前拦下: 自适应批大小、failed_segment 和
+    cursor 都不该因为一个拼错的模型名而变化。
+    """
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("error") or "").startswith("config_error")
+
+
 def _observe_worker(
     cfg: dict[str, Any],
     pg_dsn: str,
@@ -4891,6 +4902,20 @@ def _observe_worker(
         # 只跳过, 永不拆。修复: 用统一的 _m3_failed_path 标志, 失败时一次进入
         # 自适应拆批逻辑 (近似 JSON 解析失败的分叉: 多条拆批, 单条只跳过)。
         _m3_failed_path: str | None = None  # None=成功; "primary"=主失败; "fallback"=主+fallback均失败
+        # 配置错误 (缺 model / 非法 settings) 不是 provider 故障: 一旦走进下面的
+        # 统一失败段, 就会自适应拆批 (批大小减半) + 写失败段, 于是一个拼错的模型名
+        # 会把自适应批大小永久减半直到 stalled。这里直接停: 不写 note, 不动自适应
+        # 状态, 不推进 cursor, 只把错误打进日志等人修配置。
+        if _is_config_error_result(result):
+            logger.error(
+                "observer: 配置错误 (不是网络/模型故障), 本轮不作任何状态变更: %s",
+                str(result.get("error"))[:300],
+            )
+            try:
+                pg.close()
+            except Exception:
+                pass
+            return
         if "error" in result:
             err_str = str(result["error"])
             try:

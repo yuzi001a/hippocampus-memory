@@ -224,3 +224,29 @@ def test_validate_config_warns_for_undeclared_model():
 def test_validate_config_is_quiet_for_declared_model():
     cfg = from_legacy_dict({"llm": {"model": "MiniMax-M3.1-Flash"}})
     assert not any("MiniMax-M3.1-Flash" in w for w in validate_config(cfg))
+
+
+def test_config_error_is_distinguishable_from_provider_failure():
+    assert observer._is_config_error_result({"error": "config_error: 缺少 model"}) is True
+    assert observer._is_config_error_result({"error": "请求失败: timeout"}) is False
+    assert observer._is_config_error_result({"text": "ok"}) is False
+    assert observer._is_config_error_result(None) is False
+
+
+def test_worker_checks_config_error_before_mutating_persistent_state():
+    """结构性断言: 配置错误的 return 必须排在自适应/失败段写入之前。
+
+    这不是行为测试 (worker 需要真 PG, 本套件连不上也不该连)。它防的是有人把
+    这段 guard 挪到 _save_adaptive_batch 下面 —— 那样一个拼错的模型名就会开始
+    永久减半批大小。
+    """
+    import inspect
+
+    src = inspect.getsource(observer._observe_worker)
+    # 只看 M3 失败处理这一段 (函数前面还有 JSON 解析失败路径自己的自适应拆批调用)
+    start = src.index("_m3_failed_path: str | None = None")
+    tail = src[start:]
+    guard = tail.index("_is_config_error_result(result)")
+    assert guard < tail.index("_save_adaptive_batch(")
+    assert guard < tail.index("_save_failed_segment(")
+    assert guard < tail.index("record_observer_error")
