@@ -80,34 +80,38 @@ def test_collapse_helper_strips_on_demand_clause_from_custom_prompt():
 
 # ── 2. 证据归属 / 状态 / 纠正 / 偏好边界 / 不确定 ───────────────────────────
 
-def test_status_vocabulary_is_present():
+def test_format_example_is_present():
     prompt = _prompt()
     for tag in ("〔已实施〕", "〔已验证〕", "〔计划中〕", "〔未完成〕", "〔已推翻〕"):
         assert tag in prompt, f"状态词缺失: {tag}"
+    # 词表不够, 必须给出可直接模仿的格式示例
+    assert "- [用户] " in prompt and "- [建议] " in prompt
 
 
-def test_user_decision_is_separated_from_assistant_suggestion():
+def test_attribution_labels_are_defined_and_never_justify_dropping_facts():
     prompt = _prompt()
-    assert "建议未拍板" in prompt
-    assert "用户原话支撑" in prompt
+    for label in ("`[用户]`", "`[建议]`", "`[共同]`"):
+        assert label in prompt, f"归属标记缺失: {label}"
+    # 归属不确定 → 打标记, 不是删条目 (v1 规则曾把整节决策压没)
+    assert "归属不确定不是删掉这条事实的理由" in prompt
 
 
 def test_supersede_rule_keeps_the_superseded_value_marked():
     prompt = _prompt()
-    assert "用户推翻" in prompt
     assert "原为 X → 改为 Y" in prompt
+    assert "用户推翻" in prompt
 
 
 def test_task_scope_is_not_promoted_to_long_term_preference():
     prompt = _prompt()
-    assert "长期偏好" in prompt
-    assert "本轮要求" in prompt
+    assert "一次性要求不升级为长期偏好" in prompt
+    assert "以后 / 总是 / 一律" in prompt
 
 
-def test_uncertainty_must_be_preserved():
+def test_uncertainty_is_preserved_instead_of_claimed():
     prompt = _prompt()
-    assert "存疑" in prompt or "待核" in prompt
-    assert "缺失的证据不等于" in prompt
+    assert "仅讨论" in prompt
+    assert "不写「已完成」" in prompt
 
 
 # ── 3. 输入与 JSON 契约没有被新块破坏 (f-string 双花括号回归) ────────────────
@@ -130,6 +134,9 @@ def test_json_contract_still_uses_the_historical_brace_rendering():
     assert "{" not in prompt[start:end] and "}" not in prompt[start:end]
 
 
-def test_identity_name_is_rendered_in_the_evidence_block():
+def test_identity_name_is_rendered_and_rules_stay_name_agnostic():
     prompt = _prompt(identity_name="小柚")
-    assert "与小柚 (助手) 说过的" in prompt
+    assert prompt.startswith("你是小柚的「本轮变化观察者")
+    # 规则块本身不写死身份名 — 换了身份名不该出现半替换的文案
+    block = prompt[prompt.index("## 证据归属与状态"):prompt.index("## 时间锚点")]
+    assert "小柚" not in block
