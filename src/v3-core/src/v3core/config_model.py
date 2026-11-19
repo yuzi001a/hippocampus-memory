@@ -252,6 +252,8 @@ class V3Config:
     prefetch: PrefetchConfig = field(default_factory=PrefetchConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     prompts: dict[str, str] = field(default_factory=dict)
+    # 模型参数形状表 (config.yaml 的 models: 段) — 见 v3core.model_params
+    models: dict[str, dict] = field(default_factory=dict)
     # 兼容老字段 cfg.get("prompts", {}).get("extract") — 仍可单值配置到 prompts_extract
     prompts_extract: str = ""
     half_life: int = 30  # P3 — 时间衰减半衰期 (recall_pool)
@@ -358,6 +360,7 @@ def from_legacy_dict(src: dict | None) -> V3Config:
     prefetch_raw = src.get("prefetch") or {}
     ingest_raw = src.get("ingest") or {}
     prompts = src.get("prompts") or {}
+    models_raw = src.get("models") or {}
 
     # -- LLM --
     _llm_max_tokens = llm_raw.get("max_tokens")
@@ -485,6 +488,7 @@ def from_legacy_dict(src: dict | None) -> V3Config:
         # 兼容老字段: extract 单值同时保留在 prompts_extract
         prompts_extract=str(prompts.get("extract", "") or ""),
         half_life=half_life if half_life > 0 else 30,
+        models={str(k): dict(v) for k, v in models_raw.items() if isinstance(v, dict)},
     )
 
 
@@ -500,6 +504,11 @@ def validate_config(cfg: V3Config) -> list[str]:
 
     if cfg.llm.thinking_mode not in ("auto", "enabled", "disabled"):
         warnings.append("llm.thinking_mode 应为 auto/enabled/disabled")
+
+    # 2026-11-19: 模型参数形状 (thinking / reasoning_effort) 由 models: 表声明。
+    # 表里没有的模型会走保守默认, 在配置校验阶段就说清楚, 不要等运行期才发现。
+    from . import model_params as _model_params
+    warnings.extend(_model_params.warnings_for(cfg, getattr(cfg.llm, "model", "") or ""))
 
     if cfg.mode not in ("cloud", "local"):
         warnings.append(f"未知 mode '{cfg.mode}'，默认 cloud")

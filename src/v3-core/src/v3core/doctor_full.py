@@ -1042,7 +1042,12 @@ def _check_auth_llm(cfg_view: dict[str, Any], timeout: float) -> dict[str, Any]:
     # /models meant a SiliconFlow install was probed at the wrong vendor and
     # reported a 404 warning.
     base = (llm.get("base_url") or "").rstrip("/")
-    endpoint = f"{base}/chat/completions" if base else "https://api.minimaxi.com/v1/models"
+    if base:
+        endpoint = f"{base}/chat/completions"
+    else:
+        # 端点默认值只在配置层定义一次 (config.DEFAULT_LLM_BASE_URL)
+        from .config import DEFAULT_LLM_BASE_URL
+        endpoint = DEFAULT_LLM_BASE_URL.rstrip("/") + "/models"
     body = None
     if base:
         body = {

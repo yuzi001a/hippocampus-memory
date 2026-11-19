@@ -55,6 +55,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import model_params
+
 # v3core.__init__._safe_err 模块级函数, 同包内直接相对导入即可。
 # 避免 daemon 线程异常时 NameError → 静默死 → 整条观察者链路断。
 from . import _safe_err
@@ -372,10 +374,10 @@ _DEFAULT_OBSERVER_CONFIG: dict[str, Any] = {
     # ---- LLM / prompt 配置 ----
     "max_completion_tokens": 32768,  # phase6 提至 32768: 8000字 输出 + tokens 余量
     "thinking": "disabled",       # phase0e 定案: 禁用思考
-    # 2026-11-19: 仅对"省略 thinking"的模型族 (M3.1) 生效。不压低时 adaptive 思考会
-    # 吃满输出预算 (实测 30 QA 批次 reasoning 56,547 字符 / 16384 上限, JSON 未闭合,
-    # 表现为每轮静默超时或写不出印)。M3.1 只收 low/medium/high/xhigh/max。
-    "reasoning_effort": "low",
+    # 2026-11-19: adaptive 族的思考档位。None = 用 models: 表声明的默认值
+    # (M3.1 内置为 low); 显式配置("low"/"medium"/…)优先。不压档会让思考吃满
+    # 输出预算 (实测 30 QA 批次 reasoning 56,547 字符 / 16384 上限, JSON 未闭合)。
+    "reasoning_effort": None,
     "reasoning_split": True,      # phase0e 定案
     "debounce_seconds": 10,       # 触发节流, 防高频
     "model": None,                # None → 用 llm.model
@@ -655,6 +657,16 @@ def _load_observer_config() -> dict[str, Any]:
             obs = legacy.get("observer")
             if isinstance(obs, dict):
                 cfg.update(obs)
+            # 2026-11-19: 模型参数形状表 + llm 段兜底 — observer 段与 llm 段互不继承,
+            # 以前缺键就静默回落调用点字面量; 现在统一在配置层解析 (models: 表见
+            # v3core.model_params), 缺模型名时 call_m3 fail-loud, 不再猜一个模型。
+            cfg["models"] = legacy.get("models") or {}
+            _llm_sec = legacy.get("llm") or {}
+            if isinstance(_llm_sec, dict):
+                if not cfg.get("model"):
+                    cfg["llm_model"] = _llm_sec.get("model") or ""
+                if not cfg.get("base_url"):
+                    cfg["llm_base_url"] = _llm_sec.get("base_url") or ""
     except Exception as e:
         logger.warning("读 observer 配置失败, 用兜底默认: %s", _safe_err(e)[:120])
     return cfg
@@ -813,22 +825,25 @@ def _observer_resolve_api_key() -> tuple[str, str | None]:
 # M3 调用 — 复制 phase0_m3_length_test.py 的 call_m3 (参数已实验定案)
 # ────────────────────────────────────────────────────────────
 
-def _m3_thinking_payload(model: str, thinking: str) -> dict[str, Any] | None:
-    """Observer 的 thinking 决策 — 与 ``llm._thinking_payload`` 同一模型感知规则。
+def _m3_thinking_payload(model: str, thinking: str, cfg: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Observer 的 thinking 决策 — 形状查 ``model_params`` 表, 这里只拼 payload。
 
-    MiniMax M3.1 家族拒绝 ``thinking.type="disabled"``（HTTP 400:
-    ``model "MiniMax-M3.1-Flash" requires adaptive thinking``），因此 disabled
-    模式下直接省略该字段；其余模型保持历史行为 ``{"type": thinking}``。
-
-    这条路径是 observer 自己的 HTTP 调用（不经 ``llm.LLMClient``），历史上漏了
-    同一处模型感知判断 —— Y400 全量重建时派生层第一轮就撞上 400，30 条 QA
-    落 adaptive 状态、游标不推进，表现为「派生层跑不动」。
+    模型参数差异 (哪些族要求 adaptive / 能不能发 disabled / 默认 effort) 只有一个
+    来源: ``model_params.DEFAULT_MODEL_TABLE`` + config 的 ``models:`` 段。历史上
+    llm.py 与 observer.py 各写一份模型名子串判断, 漏改一处就是"某条路径静默用错
+    参数" (Y400 那次 400 就是这样)。
     """
-    mode = str(thinking or "disabled").strip().lower()
-    requires_adaptive = "m3.1" in str(model).lower()
-    if mode == "disabled" and requires_adaptive:
-        return None
-    return {"type": mode}
+    params = model_params.resolve(model, cfg)
+    return model_params.thinking_field(params, thinking or "disabled")
+
+
+def _llm_base_url_default() -> str:
+    """配置层唯一的端点默认值 (与 llm.py 共用), 调用点不再各写字面量。"""
+    try:
+        from .config import DEFAULT_LLM_BASE_URL
+        return DEFAULT_LLM_BASE_URL
+    except Exception:  # pragma: no cover - 配置层不可用时保持可用
+        return ""
 
 
 def call_m3(
@@ -850,15 +865,23 @@ def call_m3(
     - reasoning_split=True — thinking 拆到 reasoning_content, 不进 content
     """
     import requests
-    base_url = cfg.get("base_url") or cfg.get("llm_base_url") or "https://api.minimaxi.com/v1"
-    model = cfg.get("model") or cfg.get("llm_model") or "MiniMax-M3"
+    model = cfg.get("model") or cfg.get("llm_model") or ""
+    if not model:
+        # 没有模型名就不发请求: 静默回落到字面量会掩盖配置错误 (2026-11-19 起 fail-loud)
+        return {"error": "config_error: 未配置模型 (observer.model / llm.model)", "latency": 0.0}
+    base_url = (
+        cfg.get("base_url") or cfg.get("llm_base_url")
+        or _llm_base_url_default()
+    )
     proxy = cfg.get("proxy") or cfg.get("llm_proxy")
     # 2026-08-09: timeout 支持 cfg 配置 — 大输入+大输出 (印 2-3万字 + 50 QA) M3 处理慢,
     # 默认 180s 不够 (实测连续超时); 生产可配 timeout: 300
     timeout = int(cfg.get("timeout", timeout) or timeout)
-    # 2026-11-19: M3.1 的 adaptive thinking 需要显式 effort。只在"不下发 thinking"的
-    # 路径使用; 显式 thinking={type:...} 的模型族保持原行为。cfg 可覆盖。
-    _reasoning_effort = str(cfg.get("reasoning_effort") or "low").strip().lower()
+    # 2026-11-19: adaptive 族 (省略 thinking) 需要显式 effort, 否则长 prompt 的思考
+    # 吃满输出预算。默认档来自 models: 表; cfg.reasoning_effort 显式覆盖。
+    _params = model_params.resolve(model, cfg)
+    _reasoning_effort = model_params.reasoning_effort_for(
+        _params, cfg, default="low")
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
@@ -867,7 +890,7 @@ def call_m3(
         "max_completion_tokens": max_completion_tokens,
         "reasoning_split": reasoning_split,
     }
-    _thinking_field = _m3_thinking_payload(model, thinking)
+    _thinking_field = _m3_thinking_payload(model, thinking, cfg)
     if _thinking_field is not None:
         payload["thinking"] = _thinking_field
     else:
@@ -899,7 +922,12 @@ def call_m3(
             # 重试体同样要压 effort: 去掉 thinking 后走的就是 adaptive 默认档,
             # 不压会重演"思考吃满输出预算"的静默失败。
             _retry_body = {k: v for k, v in payload.items() if k != "thinking"}
-            _retry_body.setdefault("reasoning_effort", _reasoning_effort)
+            # 服务端说"要 adaptive" = 运行时证据推翻了表里的 classic 判断;
+            # 这一发必须按 adaptive 走, 所以 effort 兜到 low/cfg, 不能省。
+            _retry_body.setdefault(
+                "reasoning_effort",
+                str(cfg.get("reasoning_effort") or _params.reasoning_effort or "low"),
+            )
             resp = _post(_retry_body)
         latency = time.time() - t0
     except Exception as e:

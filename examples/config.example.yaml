@@ -45,6 +45,21 @@ storage:
 #   api_key:  ""
 #   model:    "your-chat-model"
 
+# Model parameter *shape* (optional but recommended). `llm.*` sets values;
+# this table says which optional request fields each model family accepts:
+#   thinking:          classic  -> send thinking={type: disabled|enabled}
+#                      adaptive -> never send thinking=disabled; use reasoning_effort
+#   reasoning_effort:  low|medium|high|xhigh|max (only used on the adaptive path)
+# Keys are matched as case-insensitive PREFIXES, longest match wins, and they
+# override the built-in table. A model missing from the table still works: it is
+# called with the historical `classic` shape plus one WARNING per model, and
+# `validate_config()` lists it. Declare it here to pin the behaviour instead of
+# relying on that default.
+#
+# models:
+#   "your-chat-model":  { thinking: classic }
+#   "some-adaptive-model": { thinking: adaptive, reasoning_effort: low }
+
   # Rerank is optional. Uncomment and fill it only when a rerank endpoint exists.
   # rerank:
   #   endpoint: "https://your-rerank-host.example/v1/rerank"

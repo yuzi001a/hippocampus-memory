@@ -7,6 +7,8 @@ import time
 import requests
 from typing import Any
 
+from . import model_params
+
 
 try:
     from . import _safe_err
@@ -75,22 +77,18 @@ def _looks_like_rejected_extra(err: Exception) -> bool:
                                        "unexpected", "field required", "invalid_request"))
 
 
-def _thinking_payload(model: str, mode: str) -> dict[str, Any] | None:
-    """Resolve MiniMax thinking fields without making a provider request."""
-    normalized_mode = str(mode or "auto").strip().lower()
-    if normalized_mode not in ("auto", "enabled", "disabled"):
-        normalized_mode = "auto"
-    requires_adaptive = "m3.1" in str(model).lower()
+def _thinking_payload(model: str, mode: str, cfg: Any = None) -> dict[str, Any] | None:
+    """Resolve the ``thinking`` field without making a provider request.
 
-    if normalized_mode == "enabled":
-        return {"type": "enabled", "budget_tokens": 32768}
-    if normalized_mode == "disabled":
-        return None if requires_adaptive else {"type": "disabled"}
-    if requires_adaptive:
-        # Y400: M3.1 Flash rejected both disabled and reasoning.effort=none;
-        # omitting `thinking` was observed to succeed (200) for the official model.
-        return None
-    return {"type": "disabled"}
+    模型形状 (哪些族要求 adaptive / 能不能发 disabled) 由 ``model_params`` 表决定;
+    这里只负责 payload 形状。返回 ``None`` = 省略该字段。
+    """
+    params = model_params.resolve(model, cfg)
+    field = model_params.thinking_field(params, mode)
+    if field is not None and field.get("type") == "enabled":
+        # 历史形状: 显式开启时带思考预算 (与 _chat_minimax 的旧行为一致)
+        field = {"type": "enabled", "budget_tokens": 32768}
+    return field
 
 
 def _classify_openai_error(err: Exception) -> str:
@@ -158,17 +156,27 @@ def validate_output_tokens(value: int | None) -> int | None:
     return value
 
 
+def _default_base_url() -> str:
+    """配置层唯一的 MiniMax 端点默认值 — 调用点不再各写一份字面量。"""
+    from .config import DEFAULT_LLM_BASE_URL
+    return DEFAULT_LLM_BASE_URL
+
+
 class LLMClient:
     """统一 LLM 客户端"""
 
     def __init__(self, config):
         """接受 V3Config | dict | LLMConfig 任意形态, 提取 llm 子配置."""
         llm_cfg = self._extract_llm_cfg(config)
+        # 原始配置留着查 models: 表 (模型参数形状), 不是 llm 子段的一部分
+        self._raw_config = config
         self.provider = llm_cfg.get("provider", "") or ""
         self.model = llm_cfg.get("model", "")
         # thinking 开关: config llm.thinking (bool, 默认 True) 或构造参数
         self._thinking = bool(llm_cfg.get("thinking", True))
         self._thinking_mode = llm_cfg.get("thinking_mode", "auto") or "auto"
+        # None = 用 models: 表声明的档位; 显式配置优先
+        self._reasoning_effort_cfg = llm_cfg.get("reasoning_effort")
         try:
             raw_timeout = llm_cfg.get("timeout", 600)
             if isinstance(raw_timeout, bool):
@@ -312,7 +320,7 @@ class LLMClient:
         url = (
             f"{self.base_url.rstrip('/')}/chat/completions"
             if self.base_url
-            else "https://api.minimaxi.com/v1/chat/completions"
+            else _default_base_url().rstrip("/") + "/chat/completions"
         )
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -329,12 +337,19 @@ class LLMClient:
             "temperature": temperature,
             "max_completion_tokens": _output_budget,  # M3 铁律: max_tokens 已弃用被忽略, 必须用 max_completion_tokens
         }
-        thinking_payload = _thinking_payload(self.model, self._thinking_mode)
+        _raw_cfg = getattr(self, "_raw_config", None)
+        _params = model_params.resolve(self.model, _raw_cfg)
+        _effort = model_params.reasoning_effort_for(
+            _params,
+            {"reasoning_effort": getattr(self, "_reasoning_effort_cfg", None)},
+            default="low",
+        )
+        thinking_payload = _thinking_payload(self.model, self._thinking_mode, _raw_cfg)
         if thinking_payload is not None:
             body["thinking"] = thinking_payload
-        elif (str(self._thinking_mode).strip().lower() == "disabled"
-              and "m3.1" in str(self.model).lower()):
-            logger.debug("MiniMax M3.1 does not allow thinking=disabled; omitting thinking field")
+        elif _effort:
+            # 省略 thinking 的族 (adaptive) 必须显式压 effort, 否则思考吃满输出预算。
+            body["reasoning_effort"] = _effort
         proxies = {"https": self._proxy} if self._proxy else None
         prompt_len = len(json.dumps(body, ensure_ascii=False))
         logger.info("LLM call: provider=minimax model=%s prompt_len=%d temperature=%.2f "
@@ -355,6 +370,11 @@ class LLMClient:
                     adaptive_fallback_attempted = True
                     retry_body = dict(body)
                     retry_body.pop("thinking", None)
+                    # 服务端要 adaptive = 表判断被推翻, 这一发按 adaptive 补齐 effort
+                    retry_body.setdefault(
+                        "reasoning_effort",
+                        str(getattr(self, "_reasoning_effort_cfg", "") or "low"),
+                    )
                     logger.warning(
                         "MiniMax rejected thinking with requires adaptive thinking; retrying once without it (model=%s)",
                         self.model,
