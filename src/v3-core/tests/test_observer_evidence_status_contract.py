@@ -101,14 +101,18 @@ def test_attribution_labels_are_defined_and_never_justify_dropping_facts():
     prompt = _prompt()
     for label in ("`[用户]`", "`[建议]`", "`[共同]`"):
         assert label in prompt, f"归属标记缺失: {label}"
-    # 归属不确定 → 打标记, 不是删条目 (v1 规则曾把整节决策压没)
-    assert "归属不确定不是删掉这条事实的理由" in prompt
+    # 归属判不准 → 只能标 [建议], 不许拿 [共同] 兜底; 也不是删条目
+    assert "判不准归属时只能用" in prompt
+    assert "不是删掉这条事实的理由" in prompt
+    assert "不许拿 `[共同]` 兜底" in prompt
 
 
 def test_supersede_rule_keeps_the_superseded_value_marked():
     prompt = _prompt()
     assert "原为 X → 改为 Y" in prompt
-    assert "用户推翻" in prompt
+    # 旧值必须保留在同一行, 示例也得守自己的格式 (状态词在 [#N] 之前)
+    assert "旧值保留在这一行里" in prompt
+    assert "原为 X → 改为 Y〔已实施〕[#N]" in prompt
 
 
 def test_task_scope_is_not_promoted_to_long_term_preference():

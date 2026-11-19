@@ -1371,7 +1371,9 @@ Hard limits per section (exceeding them makes the output invalid):
 - 系统状态摘要: one line per card, total <=600 字
 - 关系记忆: all facts kept, <=150 字
 
-Write in Chinese. Keep dates (YYYY-MM-DD). Total output must be <=4000 字."""
+Write in Chinese. Keep dates (YYYY-MM-DD). Total output must be <=4000 字.
+
+Keep the evidence markers already present in the source: every decision/progress bullet that starts with [用户] / [建议] / [共同] keeps that prefix, and every 〔已实施〕〔已验证〕〔计划中〕〔未完成〕〔已推翻〕 keeps its status word. When two bullets about the same thing are merged, keep the stronger attribution ([用户] > [共同] > [建议]) and the newer status — never upgrade [建议] to [用户] on your own."""
 
 
 def _note_to_dialog_turns(note_content: str) -> str:

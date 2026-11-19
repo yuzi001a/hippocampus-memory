@@ -838,12 +838,13 @@ def _m3_thinking_payload(model: str, thinking: str, cfg: dict[str, Any] | None =
 
 
 def _llm_base_url_default() -> str:
-    """配置层唯一的端点默认值 (与 llm.py 共用), 调用点不再各写字面量。"""
-    try:
-        from .config import DEFAULT_LLM_BASE_URL
-        return DEFAULT_LLM_BASE_URL
-    except Exception:  # pragma: no cover - 配置层不可用时保持可用
-        return ""
+    """配置层唯一的端点默认值 (与 llm.py 共用), 调用点不再各写字面量。
+
+    故意不吞 import 异常: 返回空串会把 URL 拼成 "/chat/completions", 报出来是
+    MissingSchema, 看起来像网络问题。配置层坏了就该启动失败。
+    """
+    from .config import DEFAULT_LLM_BASE_URL
+    return DEFAULT_LLM_BASE_URL
 
 
 def call_m3(
@@ -896,8 +897,9 @@ def call_m3(
     else:
         # 2026-11-19: 省略 thinking 的族 (M3.1) 默认走 adaptive thinking —
         # 必须显式压 effort, 否则长 prompt 的思考会把输出预算吃光, 表现为
-        # "每轮静默超时 / JSON 未闭合"。cfg 可覆盖 (reasoning_effort)。
-        payload["reasoning_effort"] = _reasoning_effort
+        # "每轮静默超时 / JSON 未闭合"。cfg 可覆盖, 表里写 null/omit 表示显式不发。
+        if _reasoning_effort:
+            payload["reasoning_effort"] = _reasoning_effort
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -1168,7 +1170,7 @@ OBSERVER_DIMENSIONS: dict[str, dict] = {
         "section": "进行中状态（未完事项）",
         # 该节收什么 (2026-11-19: 只给定义, 不设槽位 — 仍然按需输出)
         "define": (
-            "写还没完成 / 待验证 / 待决策的条目 (问题-当前状态-下一步) + 状态标记; 已完成并验证的结果写进「系统状态摘要」"
+            "写还没完成 / 待验证 / 待决策的条目 (问题-当前状态-下一步) + 状态标记; 也写本轮已完成 / 已验证的交付 (带〔已验证〕并说明它对后续的影响), 只有改变了系统当前配置/状态时才另写「系统状态摘要」"
         ),
         "prompt": (
             "**仅在本段 QA 改变进行中状态时输出**, 没变化就省略该节。\n"
@@ -1268,9 +1270,14 @@ def _resolve_observer_dimensions(cfg) -> dict[str, dict]:
             if spec is False or (isinstance(spec, dict) and spec.get("enabled") is False):
                 dims.pop(name, None)
             elif isinstance(spec, dict):
+                _base = dims.get(name, {})
                 dims[name] = {
-                    "section": spec.get("section", dims.get(name, {}).get("section", name)),
-                    "prompt": spec.get("prompt", dims.get(name, {}).get("prompt", "")),
+                    "section": spec.get("section", _base.get("section", name)),
+                    "prompt": spec.get("prompt", _base.get("prompt", "")),
+                    # define 必须一起带过来: 只保留 section/prompt 会让任何
+                    # observer.dimensions 覆盖 (哪怕只是 {enabled: true}) 把每节
+                    # "该收什么"的定义静默丢掉, 退回 v4 的精简语义。
+                    "define": spec.get("define", _base.get("define", "")),
                     "default": True,
                 }
     except Exception:
@@ -1457,14 +1464,14 @@ def _observer_prompt(
 4. 【候选主题 / candidates_text】只用于决定 topic_updates 是 update 还是 create; 候选主题不写入 note.content, 也不把候选主题本身当事实来源, 不写入 note.content。
 
 ## 证据归属与状态 (决策 / 进展 必须能回答「谁说的、到哪一步」)
-- 归属标记写在条目最前: `[用户]` 用户拍板 / 授权 / 明确接受; `[建议]` 我提出但用户还没表态; `[共同]` 讨论后双方确定。归属不确定时用 `[建议]` 或 `[共同]` 并写清不确定在哪 — **归属不确定不是删掉这条事实的理由**。
+- 归属标记写在条目最前: `[用户]` 用户拍板 / 授权 / 明确接受; `[建议]` 我提出但用户还没表态; `[共同]` 用户与我各有明确表态且一致。**判不准归属时只能用 `[建议]`**, 不许拿 `[共同]` 兜底 — [共同] 是个肯定断言, 当兜底用会把归属标记变成噪音; 判不准也**不是删掉这条事实的理由**。用户的「授权我处理」算 [用户], 但一句「帮我查一下」不是授权。
 - 状态标记写在结论旁 (来源 `[#N]` 仍在行尾): `〔已实施〕` `〔已验证〕` `〔计划中〕` `〔未完成〕` `〔已推翻〕`, 依据可括注 (用户自述 / 执行结果 / 仅讨论)。状态只由本轮 qa_text 判定, 不从上一版印继承: 上一版标〔计划中〕的项, 本轮没有新证据就照写〔计划中〕, 只有出现相反证据才改; 没有执行或验证证据时, 不写「已完成」「已修复」「已验证」。
 - 本段内用户后置的说法取代先前说法时, 写成 `原为 X → 改为 Y` 并把旧值保留为一行, 不要并列成两条互不相干的事实; 用户没推翻的旧结论不要改写。
 - 偏好边界: 一次性任务参数 (这次 / 这份 / 这个文件) 不记成长期偏好; 但用户在评价我的做法 (「我不喜欢这种写法」「别再默认开思考」「这个风格保持住」) 就是偏好, 直接记为偏好, 不要求出现「以后 / 总是 / 一律」。
 - 格式示例:
   `- [用户] 候选池 top_k 从 5 调到 15〔已实施〕[#12]`
   `- [建议] 下一步先补向量再跑全量〔计划中〕[#29]`
-  原为 X → 改为 Y (用户推翻 #N)〔已实施〕
+  `- 原为 X → 改为 Y〔已实施〕[#N]` (旧值保留在这一行里, 不另起一条)
 
 ## 时间锚点
 当前时间: {now_str}
@@ -1479,7 +1486,7 @@ def _observer_prompt(
 - 每条关键事实、决策、教训或偏好在原文旁紧跟 `[ #N ]` 的无空格形式 `[#N]`, N 是本轮 QA 序号。
 - 决策行与进展行按 `[归属] …〔状态〕[#N]` 的固定顺序写: 归属在最前, 状态紧贴 `[#N]` 之前 (状态词由模型自行判断, 写不准就省, 不要为凑格式牺牲内容)。
 - 主题卡只记录值得长期检索的变化: 可匹配已有候选时 update, 否则确有独立价值时 create; 纯寒暄和重复确认可以不建卡。
-- new_facts 只写最重要的新事实并保留原词, tags 保留用户可能实际搜索的原词或专名; 不要把主题动作重复写成 note 正文, 不写入 note.content 的事实。
+- new_facts 只写最重要的新事实并保留原词; 属于决策 / 进展类的事实同样带归属前缀 (`[用户]` / `[建议]` / `[共同]`) 与状态词 (〔已实施〕等), 判不准只能用 `[建议]`; tags 保留用户可能实际搜索的原词或专名; 不要把主题动作重复写成 note 正文, 不写入 note.content 的事实。
 
 ## 维度节 (按 evidence 输出, 没变化就省略该节, 按需, 可选)
 {_dim_block}
