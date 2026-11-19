@@ -244,3 +244,14 @@ COMMIT;
 -- its own schema_versions row. See distribution_cli._upgrade_apply for the
 -- orchestration.
 -- =============================================================================
+
+-- Session provenance (additive only, 2026-11-11): same DDL as
+-- alpha_bootstrap.sql. session_source = host-native "how was this session
+-- created" (tool/cron/oneshot/subagent = machine, desktop/tui/feishu = human).
+-- Pairing excludes machine sessions from the QA layer; NULL rows stay
+-- fail-open so upgraded installs keep their historic pairing behaviour.
+ALTER TABLE public.conversation_stream
+    ADD COLUMN IF NOT EXISTS session_source TEXT;
+CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
+    ON public.conversation_stream (host, session_source)
+    WHERE session_source IS NOT NULL;
