@@ -75,6 +75,22 @@ storage:
 #   timeout_s: 8
 #   concurrency: 3
 
+# Model request *shape* (optional; built-ins cover the MiniMax families).
+# `llm.*` above carries values; this table says which optional request fields a
+# model family accepts, so a vendor contract change is a config edit, not a code
+# change:
+#   thinking: classic  → send thinking={type: enabled|disabled}
+#             adaptive → never send thinking=disabled; send reasoning_effort
+#   reasoning_effort: low|medium|high|xhigh|max (adaptive path only)
+# Keys are case-insensitive prefixes; the longest match wins; entries here
+# override the built-ins. `llm.reasoning_effort` / `observer.reasoning_effort`
+# override the table for one consumer. A model that is not declared still works:
+# it is called with the historical `classic` shape, one WARNING is logged per
+# model, and `v3-core config validate` lists it.
+# models:
+#   "your-chat-model": { thinking: classic }
+#   "some-adaptive-model": { thinking: adaptive, reasoning_effort: low }
+
   # Rerank is optional. Leave commented when no endpoint is configured.
   # rerank:
   #   endpoint: "https://your-rerank-host.example/v1/rerank"
