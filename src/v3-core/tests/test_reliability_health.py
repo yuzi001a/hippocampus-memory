@@ -326,11 +326,25 @@ def _stub_config_loader():
     }
 
 
-def test_world_a_production_state_overall_not_unhealthy(full_pg: FakePg):
+def test_world_a_production_state_overall_not_unhealthy(full_pg: FakePg, monkeypatch):
     """The dispatch's world A: qa=13654, null=105 (historical debt),
     recent_qa=4, recent_null=0, empty=453. MW01 must be ok; the overall
     verdict must NOT be unhealthy *because of* the 105/453 debt.
     (Other warnings may legitimately tip it to degraded.)"""
+    # RT02 读的是「这个发行包有没有被安装」。从源码树跑 (PYTHONPATH=src) 时它必然
+    # fail, overall 就顺理成章变 unhealthy —— 那是"没装包", 不是"历史欠账把健康度
+    # 拖红了", 与本用例要证明的事无关。这里给它一份正常的发行信息。
+    import importlib.metadata as _md
+    import types as _types
+
+    monkeypatch.setattr(
+        _md, "version",
+        lambda name: "4.0.4" if name in ("v3-core", "v3-hermes-plugin") else "0.dev0",
+    )
+    monkeypatch.setattr(
+        _md, "entry_points",
+        lambda: [_types.SimpleNamespace(group="v3core.tools", name="v3_status", value="x")],
+    )
     pg = full_pg
     pg.recent_qa = 4
     pg.recent_embedding_ok = 4

@@ -1,0 +1,6 @@
+# SQL artifacts are byte-compared against the packaged copies and asserted
+# LF-only by the schema/packaging tests. A CRLF blob on one side fails those
+# tests on every platform, and a Windows checkout without eol=lf would fail
+# them for a reason that has nothing to do with the artifact.
+*.sql text eol=lf
+.gitattributes text eol=lf

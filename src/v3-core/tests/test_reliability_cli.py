@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import pathlib
 import sys
 from pathlib import Path
 
@@ -44,7 +45,10 @@ from v3core.reliability.repair import REPAIR_APPLY_NOT_IMPLEMENTED
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 V3CORE_DIR = REPO_ROOT / "src" / "v3-core"
-VENV_PY = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+_REPO_VENV_PY = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+# 仓库内 venv 只是本机习惯, 不是契约: 换台机器 / 用独立测试环境 / CI 都没有它,
+# 硬编码路径会让 --help 冒烟变成 FileNotFoundError, 看着像 CLI 坏了。
+VENV_PY = _REPO_VENV_PY if _REPO_VENV_PY.exists() else pathlib.Path(sys.executable)
 
 
 # ── Fake service injection ────────────────────────────────────────────
