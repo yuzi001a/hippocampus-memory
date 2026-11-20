@@ -102,7 +102,7 @@ def test_attribution_labels_are_defined_and_never_justify_dropping_facts():
     for label in ("`[用户]`", "`[建议]`", "`[共同]`"):
         assert label in prompt, f"归属标记缺失: {label}"
     # 归属判不准 → 只能标 [建议], 不许拿 [共同] 兜底; 也不是删条目
-    assert "判不准归属时只能用" in prompt
+    assert "判不准归属时" in prompt and "不许拿 `[共同]` 兜底" in prompt
     assert "不是删掉这条事实的理由" in prompt
     assert "不许拿 `[共同]` 兜底" in prompt
 
@@ -192,3 +192,30 @@ def test_preference_boundary_keeps_explicit_dislike_as_a_preference():
 def test_decisions_section_is_written_even_when_there_is_only_a_proposal():
     prompt = _prompt()
     assert "只要本段出现拍板、提案或纠正之一, 本节就要写" in prompt
+
+
+def test_proposal_label_is_not_the_fallback_for_work_already_done():
+    """[建议] 只描述还没发生的事；已落地的事实不许标成建议 (canary 实测:
+
+    Observer 区间故障修复是用户授权的，新版却标成了 `[建议]` —— 因为规则把
+    「判不准就用 [建议]」写成了兜底, 模型看到本批只有执行结果、没看到授权原话,
+    就把做过的事降级成提案。这条把「已发生 ≠ 建议」钉住。
+    """
+    text = _prompt()
+    assert "不是不确定时的默认值" in text
+    assert "不可能只是建议" in text
+    # 归属无证据时的正确写法是"不写标记 + 括注", 不是写 [建议]
+    assert "归属未见记录" in text
+    # 归属可从上版印延续, 不因本轮只见执行结果就降级
+    assert "归属可以沿用上一版印" in text
+
+
+def test_both_status_sections_require_a_status_word():
+    """「关键决策」「进行中状态」每一条都要有状态词 (canary 实测:
+
+    新版权限标记全中, 但「进行中状态」里几条已完成的条目漏掉了状态词 —— 旧规则
+    留了"写不准就省"的口子。两节的存在意义就是回答「到哪一步」, 不能省。
+    """
+    text = _prompt()
+    assert "两节的每一条都必须带状态词" in text
+    assert "只有纯背景/环境描述类条目可以不带状态词" in text
