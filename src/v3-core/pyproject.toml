@@ -1,113 +1,113 @@
-[build-system]
-requires = ["setuptools>=61", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "v3-core"
-version = "4.0.4"
-description = "v3 memory core engine — PostgreSQL/pgvector source ingest and explicit-memory storage"
-readme = "README.md"
-requires-python = ">=3.10"
-license = "AGPL-3.0-or-later"
-authors = [{name = "yuzi"}]
-maintainers = [{name = "yuzi"}]
-keywords = ["memory", "postgresql", "pgvector", "hippocampus", "v3-core"]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Framework :: AsyncIO",
-    "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Database",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-]
-dependencies = [
-    "pyyaml",
-    "numpy",
-    "requests",
-    "psycopg2-binary",
-    "pgvector",
-    "jieba",
-    "openai",
-    # The official MCP SDK is deliberately NOT a core dependency: only the
-    # standalone stdio server (`v3-core mcp`, see v3core.mcp_server) imports it,
-    # and that server uses the FastMCP 1.x API (mcp>=1.0,<2). A host that pins a
-    # different MCP major — Hermes v0.22.2 pins mcp==2.0.0 — would otherwise get
-    # an unsatisfiable core requirement and refuse to install the plugin at all.
-    # Install the extra in a dedicated environment: pip install 'v3-core[mcp]'.
-    # 2026-09-04 P1.3.1 deadline-closure: Aho-Corasick multi-pattern string
-    # scan replaces the rows×terms nested-substring scan inside
-    # _qa_snapshot_lookup for long-query prefetch.  Required at runtime
-    # to meet the 6.5/8s SLO; the lookup keeps a nested fallback for
-    # environments where the C extension is unavailable, but the
-    # fallback does not meet the long-query SLO.
-    "pyahocorasick>=2.3.0",
-    # Token-aware long-QA representation; avoids provider-side truncation.
-    "tokenizers>=0.20.0",
-    # I01: DSH session files are zstd-compressed JSONL (multi-frame).
-    # python-zstandard handles frame concatenation natively; the dsh
-    # importer fails with a clear message when this is missing.
-    "zstandard>=0.21",
-]
-
-[project.optional-dependencies]
-cloud = ["requests", "psycopg2-binary", "pgvector"]
-# Standalone stdio MCP server only (`v3-core mcp`). Pinned to the FastMCP 1.x API
-# and kept out of the core requirement set so the engine can be installed next to
-# a host that pins another MCP major (`pip install 'v3-core[mcp]'` in its own venv).
-mcp = ["mcp>=1.0,<2"]
-embed-local = ["sentence-transformers", "onnxruntime"]
-llm-local = ["ollama"]
-full = ["requests", "psycopg2-binary", "pgvector", "sentence-transformers", "onnxruntime", "ollama"]
-
-[project.urls]
-Homepage = "https://github.com/yuzi001a/hippocampus-memory"
-Repository = "https://github.com/yuzi001a/hippocampus-memory"
-Documentation = "https://github.com/yuzi001a/hippocampus-memory/tree/main/docs"
-Source = "https://github.com/yuzi001a/hippocampus-memory/tree/main/src/v3-core"
-Issues = "https://github.com/yuzi001a/hippocampus-memory/issues"
-Changelog = "https://github.com/yuzi001a/hippocampus-memory/blob/main/CHANGELOG.md"
-
-# ── Console scripts ──
-# `v3-core`   — kept verbatim so existing invocations (e.g. `v3-core info`)
-#               and CI smoke checks continue to work.
-# `hippocampus` — public distribution-facing console (Gate 2 deliverable).
-#               Provides `doctor` and `bootstrap` subcommands. Read-only
-#               by default; explicit `--target` required for any mutation.
-[project.scripts]
-v3-core = "v3core.__main__:main"
-hippocampus = "v3core.distribution_cli:main"
-
-[tool.setuptools]
-packages = {find = {where = ["src"]}}
-
-# Ship the canonical SQL resources INSIDE the installed v3core package so
-# the `hippocampus doctor` and `hippocampus bootstrap` commands never
-# depend on repo-relative paths after install. `package-data` is additive
-# on top of the existing `*.json/*.md/*.yaml` rule.
-[tool.setuptools.package-data]
-"v3core" = [
-    "*.json",
-    "*.md",
-    "*.yaml",
-    "schema/alpha_bootstrap.sql",
-    "schema/explicit_memories.sql",
-    "schema/embedding_failures.sql",
-    "schema/qa_embedding_chunks.sql",
-    "schema/observation_embedding_chunks.sql",
-    "schema/memory_relations.sql",
-    "schema/derived_memory_invalidations.sql",
-    "schema/assistant_deliveries.sql",
-    "schema/upgrade_v0_2.sql",
-    # Manual DDL: not auto-applied by bootstrap, but the runtime tells users
-    # "先执行 schema/task_events.sql" — a wheel install has to ship it.
-    "schema/task_events.sql",
-    "schema/session_policies.sql",
-]
-
-[tool.pytest.ini_options]
-# Isolated PG integration tests live outside this default unit collection root.
-testpaths = ["tests"]
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "v3-core"
+version = "4.0.5"
+description = "v3 memory core engine — PostgreSQL/pgvector source ingest and explicit-memory storage"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-or-later"
+authors = [{name = "yuzi"}]
+maintainers = [{name = "yuzi"}]
+keywords = ["memory", "postgresql", "pgvector", "hippocampus", "v3-core"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "pyyaml",
+    "numpy",
+    "requests",
+    "psycopg2-binary",
+    "pgvector",
+    "jieba",
+    "openai",
+    # The official MCP SDK is deliberately NOT a core dependency: only the
+    # standalone stdio server (`v3-core mcp`, see v3core.mcp_server) imports it,
+    # and that server uses the FastMCP 1.x API (mcp>=1.0,<2). A host that pins a
+    # different MCP major — Hermes v0.22.2 pins mcp==2.0.0 — would otherwise get
+    # an unsatisfiable core requirement and refuse to install the plugin at all.
+    # Install the extra in a dedicated environment: pip install 'v3-core[mcp]'.
+    # 2026-09-04 P1.3.1 deadline-closure: Aho-Corasick multi-pattern string
+    # scan replaces the rows×terms nested-substring scan inside
+    # _qa_snapshot_lookup for long-query prefetch.  Required at runtime
+    # to meet the 6.5/8s SLO; the lookup keeps a nested fallback for
+    # environments where the C extension is unavailable, but the
+    # fallback does not meet the long-query SLO.
+    "pyahocorasick>=2.3.0",
+    # Token-aware long-QA representation; avoids provider-side truncation.
+    "tokenizers>=0.20.0",
+    # I01: DSH session files are zstd-compressed JSONL (multi-frame).
+    # python-zstandard handles frame concatenation natively; the dsh
+    # importer fails with a clear message when this is missing.
+    "zstandard>=0.21",
+]
+
+[project.optional-dependencies]
+cloud = ["requests", "psycopg2-binary", "pgvector"]
+# Standalone stdio MCP server only (`v3-core mcp`). Pinned to the FastMCP 1.x API
+# and kept out of the core requirement set so the engine can be installed next to
+# a host that pins another MCP major (`pip install 'v3-core[mcp]'` in its own venv).
+mcp = ["mcp>=1.0,<2"]
+embed-local = ["sentence-transformers", "onnxruntime"]
+llm-local = ["ollama"]
+full = ["requests", "psycopg2-binary", "pgvector", "sentence-transformers", "onnxruntime", "ollama"]
+
+[project.urls]
+Homepage = "https://github.com/yuzi001a/hippocampus-memory"
+Repository = "https://github.com/yuzi001a/hippocampus-memory"
+Documentation = "https://github.com/yuzi001a/hippocampus-memory/tree/main/docs"
+Source = "https://github.com/yuzi001a/hippocampus-memory/tree/main/src/v3-core"
+Issues = "https://github.com/yuzi001a/hippocampus-memory/issues"
+Changelog = "https://github.com/yuzi001a/hippocampus-memory/blob/main/CHANGELOG.md"
+
+# ── Console scripts ──
+# `v3-core`   — kept verbatim so existing invocations (e.g. `v3-core info`)
+#               and CI smoke checks continue to work.
+# `hippocampus` — public distribution-facing console (Gate 2 deliverable).
+#               Provides `doctor` and `bootstrap` subcommands. Read-only
+#               by default; explicit `--target` required for any mutation.
+[project.scripts]
+v3-core = "v3core.__main__:main"
+hippocampus = "v3core.distribution_cli:main"
+
+[tool.setuptools]
+packages = {find = {where = ["src"]}}
+
+# Ship the canonical SQL resources INSIDE the installed v3core package so
+# the `hippocampus doctor` and `hippocampus bootstrap` commands never
+# depend on repo-relative paths after install. `package-data` is additive
+# on top of the existing `*.json/*.md/*.yaml` rule.
+[tool.setuptools.package-data]
+"v3core" = [
+    "*.json",
+    "*.md",
+    "*.yaml",
+    "schema/alpha_bootstrap.sql",
+    "schema/explicit_memories.sql",
+    "schema/embedding_failures.sql",
+    "schema/qa_embedding_chunks.sql",
+    "schema/observation_embedding_chunks.sql",
+    "schema/memory_relations.sql",
+    "schema/derived_memory_invalidations.sql",
+    "schema/assistant_deliveries.sql",
+    "schema/upgrade_v0_2.sql",
+    # Manual DDL: not auto-applied by bootstrap, but the runtime tells users
+    # "先执行 schema/task_events.sql" — a wheel install has to ship it.
+    "schema/task_events.sql",
+    "schema/session_policies.sql",
+]
+
+[tool.pytest.ini_options]
+# Isolated PG integration tests live outside this default unit collection root.
+testpaths = ["tests"]
