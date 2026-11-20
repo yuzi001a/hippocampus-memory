@@ -60,6 +60,12 @@ def _write_profile(hh: pathlib.Path, base: pathlib.Path) -> None:
 def booted_core(tmp_path, monkeypatch):
     hh = tmp_path / "hermes-home"
     _write_profile(hh, tmp_path / "data")
+    # 进程环境里的空值会盖掉 profile 自己的 .env (env 优先于 .env), 于是 boot
+    # 拿不到密码 → bind 静默跳过 → 断言看到的是 "default", 看起来像 profile 泄露,
+    # 其实是环境噪声。这里把外部配置面清干净, 让被测的是 profile 本身。
+    for _name in ("V3CORE_PG_PASSWORD", "V3CORE_CONFIG", "V3CORE_DOTENV",
+                  "V3CORE_TEST_MODE", "V3CORE_HOME", "V3CORE_EMBED_API_KEY"):
+        monkeypatch.delenv(_name, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(hh))
     # Never touch a real server: record what the recall path would connect to.
     import psycopg2
@@ -76,6 +82,11 @@ def booted_core(tmp_path, monkeypatch):
 
     core = V3Core(profile=PROFILE, hermes_home=str(hh))
     core.initialize()
+    # bind 失败在生产里只是 warning, 在这里会伪装成"profile 泄露"; 让它当场露头。
+    assert getattr(core, "_scope_tokens", None), (
+        "booted scope 没有绑定成功 — 后面三条断言失败都是它的下游症状, "
+        "先看 initialize() 的 warning"
+    )
     try:
         yield hh, seen, tmp_path / "data"
     finally:

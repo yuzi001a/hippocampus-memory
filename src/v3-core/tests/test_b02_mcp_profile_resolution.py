@@ -72,6 +72,15 @@ def _child_env(hh: pathlib.Path) -> dict[str, str]:
     # Ambient credentials must not be able to stand in for the profile's own.
     env.pop("V3CORE_PG_PASSWORD", None)
     env.pop("V3CORE_EMBED_API_KEY", None)
+    # 子进程的 cwd 是临时目录, 相对 PYTHONPATH ("src") 到那边就失效了 —
+    # 未安装 v3-core 的运行方式下子进程会 No module named v3core。
+    _pp = env.get("PYTHONPATH") or ""
+    if _pp:
+        env["PYTHONPATH"] = os.pathsep.join(
+            str((pathlib.Path(entry) if os.path.isabs(entry)
+                 else (pathlib.Path.cwd() / entry)).resolve())
+            for entry in _pp.split(os.pathsep) if entry
+        )
     env["HERMES_HOME"] = str(hh)
     return env
 
@@ -83,7 +92,20 @@ def _rpc(proc: subprocess.Popen, obj: dict, expect_id: int) -> dict:
     while time.time() < deadline:
         line = proc.stdout.readline()
         if not line:
-            raise RuntimeError("MCP child closed stdout")
+            # 子进程死了就说清为什么: 只报 "closed stdout" 会把 mcp SDK 缺失、
+            # 配置拒绝这类真因藏起来, 让人以为是自己解析错了。
+            try:
+                proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            err = ""
+            try:
+                err = (proc.stderr.read() or "")[-1500:]
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(
+                f"MCP child closed stdout (rc={proc.returncode}); stderr tail:\n{err}"
+            )
         line = line.strip()
         if not line:
             continue
@@ -91,6 +113,19 @@ def _rpc(proc: subprocess.Popen, obj: dict, expect_id: int) -> dict:
         if msg.get("id") == expect_id:
             return msg
     raise TimeoutError(f"no reply for id={expect_id}")
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_config_env(monkeypatch):
+    """外部环境里的配置面必须清掉, 否则测的不是 profile 而是这台机器的环境。
+
+    ``V3CORE_PG_PASSWORD=`` 这种空值会盖掉 profile 自己的 .env (env 优先),
+    进程内的 ``resolve_config(profile, hermes_home=...)`` 就报 "password not set",
+    看起来像子进程解析错了, 实际是父进程环境脏。
+    """
+    for _name in ("V3CORE_PG_PASSWORD", "V3CORE_CONFIG", "V3CORE_DOTENV",
+                  "V3CORE_TEST_MODE", "V3CORE_HOME", "V3CORE_EMBED_API_KEY"):
+        monkeypatch.delenv(_name, raising=False)
 
 
 @pytest.fixture()
