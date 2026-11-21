@@ -1297,6 +1297,41 @@ def _build_dimensions_block(dims: dict[str, dict], _id: str) -> str:
     return "\n\n".join(sections)
 
 
+def _qa_batch_order_clause(cfg) -> str:
+    """取批的 ORDER BY: 生产按事件时间, 回放按 id。
+
+    游标是 ``qa_pairs.id`` (``WHERE id > cursor``)。生产环境 id 与 timestamp 同步
+    递增, 按时间排序能避免同 session 时间倒序撕裂, 所以默认仍按 ``timestamp``。
+
+    **回放模式必须换成 ``id ASC``**: 历史导入/按时间序重导会让 id 顺序与事件顺序
+    不同步, 此时按 timestamp 取 30 条会横跨几千个 id, ``max(id)`` 把游标一口气
+    推到后面 —— 中间几千条 QA 永远没被观察过, 却看起来"跑完了"。回放标识是
+    ``debounce_minutes <= 0`` (生产默认 8)。
+    """
+    # 只有**显式**配成 <= 0 才算回放; 缺键 / 空配置一律按生产语义走 timestamp,
+    # 否则某个没带 debounce 的调用点会静默换成 id 排序, 把生产的时间序打乱。
+    raw = (cfg or {}).get("debounce_minutes", None)
+    try:
+        replay = raw is not None and float(raw) <= 0
+    except (TypeError, ValueError):
+        replay = False
+    return "ORDER BY id ASC" if replay else "ORDER BY timestamp ASC NULLS LAST, id ASC"
+
+
+def _qa_range_bounds(qa_ids: list[int]) -> tuple[int, int]:
+    """一段批次 QA 的区间界: 取 min/max, 不取列表首尾。
+
+    取批的排序维度是 ``timestamp``, 而游标与 ``source_qa_range`` 的维度是 ``id``。
+    增量库里两者同步, 看不出差别; 一旦按历史回放或按时间序重导 (id 分配顺序 ≠
+    事件顺序), ``qa_ids[0]`` 可能大于 ``qa_ids[-1]``, 写 int8range 时直接抛
+    ``range lower bound must be less than or equal to range upper bound`` —— 表现
+    是每轮都失败、游标不动, 却没有任何数据错误, 看起来像「跑完了」。
+    """
+    if not qa_ids:
+        raise ValueError("qa_ids 为空, 无法确定区间界")
+    return min(qa_ids), max(qa_ids)
+
+
 def _collapse_dim_prompt(text: str, identity: str = "我", limit: int = 120) -> str:
     """把维度指导语压成一句话定义 (自定义维度的兜底, 2026-11-19)。
 
@@ -4573,9 +4608,9 @@ def _observe_worker(
                     WHERE id > %s AND answer IS NOT NULL
                       AND session_id NOT LIKE '%%.trajectory%%'
                       AND NOT (id = ANY(%s::bigint[]))
-                    ORDER BY timestamp ASC NULLS LAST, id ASC
+                    {_order_clause}
                     LIMIT %s
-                    """,
+                    """.format(_order_clause=_qa_batch_order_clause(cfg)),
                     (last_qa_id, _blocked_ids, max_qa_per_run),
                 )
                 rows = cur.fetchall()
@@ -4749,7 +4784,12 @@ def _observe_worker(
             f"--- QA #{i} [{r[2].strftime('%Y-%m-%d %H:%M UTC') if r[2] else '时间未知'}] ---\nQ: {r[3]}\nA: {r[4]}\n"
             for i, r in enumerate(rows, 1)
         )
-        first_qa_id, last_qa_id_now = qa_ids[0], qa_ids[-1]
+        # 区间界必须取 min/max, 不是列表首尾 (2026-11-21 回放实测):
+        # 取批按 timestamp ASC 排, 而游标/区间按 id — 两者在导入库里会不同步, 于是
+        # qa_ids[0] 可能大于 qa_ids[-1], 写出 int8range 时直接报
+        # 「range lower bound must be less than or equal to range upper bound」,
+        # 每轮都失败、游标不动, 表现成「跑完了但只覆盖前 80%」。
+        first_qa_id, last_qa_id_now = _qa_range_bounds(qa_ids)
         if pool is not None:
             candidates = _recall_candidates(
                 qa_text=qa_text,
