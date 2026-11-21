@@ -1297,6 +1297,27 @@ def _build_dimensions_block(dims: dict[str, dict], _id: str) -> str:
     return "\n\n".join(sections)
 
 
+def _qa_batch_order_clause(cfg) -> str:
+    """取批的 ORDER BY: 生产按事件时间, 回放按 id。
+
+    游标是 ``qa_pairs.id`` (``WHERE id > cursor``)。生产环境 id 与 timestamp 同步
+    递增, 按时间排序能避免同 session 时间倒序撕裂, 所以默认仍按 ``timestamp``。
+
+    **回放模式必须换成 ``id ASC``**: 历史导入/按时间序重导会让 id 顺序与事件顺序
+    不同步, 此时按 timestamp 取 30 条会横跨几千个 id, ``max(id)`` 把游标一口气
+    推到后面 —— 中间几千条 QA 永远没被观察过, 却看起来"跑完了"。回放标识是
+    ``debounce_minutes <= 0`` (生产默认 8)。
+    """
+    # 只有**显式**配成 <= 0 才算回放; 缺键 / 空配置一律按生产语义走 timestamp,
+    # 否则某个没带 debounce 的调用点会静默换成 id 排序, 把生产的时间序打乱。
+    raw = (cfg or {}).get("debounce_minutes", None)
+    try:
+        replay = raw is not None and float(raw) <= 0
+    except (TypeError, ValueError):
+        replay = False
+    return "ORDER BY id ASC" if replay else "ORDER BY timestamp ASC NULLS LAST, id ASC"
+
+
 def _qa_range_bounds(qa_ids: list[int]) -> tuple[int, int]:
     """一段批次 QA 的区间界: 取 min/max, 不取列表首尾。
 
@@ -4587,9 +4608,9 @@ def _observe_worker(
                     WHERE id > %s AND answer IS NOT NULL
                       AND session_id NOT LIKE '%%.trajectory%%'
                       AND NOT (id = ANY(%s::bigint[]))
-                    ORDER BY timestamp ASC NULLS LAST, id ASC
+                    {_order_clause}
                     LIMIT %s
-                    """,
+                    """.format(_order_clause=_qa_batch_order_clause(cfg)),
                     (last_qa_id, _blocked_ids, max_qa_per_run),
                 )
                 rows = cur.fetchall()

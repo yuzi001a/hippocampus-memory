@@ -52,3 +52,15 @@ def test_worker_no_longer_uses_list_edges():
         and node.slice.value in (0, -1)
     ]
     assert not edges, "区间界不能再用 qa_ids[0] / qa_ids[-1]"
+
+def test_replay_mode_orders_the_batch_by_id():
+    """回放时取批排序必须与游标同维度, 否则一轮跨几千个 id、中间大量 QA 被跳过。"""
+    assert obs._qa_batch_order_clause({"debounce_minutes": 0}) == "ORDER BY id ASC"
+    assert obs._qa_batch_order_clause({"debounce_minutes": -1}) == "ORDER BY id ASC"
+
+
+def test_production_mode_keeps_event_time_ordering():
+    """生产保持 timestamp 排序 (同 session 时间倒序撕裂的修复不能被回放的改动带走)。"""
+    assert "timestamp" in obs._qa_batch_order_clause({"debounce_minutes": 8})
+    assert "timestamp" in obs._qa_batch_order_clause({})
+    assert "timestamp" in obs._qa_batch_order_clause({"debounce_minutes": "8"})
