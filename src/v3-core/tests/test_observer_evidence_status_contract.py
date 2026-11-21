@@ -277,3 +277,78 @@ def test_marker_audit_flags_a_whole_section_that_lost_status_words():
     assert audit["decisions_missing_status"] == 2
     assert audit["progress_missing_status"] == 1
     assert audit["missing_total"] == 3
+
+
+# ── 5. 写库前校验 (第 2 层) + 有界修复 ──────────────────────────────────────
+
+GOOD = (
+    "## 关键决策\n- [用户] 把 top_k 调到 15〔已实施〕[#1]\n"
+    "## 进行中状态\n- 下一步补向量〔计划中〕[#2]\n"
+)
+
+
+def test_validate_accepts_a_well_formed_note():
+    v = observer_mod._validate_note_payload(GOOD, qa_count=30)
+    assert v["status"] == "ok" and v["reasons"] == []
+
+
+def test_validate_treats_empty_content_as_no_output():
+    v = observer_mod._validate_note_payload("   \n", qa_count=30)
+    assert v["status"] == "empty"
+
+
+def test_validate_rejects_a_note_without_sections():
+    v = observer_mod._validate_note_payload("- 只有一行没有节[#1]", qa_count=30)
+    assert v["status"] == "invalid"
+    assert any("没有" in r for r in v["reasons"])
+
+
+def test_validate_rejects_out_of_range_anchors():
+    # 锚点指向本批不存在的 QA = 伪造来源; 必须当结构错, 不能当内容瑕疵
+    v = observer_mod._validate_note_payload("## 关键决策\n- [用户] x〔已实施〕[#31]\n", qa_count=30)
+    assert v["status"] == "invalid"
+    assert any("越界" in r for r in v["reasons"])
+
+
+def test_validate_marks_missing_markers_as_repairable():
+    content = "## 关键决策\n- [用户] 甲[#1]\n## 进行中状态\n- 乙[#2]\n"
+    v = observer_mod._validate_note_payload(content, qa_count=30)
+    assert v["status"] == "repairable"
+    assert v["audit"]["missing_total"] == 2
+
+
+def test_repair_round_returns_the_repaired_payload():
+    calls = {}
+
+    def fake_call(cfg, key, prompt, **kw):
+        calls["prompt"] = prompt
+        return {"text": '{"note": {"content": "## 关键决策\\n- [用户] 甲〔已实施〕[#1]\\n"}, "topic_updates": []}'}
+
+    fixed = observer_mod._repair_note_output(
+        fake_call, {}, "k", "BASE PROMPT", {"status": "repairable", "reasons": ["关键决策有 1 条缺状态词"]}
+    )
+    assert fixed and fixed["note"]["content"].startswith("## 关键决策")
+    # 修复提示必须携带失败原因, 且明确不许新增无依据事实
+    assert "关键决策有 1 条缺状态词" in calls["prompt"]
+    assert "不许新增" in calls["prompt"] or "不要新增" in calls["prompt"]
+
+
+def test_repair_round_is_bounded_and_returns_none_on_error():
+    def fake_call(cfg, key, prompt, **kw):
+        return {"error": "HTTP 500"}
+
+    assert observer_mod._repair_note_output(
+        fake_call, {}, "k", "P", {"status": "invalid", "reasons": ["x"]}
+    ) is None
+
+
+def test_no_output_path_advances_the_cursor(tmp_path):
+    """空输出必须是"推进游标 + 记日志", 不是原地 return。
+
+    旧实现在 content 为空时直接 return, 游标不动 —— 回放里表现为每轮都失败、
+    看起来还在跑, 实际一条也没写。这里钉住游标写入本身可用 (隔离 state 文件)。
+    """
+    state = tmp_path / "observer_state.json"
+    cfg = {"state_path": str(state)}
+    observer_mod._save_cursor(19731, cfg)
+    assert observer_mod._load_cursor(cfg) == 19731

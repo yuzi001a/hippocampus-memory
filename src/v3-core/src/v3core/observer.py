@@ -1338,6 +1338,72 @@ def _audit_note_markers(content: str) -> dict:
     }
 
 
+_ANCHOR_RE = re.compile(r"\[#(\d+)\]")
+
+
+def _validate_note_payload(content: str, qa_count: int) -> dict:
+    """写库前的结构校验 (第 2 层) — 只判定, 不改写。
+
+    对齐 Codex ``is_valid_v2_summary`` 的思路: 模型的产出必须满足一组**可机检**
+    的形状条件, 不满足就不许当合格产物往下走。这里不看内容好坏 (那由审计计数),
+    只看结构:
+
+    - 空正文 → ``empty`` (Codex 语义 ``succeeded_no_output``);
+    - 没有任何 ``## `` 节 → ``invalid``;
+    - 锚点 ``[#N]`` 的 N 越界 (不在 ``1..qa_count``) → ``invalid`` —— 越界锚点
+      指向不存在的问答, 等于伪造来源;
+    - 两节里有条目缺归属/状态词 → ``repairable`` (由修复轮处理);
+    - 其余 → ``ok``。
+    """
+    text = str(content or "")
+    if not text.strip():
+        return {"status": "empty", "reasons": ["content 为空"], "audit": {}}
+    reasons: list[str] = []
+    audit = _audit_note_markers(text)
+    if not any(line.strip().startswith("## ") for line in text.splitlines()):
+        reasons.append("没有任何 ## 节")
+    bad_anchors = sorted({int(n) for n in _ANCHOR_RE.findall(text)
+                          if not (1 <= int(n) <= max(1, int(qa_count)))})
+    if bad_anchors:
+        reasons.append(f"锚点越界: {bad_anchors[:8]}")
+    if reasons:
+        return {"status": "invalid", "reasons": reasons, "audit": audit}
+    if audit.get("missing_total"):
+        detail = []
+        if audit.get("decisions_missing_attr"):
+            detail.append(f"关键决策有 {audit['decisions_missing_attr']} 条缺归属标记")
+        if audit.get("decisions_missing_status"):
+            detail.append(f"关键决策有 {audit['decisions_missing_status']} 条缺状态词")
+        if audit.get("progress_missing_status"):
+            detail.append(f"进行中状态有 {audit['progress_missing_status']} 条缺状态词")
+        return {"status": "repairable", "reasons": detail, "audit": audit}
+    return {"status": "ok", "reasons": [], "audit": audit}
+
+
+def _repair_note_output(call_m3_fn, cfg, api_key, prompt, verdict, **call_kwargs):
+    """把校验失败的原因回灌给模型, 要求重写一次 (有界: 只跑一轮)。
+
+    Codex 遇到结构错是直接失败重排 job; 我们没有那个延迟预算, 但也不做无限重试:
+    只补一轮, 且明确「保留原有事实, 只补缺失的标记, 不许新增没有 [#N] 依据的事实」。
+    """
+    reasons = "\n".join(f"- {r}" for r in (verdict.get("reasons") or ["输出不合格"]))
+    repair_prompt = (
+        prompt
+        + "\n\n## 上一轮输出不合格, 请只做修复后重新输出\n"
+        + reasons
+        + "\n要求: 保留上一轮已写的全部事实与 `[#N]` 依据; 只补上缺失的归属标记"
+          " (`[用户]`/`[建议]`/`[共同]`) 与状态词 (〔已实施〕/〔已验证〕/〔计划中〕/"
+          "〔未完成〕/〔已推翻〕); 不要新增任何没有 QA 依据的事实; 输出格式与之前完全相同。\n"
+    )
+    try:
+        res = call_m3_fn(cfg, api_key, repair_prompt, **call_kwargs)
+    except Exception:
+        return None
+    if not isinstance(res, dict) or res.get("error"):
+        return None
+    return _parse_observer_json(res.get("text") or "")
+
+
 def _qa_batch_order_clause(cfg) -> str:
     """取批的 ORDER BY: 生产按事件时间, 回放按 id。
 
@@ -5405,12 +5471,56 @@ def _observe_worker(
             )
 
         if not note_content:
-            logger.warning("observer: 解析后 note.content 为空, 跳过写入")
+            # 空输出要有明确语义 (对齐 Codex ``succeeded_no_output``): 旧实现只
+            # return, 游标不动 —— 回放/生产会在这个位置无限重试同一批, 表现为
+            # "看起来在跑, 其实一条也没写" (2026-11-21 回放实测过一次)。
+            # - 小批 (<=5 条): 认账"本轮没有值得记录的变化", 推进游标;
+            # - 大批: 不信任 no_output, 先按自适应拆批缩小范围再看。
+            if len(rows) <= 5:
+                _save_cursor(last_qa_id_now, cfg)
+                logger.warning(
+                    "observer: 模型输出空正文 (QA %s-%s, %d 条) — 按 no_output 语义推进游标, 不写 note",
+                    first_qa_id, last_qa_id_now, len(rows),
+                )
+            else:
+                logger.warning(
+                    "observer: 模型输出空正文 (QA %s-%s, %d 条) — 大批不认 no_output, 自适应拆批",
+                    first_qa_id, last_qa_id_now, len(rows),
+                )
+                _save_adaptive_batch(max(1, len(rows) // 2), last_qa_id_now, cfg=cfg)
             try:
                 pg.close()
             except Exception:
                 pass
             return
+
+        # 第 2 层校验 (2026-11-21): 结构不合格先补一轮, 补不回来就照写 + 计数。
+        # 禁止无限重试, 也禁止代码替模型补写内容 (缺状态词就缺着, 但不能静默通过)。
+        _verdict = _validate_note_payload(note_content, len(rows))
+        if _verdict["status"] in ("repairable", "invalid"):
+            logger.warning(
+                "observer: 输出校验未通过 (%s): %s — 触发一轮修复",
+                _verdict["status"], "; ".join(_verdict["reasons"])[:200],
+            )
+            _repaired = _repair_note_output(
+                call_m3, merged, api_key, prompt, _verdict,
+                max_completion_tokens=max_completion_tokens,
+                thinking=thinking, reasoning_split=reasoning_split,
+            )
+            _repaired_content = ((_repaired or {}).get("note") or {}).get("content") or ""
+            if _repaired_content.strip():
+                _repaired_verdict = _validate_note_payload(_repaired_content, len(rows))
+                logger.warning(
+                    "observer: 修复轮 %s → %s", _verdict["status"], _repaired_verdict["status"]
+                )
+                note_content = _repaired_content.strip()
+                parsed = _repaired or parsed
+                _verdict = _repaired_verdict
+            if _verdict["status"] != "ok":
+                logger.warning(
+                    "observer: 修复后仍不合格 (%s): %s — 照写并计数, 不替模型补内容",
+                    _verdict["status"], "; ".join(_verdict["reasons"])[:200],
+                )
 
         # 归属/状态词审计 (2026-11-21): 提示词只是提醒, 遵从性不是契约。
         # 只统计 + 打日志, 不自动补写 (替模型断言状态比缺失更危险)。
