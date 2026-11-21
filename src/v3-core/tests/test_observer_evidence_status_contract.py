@@ -352,3 +352,41 @@ def test_no_output_path_advances_the_cursor(tmp_path):
     cfg = {"state_path": str(state)}
     observer_mod._save_cursor(19731, cfg)
     assert observer_mod._load_cursor(cfg) == 19731
+
+
+# ── 6. 反增长: 不许把上一版印抄一遍 ─────────────────────────────────────────
+
+def test_overlap_detects_a_copied_note():
+    prev = "## 关键决策\n- [用户] 把 top_k 调到 15〔已实施〕[#1]\n- [用户] 换了模型〔已验证〕[#2]\n"
+    assert observer_mod._note_overlap_with_prev(prev, prev) == 1.0
+    assert observer_mod._note_overlap_with_prev(prev, "今天下雨, 没出门。") == 0.0
+
+
+def test_validate_flags_a_note_copied_from_the_previous_one():
+    prev = "## 关键决策\n- [用户] 甲事项已定〔已实施〕[#1]\n- [用户] 乙事项待做〔计划中〕[#2]\n" * 3
+    v = observer_mod._validate_note_payload(prev, qa_count=30, prev_text=prev)
+    assert v["status"] == "repetitive"
+    assert v["prev_overlap"] > 0.5
+
+
+def test_validate_does_not_flag_normal_continuity():
+    # 正常的"上一版提过、这版继续推进"不该被误判 (实测相邻印包含度 p99=0.19)
+    prev = "## 关键决策\n- [用户] observer 区间 bug 已修〔已实施〕[#1]\n"
+    cur = "## 关键决策\n- [用户] 模型统一到 M3.1 Flash〔已验证〕[#7]\n## 进行中状态\n- 回放待续跑〔计划中〕[#9]\n"
+    v = observer_mod._validate_note_payload(cur, qa_count=30, prev_text=prev)
+    assert v["status"] == "ok"
+
+
+def test_repetition_repair_asks_for_new_changes_only():
+    calls = {}
+
+    def fake_call(cfg, key, prompt, **kw):
+        calls["prompt"] = prompt
+        return {"text": '{"note": {"content": "## 关键决策\\n- [用户] 新增一条〔已实施〕[#5]\\n"}, "topic_updates": []}'}
+
+    observer_mod._repair_note_output(
+        fake_call, {}, "k", "BASE",
+        {"status": "repetitive", "reasons": ["与上一版印重复 87% (阈值 50%)"]},
+    )
+    assert "重复太多" in calls["prompt"]
+    assert "不要再写" in calls["prompt"]

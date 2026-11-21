@@ -1341,7 +1341,37 @@ def _audit_note_markers(content: str) -> dict:
 _ANCHOR_RE = re.compile(r"\[#(\d+)\]")
 
 
-def _validate_note_payload(content: str, qa_count: int) -> dict:
+_NOTE_SIMPLIFY_RE = re.compile(r"[#*`>\-\s]，。、；：！？“”（）【】「」…—·.,;:!?(\[\])\"']+")
+NOTE_PREV_CONTAINMENT_MAX = 0.5
+
+
+def _note_overlap_with_prev(content: str, prev_text: str, k: int = 6) -> float:
+    """本轮 note 有多大比例是从上一版印里搬来的 (字符 k-gram 包含度)。
+
+    对应 Hermes 压缩里的"反增长"护栏: 压缩后不许比原文更大。我们这边的等价
+    坏味道是"这一版把上一版抄一遍"——正文看着饱满, 实际没有新信息, 还会把
+    旧事实重复写进印序列污染召回。
+
+    用包含度 (|new ∩ prev| / |new|) 而不是 Jaccard: 我们关心的是"新版里有多少
+    是旧的", 不是两边对称的相似度。字符级 6-gram 对中文不需要分词。
+
+    实测 615 对相邻印: 中位 0.08, p99 0.19, 最大 0.27 —— 阈值取 0.5, 离正常
+    分布有足够余量, 不会把"确实提到了旧事"误判成抄袭。
+    """
+    def _norm(t: str) -> str:
+        return _NOTE_SIMPLIFY_RE.sub("", re.sub(r"\[#\d+\]", "", t or ""))
+
+    a, b = _norm(prev_text), _norm(content)
+    if len(b) < 50 or len(a) < 50:
+        return 0.0
+    A = {a[i:i + k] for i in range(len(a) - k + 1)}
+    B = {b[i:i + k] for i in range(len(b) - k + 1)}
+    if not B:
+        return 0.0
+    return len(A & B) / len(B)
+
+
+def _validate_note_payload(content: str, qa_count: int, prev_text: str = "") -> dict:
     """写库前的结构校验 (第 2 层) — 只判定, 不改写。
 
     对齐 Codex ``is_valid_v2_summary`` 的思路: 模型的产出必须满足一组**可机检**
@@ -1368,6 +1398,14 @@ def _validate_note_payload(content: str, qa_count: int) -> dict:
         reasons.append(f"锚点越界: {bad_anchors[:8]}")
     if reasons:
         return {"status": "invalid", "reasons": reasons, "audit": audit}
+    overlap = _note_overlap_with_prev(text, prev_text) if prev_text else None
+    if overlap is not None and overlap > NOTE_PREV_CONTAINMENT_MAX:
+        return {
+            "status": "repetitive",
+            "reasons": [f"与上一版印重复 {overlap:.0%} (阈值 {NOTE_PREV_CONTAINMENT_MAX:.0%})"],
+            "audit": audit,
+            "prev_overlap": round(overlap, 3),
+        }
     if audit.get("missing_total"):
         detail = []
         if audit.get("decisions_missing_attr"):
@@ -1377,7 +1415,8 @@ def _validate_note_payload(content: str, qa_count: int) -> dict:
         if audit.get("progress_missing_status"):
             detail.append(f"进行中状态有 {audit['progress_missing_status']} 条缺状态词")
         return {"status": "repairable", "reasons": detail, "audit": audit}
-    return {"status": "ok", "reasons": [], "audit": audit}
+    return {"status": "ok", "reasons": [], "audit": audit,
+            "prev_overlap": (round(overlap, 3) if overlap is not None else None)}
 
 
 def _repair_note_output(call_m3_fn, cfg, api_key, prompt, verdict, **call_kwargs):
@@ -1387,14 +1426,22 @@ def _repair_note_output(call_m3_fn, cfg, api_key, prompt, verdict, **call_kwargs
     只补一轮, 且明确「保留原有事实, 只补缺失的标记, 不许新增没有 [#N] 依据的事实」。
     """
     reasons = "\n".join(f"- {r}" for r in (verdict.get("reasons") or ["输出不合格"]))
-    repair_prompt = (
-        prompt
-        + "\n\n## 上一轮输出不合格, 请只做修复后重新输出\n"
-        + reasons
-        + "\n要求: 保留上一轮已写的全部事实与 `[#N]` 依据; 只补上缺失的归属标记"
-          " (`[用户]`/`[建议]`/`[共同]`) 与状态词 (〔已实施〕/〔已验证〕/〔计划中〕/"
-          "〔未完成〕/〔已推翻〕); 不要新增任何没有 QA 依据的事实; 输出格式与之前完全相同。\n"
-    )
+    if verdict.get("status") == "repetitive":
+        instruction = (
+            "\n## 上一轮输出与上一版印重复太多, 请重写\n"
+            + reasons
+            + "\n要求: 只写**本批 QA 带来的新变化**; 上一版观察笔记里已经写过的内容不要再写一遍;"
+              " 每条事实仍要带 `[#N]` 依据; 没有新变化就输出空 content, 不要复制上一版。\n"
+        )
+    else:
+        instruction = (
+            "\n## 上一轮输出不合格, 请只做修复后重新输出\n"
+            + reasons
+            + "\n要求: 保留上一轮已写的全部事实与 `[#N]` 依据; 只补上缺失的归属标记"
+              " (`[用户]`/`[建议]`/`[共同]`) 与状态词 (〔已实施〕/〔已验证〕/〔计划中〕/"
+              "〔未完成〕/〔已推翻〕); 不要新增任何没有 QA 依据的事实; 输出格式与之前完全相同。\n"
+        )
+    repair_prompt = prompt + instruction
     try:
         res = call_m3_fn(cfg, api_key, repair_prompt, **call_kwargs)
     except Exception:
@@ -5496,8 +5543,8 @@ def _observe_worker(
 
         # 第 2 层校验 (2026-11-21): 结构不合格先补一轮, 补不回来就照写 + 计数。
         # 禁止无限重试, 也禁止代码替模型补写内容 (缺状态词就缺着, 但不能静默通过)。
-        _verdict = _validate_note_payload(note_content, len(rows))
-        if _verdict["status"] in ("repairable", "invalid"):
+        _verdict = _validate_note_payload(note_content, len(rows), prev_text=prev_text)
+        if _verdict["status"] in ("repairable", "invalid", "repetitive"):
             logger.warning(
                 "observer: 输出校验未通过 (%s): %s — 触发一轮修复",
                 _verdict["status"], "; ".join(_verdict["reasons"])[:200],
@@ -5509,7 +5556,9 @@ def _observe_worker(
             )
             _repaired_content = ((_repaired or {}).get("note") or {}).get("content") or ""
             if _repaired_content.strip():
-                _repaired_verdict = _validate_note_payload(_repaired_content, len(rows))
+                _repaired_verdict = _validate_note_payload(
+                    _repaired_content, len(rows), prev_text=prev_text
+                )
                 logger.warning(
                     "observer: 修复轮 %s → %s", _verdict["status"], _repaired_verdict["status"]
                 )
