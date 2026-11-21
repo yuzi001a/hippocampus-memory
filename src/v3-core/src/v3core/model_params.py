@@ -72,7 +72,9 @@ UNKNOWN_MODEL_PARAMS: dict[str, Any] = {
     "reasoning_effort": None,
 }
 
-_KNOWN_SPEC_KEYS = frozenset({"thinking", "reasoning_effort"})
+# 2026-11-22: models: 段多一个 provider 键 —— 模型 → 通道绑定。
+# 绑定后 URL / 头 / payload 字段形状由 providers: 段决定, 调用点不再判断模型名。
+_KNOWN_SPEC_KEYS = frozenset({"thinking", "reasoning_effort", "provider"})
 
 _WARNED: set[str] = set()
 _WARN_LOCK = threading.Lock()
@@ -87,6 +89,7 @@ class ModelParams:
     effort_declared: bool         # 表里是否**显式**写了 reasoning_effort 键
     declared: bool                # 是否命中 models: 表 (内置或用户声明)
     matched: str                  # 命中的前缀; 未命中为 ""
+    provider: str = ""            # models: 里绑定的通道名 (providers: 段的键)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +98,7 @@ class ModelParams:
             "effort_declared": self.effort_declared,
             "declared": self.declared,
             "matched": self.matched,
+            "provider": self.provider,
         }
 
 
@@ -188,6 +192,7 @@ def resolve(model: str, cfg: Any = None, warn: bool = True) -> ModelParams:
             effort_declared=declared_effort,
             declared=True,
             matched=best_prefix,
+            provider=str(spec.get("provider") or "").strip(),
         )
 
     if warn:
@@ -198,6 +203,7 @@ def resolve(model: str, cfg: Any = None, warn: bool = True) -> ModelParams:
         effort_declared=False,
         declared=False,
         matched="",
+        provider="",
     )
 
 

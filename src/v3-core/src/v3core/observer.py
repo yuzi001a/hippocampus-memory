@@ -53,9 +53,10 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from . import model_params
+from . import providers
 
 # v3core.__init__._safe_err 模块级函数, 同包内直接相对导入即可。
 # 避免 daemon 线程异常时 NameError → 静默死 → 整条观察者链路断。
@@ -661,6 +662,9 @@ def _load_observer_config() -> dict[str, Any]:
             # 以前缺键就静默回落调用点字面量; 现在统一在配置层解析 (models: 表见
             # v3core.model_params), 缺模型名时 call_m3 fail-loud, 不再猜一个模型。
             cfg["models"] = legacy.get("models") or {}
+            # 2026-11-22: 通道画像 — 模型 → 端点的绑定与请求形状也一起带上,
+            # call_m3 才能只按配置拼请求 (换模型/换通道不改代码)。
+            cfg["providers"] = legacy.get("providers") or {}
             _llm_sec = legacy.get("llm") or {}
             if isinstance(_llm_sec, dict):
                 if not cfg.get("model"):
@@ -837,6 +841,58 @@ def _m3_thinking_payload(model: str, thinking: str, cfg: dict[str, Any] | None =
     return model_params.thinking_field(params, thinking or "disabled")
 
 
+
+#: Observer 输出的严格结构。支持 json_schema 的通道 (responses / 部分 chat) 直接用它
+#: 锁死字段, 不再靠提示词自律; 不支持的通道 (如 MiniMax) 自动跳过, 行为不变。
+OBSERVER_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "note": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "source_qa_range": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+            },
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+        "topic_updates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["update", "create"]},
+                    "topic_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "new_facts": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["action", "title", "summary"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["note", "topic_updates"],
+    "additionalProperties": False,
+}
+
+
+_SESSION_AFFINITY: dict[str, str] = {}
+
+
+def _session_affinity_id(profile) -> str:
+    """给需要会话亲和头的通道一个稳定 id (同一进程内固定, 便于后端粘住缓存)。"""
+    key = getattr(profile, "name", "") or "default"
+    cached = _SESSION_AFFINITY.get(key)
+    if cached:
+        return cached
+    import os as _os
+    sid = f"v3core-{_os.getpid()}-{abs(hash(key)) % (10 ** 6):06d}"
+    _SESSION_AFFINITY[key] = sid
+    return sid
+
+
 def _llm_base_url_default() -> str:
     """配置层唯一的端点默认值 (与 llm.py 共用), 调用点不再各写字面量。
 
@@ -883,27 +939,32 @@ def call_m3(
     _params = model_params.resolve(model, cfg)
     _reasoning_effort = model_params.reasoning_effort_for(
         _params, cfg, default="low")
-    url = base_url.rstrip("/") + "/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": cfg.get("temperature", 0.3),
-        "max_completion_tokens": max_completion_tokens,
-        "reasoning_split": reasoning_split,
-    }
+    # 2026-11-22: 通道画像驱动 —— URL / 头 / payload 形状由 config 的 providers: 段决定,
+    # 这里只负责挑值。换模型 = 改配置; 换通道 = 改配置; 只有新传输协议才动代码。
+    profile = providers.resolve_profile(model, cfg, api_key=api_key, base_url=base_url)
+    headers = providers.build_headers(
+        profile, api_key,
+        session_id=str(cfg.get("session_id") or _session_affinity_id(profile)),
+        extra=cfg.get("extra_headers") if isinstance(cfg.get("extra_headers"), Mapping) else None,
+    )
+    # 通道能强制 schema 就用它锁结构 (这才是「不再依赖模型自律」的正路);
+    # 不能强制的通道 (如 MiniMax) 跳过, 回落到本地校验 + 有界修复。
+    _schema = None
+    if providers.supports_schema(profile) and cfg.get("structured_output", True) is not False:
+        _schema = (cfg.get("response_schema") if isinstance(cfg.get("response_schema"), Mapping)
+                   else OBSERVER_RESPONSE_SCHEMA)
     _thinking_field = _m3_thinking_payload(model, thinking, cfg)
-    if _thinking_field is not None:
-        payload["thinking"] = _thinking_field
-    else:
-        # 2026-11-19: 省略 thinking 的族 (M3.1) 默认走 adaptive thinking —
-        # 必须显式压 effort, 否则长 prompt 的思考会把输出预算吃光, 表现为
-        # "每轮静默超时 / JSON 未闭合"。cfg 可覆盖, 表里写 null/omit 表示显式不发。
-        if _reasoning_effort:
-            payload["reasoning_effort"] = _reasoning_effort
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    payload = providers.build_payload(
+        profile, model, prompt,
+        max_tokens=max_completion_tokens,
+        temperature=cfg.get("temperature", 0.3),
+        schema=_schema,
+        schema_name=str(cfg.get("response_schema_name") or "observer"),
+        reasoning_effort=_reasoning_effort,
+        thinking=_thinking_field,
+        reasoning_split=reasoning_split,
+    )
+    url = profile.url()
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
     def _post(body: dict[str, Any]):
@@ -943,10 +1004,11 @@ def call_m3(
         data = resp.json()
     except Exception as e:
         return {"error": f"响应非 JSON: {_safe_err(e)[:200]}", "latency": latency}
-    msg = (data.get("choices") or [{}])[0].get("message") or {}
-    text = msg.get("content", "") or ""
-    reasoning = msg.get("reasoning_content", "") or ""
-    usage = data.get("usage") or {}
+    # 2026-11-22: 三家响应结构统一折成 text/reasoning/usage (chat / responses / messages)
+    _parsed = providers.parse_response(profile, data)
+    text = _parsed["text"]
+    reasoning = _parsed["reasoning"]
+    usage = _parsed["usage"]
     return {
         "text": text,
         "reasoning": reasoning,
