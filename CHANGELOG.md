@@ -7,6 +7,26 @@
 
 ---
 
+## [4.0.8] - 2026-11-22
+
+### 多模型适配（换模型/换通道不再改代码）
+
+- 新增 `providers.py`：通道画像（`chat_completions` / `responses` / `anthropic_messages`），
+  按 `config.yaml` 的 `providers:` 段解析端点、鉴权头、输出上限字段名、支持的能力，
+  并把三家响应统一折成 `{text, reasoning, usage, finish_reason}`。
+- `models:` 段新增 `provider` 绑定：换模型只改配置两行；未声明的端点保持历史形状并给一次 WARNING。
+- `observer.call_m3` 改走画像；通道能强制 `json_schema` 时自动带 `OBSERVER_RESPONSE_SCHEMA`，
+  不支持的通道（如 MiniMax）行为完全不变。
+- 真实 canary（OpenCode Go `/responses` + strict schema，9 条真实 QA）：70.2s，
+  印 3,173 字，归属/状态零缺失，3 个主题动作。
+
+### 调研结论（写入文档，避免再踩）
+
+- DeepSeek 官方 `chat/completions` 的 `response_format: json_schema` 返回 400；
+  `json_object` 可解析但字段不强制。
+- DeepSeek 官方与 OpenCode Go 的 `/responses` + `text.format.json_schema` 均**真正强制**；
+  OpenCode Go 的 `chat/completions` 也强制。
+
 ## [4.0.7] - 2026-11-21
 
 ### 修复：回放模式取批排序与游标同维度
