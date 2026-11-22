@@ -7,6 +7,21 @@
 
 ---
 
+## [4.2.1] - 2026-11-23
+
+### 修：切到 opencode-go 后 E1 报「不支持的 LLM provider」
+
+`llm.py` 原本只有 minimax / openai 两条硬编码分支，配置换成 opencode-go 后
+E1 合成、抽取、摘要这些不走观察者画像的调用直接失败。
+
+现在 OpenCode 家族（含自定义同族名字）统一走通道画像：URL、会话头、UA、
+输出字段名按画像给，responses 模式把多轮历史折进 `input`、system 走 `instructions`，
+chat 模式保留原生 messages。其余 provider 行为不变。
+
+验证：`tests/test_llm_opencode.py` 3 条 + 相关 364 passed / 5 skipped。
+
+---
+
 ## [4.2.0] - 2026-11-23
 
 ### OpenCode Go / Zen 适配层

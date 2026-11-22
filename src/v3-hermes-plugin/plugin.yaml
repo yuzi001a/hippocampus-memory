@@ -1,5 +1,5 @@
 name: deep_memory_v3
-version: 4.2.0
+version: 4.2.1
 description: "v3-core Hermes 插件 — 13 工具 + 6 hooks + prefetch + ingest"
 kind: exclusive
 provides_tools:
