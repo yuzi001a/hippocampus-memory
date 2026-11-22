@@ -7,6 +7,28 @@
 
 ---
 
+## [4.1.0] - 2026-11-22
+
+### 代理身份（记忆插件作为 agent 向 provider 自报身份）
+
+OpenCode Go 的文档要求客户端「每个会话发一个稳定的 session id」并「用自己的
+User-Agent，而不是通用 SDK 或 HTTP 库的名字」。历史实现两条都不合规，且都不报错：
+
+- `_session_affinity_id` 把 pid 写进会话 id → 进程重启即「新会话」，后端亲和与提示词缓存全丢；
+- 请求从未设置 User-Agent，出去是 `python-requests/x.y`。
+
+改动：
+
+- 新增 `agent_identity`：安装首次运行生成安装 id 落盘（`agent_session.json`），
+  会话 id = 安装 id + 当天日期 —— 同日恒定（重启/升级不变），跨天换新；
+- `providers`：`ProviderProfile` 增加 `user_agent` / `client_headers`，`build_headers` 必发 UA，
+  默认 `hippocampus-memory/<version>`，可由 `providers.<name>.user_agent` 覆盖；
+- `observer`：会话 id 改走 `agent_identity`，不再含进程号；`observer.session_id` 可显式钉死。
+
+未改提示词、模型、数据结构。
+
+---
+
 ## [4.0.9] - 2026-11-22
 
 ### 有界重试（长请求被掐断不再整批作废）
