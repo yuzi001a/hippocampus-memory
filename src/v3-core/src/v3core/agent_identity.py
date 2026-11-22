@@ -15,8 +15,10 @@ OpenCode Go 的要求写得很直白（docs/console/go）：客户端要「用�
 
 现在的规则
 ----------
-1. 会话 id 与**安装**绑定：首次调用在 profile 目录写 ``agent_session.json``，
-   之后每次都读它。进程重启、升级、清缓存都不变，除非显式删掉这个文件。
+1. 会话 id **一天一个**：安装首次运行生成一个安装 id 落盘（``agent_session.json``），
+   会话 id = 安装 id + 当天日期。同一天内进程重启、升级都不变；跨天自动换新。
+   理由：真实 agent 的一个会话就是"一段活"，通常一天；永久一个不像会话，
+   每批换一个又天天重赌路由、天天冷缓存。
 2. ``config.yaml`` 可显式覆盖：``observer.session_id``（固定值）或
    ``agent.session_id``（全局），优先级最高。
 3. User-Agent 默认 ``hippocampus-memory/<version>``，可由
@@ -28,6 +30,8 @@ OpenCode Go 的要求写得很直白（docs/console/go）：客户端要「用�
 """
 from __future__ import annotations
 
+import datetime as _dt
+import hashlib
 import json
 import logging
 import os
@@ -106,6 +110,15 @@ def stable_session_id(profile_dir: str | os.PathLike[str] | None = None) -> str:
             return sid
 
 
+def daily_session_id(profile_dir: str | os.PathLike[str] | None = None,
+                     today: _dt.date | None = None) -> str:
+    """会话 id = 安装 id + 日期；同一天内恒定，跨天自动换。"""
+    install = stable_session_id(profile_dir)
+    day = (today or _dt.date.today()).isoformat()
+    digest = hashlib.sha256(f"{install}:{day}".encode("utf-8")).hexdigest()[:32]
+    return digest
+
+
 def resolve_session_id(cfg=None, profile_dir: str | os.PathLike[str] | None = None) -> str:
     """优先级：observer.session_id → agent.session_id → 安装级稳定 id。"""
     for section in (cfg, getattr(cfg, "agent", None)):
@@ -117,7 +130,7 @@ def resolve_session_id(cfg=None, profile_dir: str | os.PathLike[str] | None = No
             explicit = None
         if explicit:
             return str(explicit).strip()
-    return stable_session_id(profile_dir)
+    return daily_session_id(profile_dir)
 
 
 def resolve_user_agent(cfg=None) -> str:

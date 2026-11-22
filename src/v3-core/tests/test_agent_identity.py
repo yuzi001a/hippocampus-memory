@@ -17,7 +17,7 @@ from v3core import agent_identity, providers
 
 
 # ── 1. 安装级会话 id ────────────────────────────────────────────────────────
-def test_session_id_is_stable_across_calls_and_processes(tmp_path):
+def test_install_id_is_stable_across_calls_and_processes(tmp_path):
     first = agent_identity.stable_session_id(tmp_path)
     agent_identity._CACHE.clear()          # 模拟进程重启
     second = agent_identity.stable_session_id(tmp_path)
@@ -26,13 +26,25 @@ def test_session_id_is_stable_across_calls_and_processes(tmp_path):
     assert stored["session_id"] == first
 
 
+def test_session_rotates_daily_but_is_stable_within_a_day(tmp_path):
+    import datetime as dt
+
+    agent_identity._CACHE.clear()
+    day1 = dt.date(2026, 11, 22)
+    a = agent_identity.daily_session_id(tmp_path, today=day1)
+    b = agent_identity.daily_session_id(tmp_path, today=day1)
+    c = agent_identity.daily_session_id(tmp_path, today=day1 + dt.timedelta(days=1))
+    assert a == b, "同一天内必须恒定（重启不换）"
+    assert a != c, "跨天必须换新会话"
+
+
 def test_session_id_differs_per_install(tmp_path):
     a = agent_identity.stable_session_id(tmp_path / "install-a")
     b = agent_identity.stable_session_id(tmp_path / "install-b")
     assert a != b
 
 
-def test_session_id_ignores_process_id(tmp_path):
+def test_install_id_ignores_process_id(tmp_path):
     """回归：历史 id 形如 v3core-<pid>-<hash>，重启就变。"""
     import os
 
@@ -54,10 +66,10 @@ def test_explicit_session_id_wins(tmp_path):
     assert agent_identity.resolve_session_id({"session_id": "pinned-1"}, tmp_path) == "pinned-1"
 
 
-def test_falls_back_to_install_id(tmp_path):
+def test_falls_back_to_daily_session_id(tmp_path):
     agent_identity._CACHE.clear()
     resolved = agent_identity.resolve_session_id({}, tmp_path)
-    assert resolved == agent_identity.stable_session_id(tmp_path)
+    assert resolved == agent_identity.daily_session_id(tmp_path)
 
 
 # ── 3. UA / 身份头 ────────────────────────────────────────────────────────
