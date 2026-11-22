@@ -221,6 +221,52 @@ def resolve_profile(model: str, cfg: Any, *, api_key: str = "", base_url: str = 
     )
 
 
+# ── 瞬态失败判定与退避 ──────────────────────────────────────────────────────
+#: 值得重试的 HTTP 状态: 限流、上游抖动、网关超时。4xx 里除 408/425/429 外都不重试
+#: —— 那是配置/鉴权/结构问题, 重试只会把错误拖长。
+RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+#: 值得重试的异常类型名 (requests 家族)。长请求跑到一半被掐断就是这个样子:
+#: "HTTPSConnectionPool(host=..., port=443): Max retries exceeded"。
+RETRYABLE_EXC_NAMES = frozenset({
+    "ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout",
+    "ChunkedEncodingError", "ProtocolError", "SSLError", "IncompleteRead",
+})
+
+
+def is_retryable_status(code: int | None) -> bool:
+    return int(code or 0) in RETRYABLE_STATUS
+
+
+def is_retryable_exception(exc: BaseException) -> bool:
+    """按异常链上的类型名判断 —— 不依赖调用方提前 import requests。"""
+    seen = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__ in RETRYABLE_EXC_NAMES:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def retry_delay(attempt: int, base: float = 2.0, response: Any = None, cap: float = 30.0) -> float:
+    """第 attempt 次(0 起)重试前睡多久。服务端给了 Retry-After 就听它的。"""
+    if response is not None:
+        try:
+            raw = getattr(response, "headers", {}).get("Retry-After")
+            if raw:
+                secs = float(str(raw).strip())
+                return max(0.0, min(secs, cap))
+        except (TypeError, ValueError):
+            pass
+    try:
+        delay = float(base) * (2 ** max(0, attempt))
+    except (TypeError, ValueError):
+        delay = 2.0
+    return max(0.0, min(delay, cap))
+
+
 # ── 请求构造 ────────────────────────────────────────────────────────────────
 def build_headers(
     profile: ProviderProfile,
@@ -360,6 +406,10 @@ def usage_tokens(usage: Mapping[str, Any]) -> tuple[int, int]:
 
 __all__ = [
     "API_ANTHROPIC",
+    "RETRYABLE_STATUS",
+    "is_retryable_exception",
+    "is_retryable_status",
+    "retry_delay",
     "API_CHAT",
     "API_RESPONSES",
     "VALID_API_MODES",

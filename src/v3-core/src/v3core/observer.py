@@ -970,12 +970,39 @@ def call_m3(
     def _post(body: dict[str, Any]):
         return requests.post(url, json=body, headers=headers, timeout=timeout, proxies=proxies)
 
+    # 2026-11-22: 有界重试。夜里实测长请求会被掐断 (Max retries exceeded / 5xx / 429),
+    # 原来一次失败就整批作废, 要等下一个观察周期。这里只对瞬态失败重试,
+    # 配置/鉴权/结构类 4xx 一次都不重试 —— 重试它们只会把错误拖长。
+    _attempts = max(1, int(cfg.get("retry_attempts", 3) or 1))
+    _backoff = float(cfg.get("retry_backoff_s", 2.0) or 0.0)
     t0 = time.time()
+    resp = None
     try:
-        resp = _post(payload)
+        for _i in range(_attempts):
+            try:
+                resp = _post(payload)
+            except Exception as e:
+                if _i + 1 < _attempts and providers.is_retryable_exception(e):
+                    _delay = providers.retry_delay(_i, _backoff)
+                    logger.warning(
+                        "observer: 传输失败, 重试 %d/%d (%.1fs 后): %s",
+                        _i + 1, _attempts, _delay, _safe_err(e)[:120],
+                    )
+                    time.sleep(_delay)
+                    continue
+                return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
+            if providers.is_retryable_status(resp.status_code) and _i + 1 < _attempts:
+                _delay = providers.retry_delay(_i, _backoff, resp)
+                logger.warning(
+                    "observer: HTTP %s, 重试 %d/%d (%.1fs 后): %s",
+                    resp.status_code, _i + 1, _attempts, _delay, (resp.text or "")[:100],
+                )
+                time.sleep(_delay)
+                continue
+            break
         # 服务端口径再次变化时的一次有界重试（与 llm.LLMClient 的 fallback 同义）：
         # 只有明确要求 adaptive thinking 时才去掉该字段重发，不重试其他 4xx。
-        if (resp.status_code == 400
+        if (resp is not None and resp.status_code == 400
                 and "requires adaptive thinking" in (resp.text or "").lower()
                 and "thinking" in payload):
             logger.warning(
