@@ -7,6 +7,27 @@
 
 ---
 
+## [4.2.0] - 2026-11-23
+
+### OpenCode Go / Zen 适配层
+
+把这家中转自己的规矩集中到一处（`providers_opencode.py`），调用点不再判断模型名：
+
+- **按模型选传输**：`gpt-*`/`grok-*`/`muse-spark` 走 `/responses`，
+  `claude-*`/`minimax-*`/`qwen*`/`union-alpha` 走 Anthropic 线，其余走 `/chat/completions`；
+- **端点与传输成对**：官方主机上路径段按 family 纠正（`/zen` vs `/zen/go`），anthropic 线去掉 `/v1`，
+  其余补 `/v1`；自建代理端点一个字不改；
+- **会话头自动补**：`x-opencode-session` 缺失即 400，现在画像里自动带；
+- **模型 id 归一**：`opencode-go/xxx` 前缀在发请求前剥掉；
+- **错误翻译**：400 MissingSessionID / 401 模型不支持 / 403 免费档 都翻成人话再报。
+
+配置上 `providers.<name>` 可以留空（family 名或 opencode.ai 端点即可识别），
+显式写的 `api_mode` / `base_url` / `session_header` 一律优先。
+
+DEFAULT_SUPPORTS 按传输给出（responses 支持 json_schema 等），显式 `supports:` 覆盖。
+
+---
+
 ## [4.1.0] - 2026-11-22
 
 ### 代理身份（记忆插件作为 agent 向 provider 自报身份）

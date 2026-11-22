@@ -209,9 +209,22 @@ def resolve_profile(model: str, cfg: Any, *, api_key: str = "", base_url: str = 
     if provider_name:
         raw = _as_mapping(providers.get(provider_name))
         if not raw:
-            raise RuntimeError(
-                f"模型 {model!r} 绑定到 provider {provider_name!r}, 但 providers: 段里没有这一项"
-            )
+            # OpenCode family 的画像可以全自动（端点/传输/会话头都由适配层补），
+            # 所以空表是合法的；其他通道空表仍然是配置错误。
+            from . import providers_opencode as _oc
+
+            if _oc.family_of(provider_name) is None:
+                raise RuntimeError(
+                    f"模型 {model!r} 绑定到 provider {provider_name!r}, 但 providers: 段里没有这一项"
+                )
+        # OpenCode Zen/Go 有自己的规矩（会话头、按模型的传输、端点与传输成对）：
+        # 缺省值在这里补齐，显式配置优先。
+        try:
+            from . import providers_opencode
+
+            raw = providers_opencode.apply_defaults(provider_name, raw, model)
+        except Exception as _exc:  # 补默认值失败不该拖垮调用
+            logger.warning("providers: opencode 适配层补默认值失败 (%s)", _exc)
         profile = build_profile(provider_name, raw, api_key=api_key)
         # 端点允许调用点覆盖（同一通道挂不同入口时用），其余形状仍以画像为准
         if base_url:
@@ -323,6 +336,12 @@ def build_payload(
     reasoning_split: bool = False,
 ) -> dict[str, Any]:
     """按画像拼请求体；画像说不支持的字段一律不发。"""
+    try:
+        from . import providers_opencode
+
+        model = providers_opencode.normalize_model_id(profile.name, model, profile.base_url)
+    except Exception:
+        pass
     payload: dict[str, Any] = {"model": model}
     if profile.api_mode == API_RESPONSES:
         payload["input"] = prompt

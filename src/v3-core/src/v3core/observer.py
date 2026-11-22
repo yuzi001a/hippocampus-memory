@@ -881,6 +881,16 @@ OBSERVER_RESPONSE_SCHEMA: dict[str, Any] = {
 _SESSION_AFFINITY: dict[str, str] = {}
 
 
+def _explain_http_error(status: int, body: str) -> str:
+    """把通道的典型错误翻成人话；认不出就保留原文摘要。"""
+    try:
+        from . import providers_opencode
+
+        return providers_opencode.explain_error(status, body)
+    except Exception:
+        return str(body or "")[:200]
+
+
 def _agent_session_id(cfg) -> str:
     """会话 id：配置显式指定优先，否则用与安装绑定的稳定值。
 
@@ -1039,7 +1049,7 @@ def call_m3(
         return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
     if resp.status_code != 200:
         return {
-            "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
+            "error": f"HTTP {resp.status_code}: {_explain_http_error(resp.status_code, resp.text)}",
             "latency": latency,
         }
     try:
