@@ -881,6 +881,20 @@ OBSERVER_RESPONSE_SCHEMA: dict[str, Any] = {
 _SESSION_AFFINITY: dict[str, str] = {}
 
 
+def _agent_session_id(cfg) -> str:
+    """会话 id：配置显式指定优先，否则用与安装绑定的稳定值。
+
+    历史实现把 pid 写进 id，进程一重启就变成「新会话」，后端亲和与提示词缓存全丢。
+    这里改成落盘生成一次的值，重启/升级不变。
+    """
+    try:
+        from .agent_identity import resolve_session_id
+
+        return resolve_session_id(cfg)
+    except Exception:
+        return str((cfg or {}).get("session_id") or "v3core")
+
+
 def _session_affinity_id(profile) -> str:
     """给需要会话亲和头的通道一个稳定 id (同一进程内固定, 便于后端粘住缓存)。"""
     key = getattr(profile, "name", "") or "default"
@@ -944,7 +958,8 @@ def call_m3(
     profile = providers.resolve_profile(model, cfg, api_key=api_key, base_url=base_url)
     headers = providers.build_headers(
         profile, api_key,
-        session_id=str(cfg.get("session_id") or _session_affinity_id(profile)),
+        # 安装级稳定会话 id：进程重启不变（Go 按会话粘后端 + 复用提示词缓存）
+        session_id=_agent_session_id(cfg),
         extra=cfg.get("extra_headers") if isinstance(cfg.get("extra_headers"), Mapping) else None,
     )
     # 通道能强制 schema 就用它锁结构 (这才是「不再依赖模型自律」的正路);

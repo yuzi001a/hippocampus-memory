@@ -58,6 +58,8 @@ class ProviderProfile:
     max_tokens_field: str = "max_tokens"
     supports: frozenset[str] = frozenset(_DEFAULT_SUPPORTS)
     session_header: str | None = None
+    user_agent: str | None = None
+    client_headers: dict[str, str] = field(default_factory=dict)
     api_key_header: str = "Authorization"
     api_key_prefix: str = "Bearer "
     anthropic_version: str | None = None
@@ -174,6 +176,8 @@ def build_profile(name: str, spec: Mapping[str, Any], *, api_key: str = "") -> P
         max_tokens_field=str(spec.get("max_tokens_field") or default_field),
         supports=supports_fs,
         session_header=(str(spec["session_header"]).strip() if spec.get("session_header") else None),
+        user_agent=(str(spec["user_agent"]).strip() if spec.get("user_agent") else None),
+        client_headers={str(k): str(v) for k, v in _as_mapping(spec.get("client_headers")).items()},
         api_key_header=str(spec.get("api_key_header") or ("x-api-key" if api_mode == API_ANTHROPIC else "Authorization")),
         api_key_prefix="" if api_mode == API_ANTHROPIC else str(spec.get("api_key_prefix") or "Bearer "),
         anthropic_version=(str(spec.get("anthropic_version") or "2023-06-01") if api_mode == API_ANTHROPIC else None),
@@ -276,6 +280,14 @@ def build_headers(
     extra: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     headers: dict[str, str] = {"Content-Type": "application/json"}
+    # 身份：通用库名（python-requests）会被中转当成匿名客户端，官方要求自报身份
+    try:
+        from .agent_identity import default_user_agent
+        _ua_default = default_user_agent()
+    except Exception:
+        _ua_default = ""
+    headers["User-Agent"] = profile.user_agent or _ua_default or "v3core"
+    headers.update({str(k): str(v) for k, v in profile.client_headers.items()})
     if profile.api_key_header and api_key:
         headers[profile.api_key_header] = f"{profile.api_key_prefix}{api_key}"
     headers.update({str(k): str(v) for k, v in profile.headers.items()})

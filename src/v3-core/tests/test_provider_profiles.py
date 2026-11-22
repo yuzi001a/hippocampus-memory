@@ -207,7 +207,10 @@ def test_call_m3_sends_responses_request_with_schema(monkeypatch):
     assert sent["url"].endswith("/responses")
     assert sent["body"]["max_output_tokens"] == 2048
     assert sent["body"]["text"]["format"]["schema"]["properties"]["note"]
-    assert sent["headers"]["x-opencode-session"].startswith("v3core-")
+    # 会话 id 必须存在且是安装级稳定值（历史实现带进程号，重启就变 —— 已改）
+    sid = sent["headers"]["x-opencode-session"]
+    assert sid and not sid.startswith("v3core-")
+    assert sent["headers"]["User-Agent"].startswith("hippocampus-memory/")
     assert json.loads(out["text"])["note"]["content"] == "印"
 
 
