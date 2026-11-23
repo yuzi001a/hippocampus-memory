@@ -1065,8 +1065,89 @@ def call_m3(
         "text": text,
         "reasoning": reasoning,
         "usage": usage,
+        "finish_reason": _parsed.get("finish_reason", ""),
         "latency": latency,
     }
+
+
+# ────────────────────────────────────────────────────────────
+# 退化检测与输入消毒 (2026-11-23)
+# ────────────────────────────────────────────────────────────
+# 实测事实 (2026-11-23, Y400, deepseek-v4.1-flash):
+#   · 同一批输入会"提前收尾": 声明关思考却先烧 700–1300 思考 token, 然后自己吐
+#     结束符 (finish=stop / status=completed), 正文只剩 98–720 字, JSON 半截。
+#   · 同 prompt 重发对它无效 (QA 2911 五发五断), 换输入才有效。
+#   · 触发物是输入里的 <tag 形态 (最典型 ``<think>``); 但**不是唯一** —— 用户观察
+#     到官方端点也会偶发, 自部署通道更严重, 零宽扰动实测 1/2 仍断。
+# 所以这里不赌"清掉某个标签就安全", 只做两件事:
+#   ① 判坏: 把退化识别出来 (证据可归类, 失败账不再是清一色 json_parse)
+#   ② 换变量重试: 同 prompt → 消毒 prompt → fallback 模型 → 拆批
+# 判坏只看形状, 内容质量仍归 _validate_note_payload 管。
+
+NOTE_DEGENERATE_MIN_CHARS = 900
+_TAG_LIKE_RE = re.compile(r"<(?=[A-Za-z/!?])")
+
+
+def _looks_like_loop(text: str, window: int = 240) -> bool:
+    """粗检测"流口水": 末尾一段原文在全文里又出现过。
+
+    真实形态是**逐字重复**同一段 (模型陷在同一句话里), 所以判据直接取末尾窗口
+    在全文里的出现次数, 不猜周期。两份窗口 (240/120) 兜住不同长度的重复单元;
+    只在长度够长时才判, 避免短输出 (本来就该被 early_stop 判据抓住) 误伤。
+    """
+    body = str(text or "")
+    if len(body) < max(640, window * 3):
+        return False
+    for w in (window, max(120, window // 2)):
+        tail = body[-w:].strip()
+        if tail and body.count(tail) >= 2:
+            return True
+    return False
+
+
+def _degeneration_reason(result: dict[str, Any]) -> str | None:
+    """一次 LLM 返回是不是退化。返回原因码, 正常返回 None。
+
+    判据 (任一命中即坏):
+      · 正文不到 NOTE_DEGENERATE_MIN_CHARS 却已 finish —— 提示词要求 1500-8000 字,
+        几百字收尾必然是半截;
+      · 尾部出现重复窗口 —— 循环型退化。
+    思考 token 数只作为证据记录 (``_degeneration_evidence``), 不作硬门禁 ——
+    有的通道本来就允许思考, 拿它当门禁会把正常输出判死。
+    """
+    if not isinstance(result, dict) or result.get("error"):
+        return None
+    text = str(result.get("text") or "")
+    stripped = text.strip()
+    if not stripped:
+        return "empty_text"
+    if len(stripped) < NOTE_DEGENERATE_MIN_CHARS:
+        return f"early_stop_text={len(stripped)}"
+    if _looks_like_loop(stripped):
+        return "repetition_loop"
+    return None
+
+
+def _degeneration_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    """退化证据: 判坏时随失败段一起记账, 供后续归因 (不参与判定)。"""
+    usage = (result or {}).get("usage") or {}
+    details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+    return {
+        "chars": len(str((result or {}).get("text") or "")),
+        "reasoning_tokens": int(details.get("reasoning_tokens") or 0),
+        "reasoning_chars": len(str((result or {}).get("reasoning") or "")),
+        "finish": str((result or {}).get("finish_reason") or ""),
+    }
+
+
+def _sanitize_special_tokens(text: str) -> tuple[str, int]:
+    """把 ``<tag`` 形态的尖括号垫开 (``<tag`` → ``< tag``), 返回 (新文本, 改动数)。
+
+    只在**重试**时用, 首跑永远用原文 —— 动输入就动了证据。
+    选空格不选零宽: 实测零宽版本对 2911 是 1/2 (不可靠), 空格版本 2/2。
+    """
+    new_text, n = _TAG_LIKE_RE.subn("< ", str(text or ""))
+    return new_text, int(n)
 
 
 # ────────────────────────────────────────────────────────────
@@ -5451,6 +5532,14 @@ def _observe_worker(
         # 7. 解析双输出 JSON
         parsed = _parse_observer_json(text)
         if not parsed:
+            # 2026-11-23: 先归类再处置 —— 失败账不能清一色 json_parse,
+            # 提前收尾 / 循环 / 真格式漂移的处置路径不一样。
+            _deg_reason = _degeneration_reason(result)
+            if _deg_reason:
+                logger.warning(
+                    "observer: 判定为退化输出 (%s) %s — 先同 prompt 重试, 无效再换输入",
+                    _deg_reason, _degeneration_evidence(result),
+                )
             # 恢复 primary 自身重试 (铁律: M3 偶发脏 JSON 必须重试≥3次, 不能只靠 fallback) —
             # 8/20 stage-2 把重试整段换成 fallback 一次, 导致 fallback key 失效时直接卡死整批。
             # primary 同 prompt 重发 1-3 次 (默认 2); 成功即走正常流程。
@@ -5489,6 +5578,48 @@ def _observe_worker(
                         "observer: primary 重试失败: %s",
                         str(_retry_result["error"])[:120],
                     )
+            # 2026-11-23: 同 prompt 重发救不了"内容确定性触发"的退化 (QA 2911 五发五断),
+            # 必须换输入。这一级只动输入形状、不动内容语义: 把 <tag 形态的尖括号
+            # 垫开, 断掉触发链路。实测 pos/neg 对照: 空格版 2/2 通过, 零宽版 1/2。
+            if not parsed:
+                _san_prompt, _san_hits = _sanitize_special_tokens(prompt)
+                _san_retries = max(0, int(cfg.get("json_parse_sanitize_retries", 2) or 0))
+                if _san_hits and _san_retries:
+                    logger.warning(
+                        "observer: 换消毒 prompt 重发 (改动 %d 处尖括号, 最多 %d 次)",
+                        _san_hits, _san_retries,
+                    )
+                    for _attempt in range(1, _san_retries + 1):
+                        try:
+                            _san_result = call_m3(
+                                merged, api_key, _san_prompt,
+                                max_completion_tokens=max_completion_tokens,
+                                thinking=thinking, reasoning_split=reasoning_split,
+                            )
+                        except Exception as _e_san:
+                            logger.warning(
+                                "observer: 消毒重发异常: %s", _safe_err(_e_san)[:120],
+                            )
+                            continue
+                        if "error" in _san_result:
+                            logger.warning(
+                                "observer: 消毒重发失败: %s",
+                                str(_san_result["error"])[:120],
+                            )
+                            continue
+                        _san_text = _san_result.get("text", "") or ""
+                        _parsed_san = _parse_observer_json(_san_text)
+                        if _parsed_san:
+                            parsed = _parsed_san
+                            logger.info(
+                                "observer: 消毒重发成功 (第 %d 次, %d 字, 改动 %d 处)",
+                                _attempt, len(_san_text), _san_hits,
+                            )
+                            break
+                        logger.warning(
+                            "observer: 消毒重发第 %d 次仍不可解析 (%d 字, %s)",
+                            _attempt, len(_san_text), _degeneration_reason(_san_result),
+                        )
             # v4 (2026-08-20) stage-2 修复: JSON 解析失败时, 在尝试持久化失败段
             # 之前先走一次 fallback_llm (LLM 层而非 embedding 层) — 因为当前 primary
             # 模型可能只是该次输出格式漂了, 一个不同模型常常能稳定产出可解析 JSON。
@@ -5550,6 +5681,7 @@ def _observe_worker(
                     error_class="json_parse",
                     reason=(
                         f"json_parse_failed"
+                        f"{'_deg=' + _deg_reason if _deg_reason else ''}"
                         f"{'_fb_after_fallback=' + _json_secondary_fb_model if _json_secondary_fb_model else '_no_fallback'}"
                     ),
                     batch_size=len(rows),
