@@ -67,3 +67,15 @@ def test_degeneration_evidence_shape():
         "reasoning_chars": 2,
         "finish": "stop",
     }
+
+
+def test_degeneration_skips_same_prompt_retry():
+    """用户定调: 一旦判定退化, 不原样重试, 直接换输入。"""
+    assert observer._plan_parse_retries({}, "early_stop_text=459") == 0
+    assert observer._plan_parse_retries({"json_parse_primary_retries": 3}, "repetition_loop") == 0
+
+
+def test_format_drift_keeps_same_prompt_retry():
+    """输出够长但 JSON 坏了 = 格式漂移, 原样重试仍然有意义。"""
+    assert observer._plan_parse_retries({}, None) == 2
+    assert observer._plan_parse_retries({"json_parse_primary_retries": 3}, None) == 3

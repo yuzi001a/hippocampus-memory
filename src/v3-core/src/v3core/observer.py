@@ -1140,6 +1140,18 @@ def _degeneration_evidence(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _plan_parse_retries(cfg: dict[str, Any], deg_reason: str | None) -> int:
+    """JSON 解析失败后, 还要不要"原样再发一次"。
+
+    2026-11-23 用户定调: **判定为退化就不原样重试**。实测 2911 同 prompt 三发三断
+    (459/720/487 字, 每次烧 1,000 左右思考 token), 原样重发只是把同一堵墙撞三次。
+    退化直接换输入 (消毒 prompt); 只有"格式漂移"(输出够长但 JSON 坏了) 才值得原样重试。
+    """
+    if deg_reason:
+        return 0
+    return max(1, int(cfg.get("json_parse_primary_retries", 2) or 2))
+
+
 def _sanitize_special_tokens(text: str) -> tuple[str, int]:
     """把 ``<tag`` 形态的尖括号垫开 (``<tag`` → ``< tag``), 返回 (新文本, 改动数)。
 
@@ -5543,7 +5555,12 @@ def _observe_worker(
             # 恢复 primary 自身重试 (铁律: M3 偶发脏 JSON 必须重试≥3次, 不能只靠 fallback) —
             # 8/20 stage-2 把重试整段换成 fallback 一次, 导致 fallback key 失效时直接卡死整批。
             # primary 同 prompt 重发 1-3 次 (默认 2); 成功即走正常流程。
-            _primary_retries = max(1, int(cfg.get("json_parse_primary_retries", 2) or 2))
+            _primary_retries = _plan_parse_retries(cfg, _deg_reason)
+            if _primary_retries == 0:
+                logger.warning(
+                    "observer: 判定退化 (%s) — 跳过原样重试, 直接换消毒输入",
+                    _deg_reason,
+                )
             for _attempt in range(1, _primary_retries + 1):
                 logger.warning(
                     "observer: JSON 解析失败, primary 重试 %d/%d (fallback 未启用或失败时仍可救回)",
