@@ -79,3 +79,26 @@ def test_format_drift_keeps_same_prompt_retry():
     """输出够长但 JSON 坏了 = 格式漂移, 原样重试仍然有意义。"""
     assert observer._plan_parse_retries({}, None) == 2
     assert observer._plan_parse_retries({"json_parse_primary_retries": 3}, None) == 3
+
+
+def test_sanitize_map_records_restore_pairs():
+    src = "先修 `parse_card()` 去掉 `<think>` 标签"
+    out, mapping, hits = observer._sanitize_special_tokens_map(src)
+    assert hits == 1
+    assert "< think>" in out
+    assert mapping == {"< think>": "<think>"}
+
+
+def test_restore_turns_trace_back():
+    """note 2189 的真实形态: 模型照抄了被垫开的 `< think>`。"""
+    body = "- `parse_card()` 增加去除 `< think>` 标签的处理，防止再因 thinking 标签解析失败"
+    out, n = observer._restore_sanitized_tokens(body, {"< think>": "<think>"})
+    assert n == 1
+    assert "<think>" in out
+    assert "< think>" not in out
+
+
+def test_restore_leaves_unrelated_text_alone():
+    body = "a < b 这种比较符号不该被动，`<other>` 也不该被动"
+    out, n = observer._restore_sanitized_tokens(body, {"< think>": "<think>"})
+    assert n == 0 and out == body

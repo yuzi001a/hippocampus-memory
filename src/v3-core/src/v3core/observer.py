@@ -1152,14 +1152,57 @@ def _plan_parse_retries(cfg: dict[str, Any], deg_reason: str | None) -> int:
     return max(1, int(cfg.get("json_parse_primary_retries", 2) or 2))
 
 
+def _sanitize_special_tokens_map(text: str) -> tuple[str, dict, int]:
+    """消毒同时记下"改了哪几处": 返回 (新文本, {消毒后token: 原token}, 改动处数)。
+
+    记录是为了能还原 —— 模型会照抄被垫开的形态 (实测 note 2189 写了 `< think>`),
+    写库前把这几处换回来, 印记就没进笔记。只记整 token, 不做全局替换。
+    """
+    src = str(text or "")
+    mapping: dict[str, str] = {}
+    out: list[str] = []
+    pos = 0
+    hits = 0
+    for m in _TAG_LIKE_RE.finditer(src):
+        i = m.start()
+        out.append(src[pos:i])
+        out.append("< ")
+        j = i + 1
+        k = j
+        # token 只吃到标签字符为止: 碰到反引号/中文/空白就停 —— 否则映射会把
+        # 紧跟的 ` 也吸进去, 模型换个写法就匹配不上。
+        while k < len(src) and (src[k].isascii() and (src[k].isalnum() or src[k] in "_-./!?>")):
+            k += 1
+        mapping["< " + src[j:k]] = src[i:k]
+        hits += 1
+        pos = j
+    out.append(src[pos:])
+    return "".join(out), mapping, hits
+
+
+def _restore_sanitized_tokens(content: str, mapping: dict) -> tuple[str, int]:
+    """写库前把消毒痕迹换回原样。只匹配我们确实改过的整 token。"""
+    body = str(content or "")
+    if not body or not mapping:
+        return body, 0
+    restored = 0
+    for treated in sorted(mapping, key=len, reverse=True):
+        original = mapping[treated]
+        n = body.count(treated)
+        if n:
+            body = body.replace(treated, original)
+            restored += n
+    return body, restored
+
+
 def _sanitize_special_tokens(text: str) -> tuple[str, int]:
     """把 ``<tag`` 形态的尖括号垫开 (``<tag`` → ``< tag``), 返回 (新文本, 改动数)。
 
     只在**重试**时用, 首跑永远用原文 —— 动输入就动了证据。
     选空格不选零宽: 实测零宽版本对 2911 是 1/2 (不可靠), 空格版本 2/2。
     """
-    new_text, n = _TAG_LIKE_RE.subn("< ", str(text or ""))
-    return new_text, int(n)
+    new_text, _mapping, hits = _sanitize_special_tokens_map(text)
+    return new_text, hits
 
 
 # ────────────────────────────────────────────────────────────
@@ -5542,6 +5585,7 @@ def _observe_worker(
         )
 
         # 7. 解析双输出 JSON
+        _san_map: dict = {}  # 走过消毒重试时才有内容, 用于写库前把痕迹换回原样
         parsed = _parse_observer_json(text)
         if not parsed:
             # 2026-11-23: 先归类再处置 —— 失败账不能清一色 json_parse,
@@ -5599,7 +5643,7 @@ def _observe_worker(
             # 必须换输入。这一级只动输入形状、不动内容语义: 把 <tag 形态的尖括号
             # 垫开, 断掉触发链路。实测 pos/neg 对照: 空格版 2/2 通过, 零宽版 1/2。
             if not parsed:
-                _san_prompt, _san_hits = _sanitize_special_tokens(prompt)
+                _san_prompt, _san_map, _san_hits = _sanitize_special_tokens_map(prompt)
                 _san_retries = max(0, int(cfg.get("json_parse_sanitize_retries", 2) or 0))
                 if _san_hits and _san_retries:
                     logger.warning(
@@ -5742,6 +5786,14 @@ def _observe_worker(
         # 8. 提取字段 (容错：缺字段给空字符串, 不抛)
         note_obj = parsed.get("note") or {}
         note_content = str(note_obj.get("content") or "").strip()
+        # 2026-11-23: 走过消毒重试的话, 笔记里可能照抄了被垫开的 `< think>` 形态。
+        # 这是我们自己造成的扰动, 写库前换回原样 (不是替模型补内容)。
+        if _san_map and note_content:
+            note_content, _restored_n = _restore_sanitized_tokens(note_content, _san_map)
+            if _restored_n:
+                logger.info(
+                    "observer: 还原消毒痕迹 %d 处 (笔记引用了被垫开的标签)", _restored_n,
+                )
         # source_qa_range 必须用代码真值 (first_qa_id/last_qa_id_now), 不信 LLM 输出
         # (M3 会编造 [1,30) 之类的默认值覆盖真实范围 — 2026-08-03 数据审计发现)
         qa_range_start = first_qa_id
