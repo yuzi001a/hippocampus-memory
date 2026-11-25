@@ -1086,6 +1086,8 @@ def call_m3(
 
 NOTE_DEGENERATE_MIN_CHARS = 900
 _TAG_LIKE_RE = re.compile(r"<(?=[A-Za-z/!?])")
+# 锚点存在性探测: 放宽到允许 `[ #23 ]` 这种带空格写法 (生产真出现过)
+_ANCHOR_LOOSE_RE = re.compile(r"\[\s*#\s*\d+\s*\]")
 
 
 def _looks_like_loop(text: str, window: int = 240) -> bool:
@@ -1125,6 +1127,25 @@ def _degeneration_reason(result: dict[str, Any]) -> str | None:
         return f"early_stop_text={len(stripped)}"
     if _looks_like_loop(stripped):
         return "repetition_loop"
+    return None
+
+
+def _empty_payload_reason(content: str) -> str | None:
+    """正文是不是"空壳": 结构像笔记, 但没有任何可追溯的事实。
+
+    2026-11-25 抽查发现: 模型偶尔把提示词里的格式样板原样吐回来 (43 字的
+    "## 当轮变化 / ..." + "<当轮变化 + 来源 [#N]>"), 一文不值却被写进库, 还被
+    当作"上一版印"喂给下一轮。原校验只查"锚点越界", 不查"压根没有锚点",
+    所以整条漏过去。这里补的是存在性, 不是质量。
+
+    锚点探测刻意放宽 (允许 `[ #23 ]` 这种带空格的写法) —— 生产里真出现过,
+    用严格正则会把好笔记判死。
+    """
+    text = str(content or "").strip()
+    if not text:
+        return "empty_content"
+    if not _ANCHOR_LOOSE_RE.search(text):
+        return "no_citation"
     return None
 
 
@@ -5587,10 +5608,22 @@ def _observe_worker(
         # 7. 解析双输出 JSON
         _san_map: dict = {}  # 走过消毒重试时才有内容, 用于写库前把痕迹换回原样
         parsed = _parse_observer_json(text)
+        # 2026-11-25: 结构合法但内容是空壳 (模型把格式样板原样吐回来) 也算失败批 ——
+        # 否则它会被写进库, 再被当成"上一版印"污染下一轮上下文。
+        _payload_reason: str | None = None
+        if parsed:
+            _payload_text = str((parsed.get("note") or {}).get("content") or "")
+            _payload_reason = _empty_payload_reason(_payload_text)
+            if _payload_reason:
+                logger.warning(
+                    "observer: 输出是空壳 (%s, %d 字) — 按失败批处理, 不写库",
+                    _payload_reason, len(_payload_text),
+                )
+                parsed = None
         if not parsed:
             # 2026-11-23: 先归类再处置 —— 失败账不能清一色 json_parse,
             # 提前收尾 / 循环 / 真格式漂移的处置路径不一样。
-            _deg_reason = _degeneration_reason(result)
+            _deg_reason = _payload_reason or _degeneration_reason(result)
             if _deg_reason:
                 logger.warning(
                     "observer: 判定为退化输出 (%s) %s — 先同 prompt 重试, 无效再换输入",

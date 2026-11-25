@@ -102,3 +102,19 @@ def test_restore_leaves_unrelated_text_alone():
     body = "a < b 这种比较符号不该被动，`<other>` 也不该被动"
     out, n = observer._restore_sanitized_tokens(body, {"< think>": "<think>"})
     assert n == 0 and out == body
+
+
+def test_template_shell_is_empty_payload():
+    """真实样本: note 2342 全文 43 字, 是提示词里的格式样板。"""
+    body = "## 当轮变化 / 本轮确有变化的 section>\n<当轮变化 + 来源 [#N]>"
+    assert observer._empty_payload_reason(body) == "no_citation"
+
+
+def test_note_without_citation_is_empty_payload():
+    body = "## 关键决策\n- [用户] 做了很多事〔已实施〕\n- [用户] 又做了一些事〔已实施〕"
+    assert observer._empty_payload_reason(body) == "no_citation"
+
+
+def test_normal_note_passes_empty_payload_check():
+    assert observer._empty_payload_reason(_normal_note()) is None
+    assert observer._empty_payload_reason("") == "empty_content"
