@@ -118,3 +118,33 @@ def test_note_without_citation_is_empty_payload():
 def test_normal_note_passes_empty_payload_check():
     assert observer._empty_payload_reason(_normal_note()) is None
     assert observer._empty_payload_reason("") == "empty_content"
+
+
+class _Profile:
+    def __init__(self, caps):
+        self._caps = set(caps)
+
+    def supports_cap(self, name):
+        return name in self._caps
+
+
+def test_thinking_off_forces_explicit_none():
+    """省略不等于关闭: classic 形状下 effort 为 None 时必须补成 "none"。"""
+    got = observer._effective_reasoning_effort(None, "disabled", _Profile({"reasoning_effort"}))
+    assert got == "none"
+
+
+def test_explicit_effort_is_kept():
+    got = observer._effective_reasoning_effort("low", "adaptive", _Profile({"reasoning_effort"}))
+    assert got == "low"
+
+
+def test_channel_without_cap_stays_quiet():
+    got = observer._effective_reasoning_effort(None, "disabled", _Profile(set()))
+    assert got is None
+
+
+def test_usage_reasoning_tokens_reads_both_shapes():
+    assert observer._usage_reasoning_tokens({"completion_tokens_details": {"reasoning_tokens": 163}}) == 163
+    assert observer._usage_reasoning_tokens({"output_tokens_details": {"reasoning_tokens": 278}}) == 278
+    assert observer._usage_reasoning_tokens({}) == 0

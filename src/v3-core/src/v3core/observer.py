@@ -966,6 +966,9 @@ def call_m3(
     # 2026-11-22: 通道画像驱动 —— URL / 头 / payload 形状由 config 的 providers: 段决定,
     # 这里只负责挑值。换模型 = 改配置; 换通道 = 改配置; 只有新传输协议才动代码。
     profile = providers.resolve_profile(model, cfg, api_key=api_key, base_url=base_url)
+    # 2026-11-26: classic 形状的模型在这里 effort 是 None, 请求里就整段不发 ——
+    # 而这条通道"不发"等于"开思考"。显式补 none, 见 _effective_reasoning_effort。
+    _reasoning_effort = _effective_reasoning_effort(_reasoning_effort, thinking, profile)
     headers = providers.build_headers(
         profile, api_key,
         # 安装级稳定会话 id：进程重启不变（Go 按会话粘后端 + 复用提示词缓存）
@@ -1128,6 +1131,39 @@ def _degeneration_reason(result: dict[str, Any]) -> str | None:
     if _looks_like_loop(stripped):
         return "repetition_loop"
     return None
+
+
+def _usage_reasoning_tokens(usage: Any) -> int:
+    """从三家 usage 里取思考 token 数 (没有就 0)。"""
+    u = usage if isinstance(usage, Mapping) else {}
+    det = u.get("completion_tokens_details") or u.get("output_tokens_details") or {}
+    try:
+        return int((det or {}).get("reasoning_tokens") or 0)
+    except Exception:
+        return 0
+
+
+def _effective_reasoning_effort(effort: Any, thinking: Any, profile: Any) -> Any:
+    """关思考时必须在请求里显式写 ``none`` —— 省略不等于关闭。
+
+    实测 (2026-11-26, Y400, opencode-go / deepseek-v4.1-flash, 同一条测试输入):
+      · 省略该字段      → 3/3 仍然思考, 163 / 217 / 278 token
+      · 显式 effort=none → 3/3 思考 0 token (responses 与 chat 两条通道都是)
+    官方文档同口径: omitting the effort does not disable reasoning。
+
+    只对"通道自己声明支持 reasoning_effort"的情形补; 通道不支持就不发,
+    免得把不认识该参数的供应商打成 400。
+    """
+    if effort:
+        return effort
+    if str(thinking or "").strip().lower() not in ("disabled", "none", "off"):
+        return effort
+    try:
+        if profile is not None and profile.supports_cap("reasoning_effort"):
+            return "none"
+    except Exception:
+        pass
+    return effort
 
 
 def _empty_payload_reason(content: str) -> str | None:
@@ -5598,10 +5634,11 @@ def _observe_worker(
         text = result.get("text", "") or ""
         usage = result.get("usage") or {}
         logger.info(
-            "observer: M3 返 %d 字 (prompt_tokens=%s completion_tokens=%s latency=%.1fs)",
+            "observer: M3 返 %d 字 (prompt_tokens=%s completion_tokens=%s reasoning=%s latency=%.1fs)",
             len(text),
             usage.get("prompt_tokens", "?"),
             usage.get("completion_tokens", "?"),
+            _usage_reasoning_tokens(usage),
             latency,
         )
 
