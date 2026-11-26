@@ -1090,7 +1090,9 @@ def call_m3(
 NOTE_DEGENERATE_MIN_CHARS = 900
 _TAG_LIKE_RE = re.compile(r"<(?=[A-Za-z/!?])")
 # 锚点存在性探测: 放宽到允许 `[ #23 ]` 这种带空格写法 (生产真出现过)
-_ANCHOR_LOOSE_RE = re.compile(r"\[\s*#\s*\d+\s*\]")
+# 末尾 (?!\() 排除 markdown 链接形态 `[#25](https://...)`: 那是正文里的超链接,
+# 不是问答锚点 (2026-11-26 全量体检在 Y400 库里把 2 条正常笔记误判成"无锚点")。
+_ANCHOR_LOOSE_RE = re.compile(r"\[\s*#\s*\d+\s*\](?!\()")
 
 
 def _looks_like_loop(text: str, window: int = 240) -> bool:
@@ -1645,11 +1647,17 @@ def _audit_note_markers(content: str) -> dict:
     }
 
 
-_ANCHOR_RE = re.compile(r"\[#(\d+)\]")
+# 问答锚点: 只认 `[#N]` 本身。末尾 (?!\() 排除 markdown 链接 `[#25](url)` ——
+# 那是正文里引用的 PR/issue 编号, 不是本批问答的序号。旧正则把它当锚点, 于是
+# `[#25]` 出现在只覆盖 10 条问答的笔记里就被判"锚点越界"(2026-11-26 实测 2 条误判)。
+_ANCHOR_RE = re.compile(r"\[#(\d+)\](?!\()")
 
 
 _NOTE_SIMPLIFY_RE = re.compile(r"[#*`>\-\s]，。、；：！？“”（）【】「」…—·.,;:!?(\[\])\"']+")
 NOTE_PREV_CONTAINMENT_MAX = 0.5
+# 整篇抄上一版的门槛: 被判定重复时, 若篇幅仍达到上一版的这个比例, 说明它不是
+# "只写本批变化"(那会明显更短), 而是把上一版原样重发 → 不写库。
+NOTE_REPEAT_WHOLE_MAX = 0.8
 
 
 def _note_overlap_with_prev(content: str, prev_text: str, k: int = 6) -> float:
@@ -1707,11 +1715,22 @@ def _validate_note_payload(content: str, qa_count: int, prev_text: str = "") -> 
         return {"status": "invalid", "reasons": reasons, "audit": audit}
     overlap = _note_overlap_with_prev(text, prev_text) if prev_text else None
     if overlap is not None and overlap > NOTE_PREV_CONTAINMENT_MAX:
+        # 区分两种重复 (2026-11-26 全量体检 1686 条得到):
+        #   · 只写变化 —— 篇幅明显短于上一版 (ratio 小)。内容虽是上一版的子集, 但这
+        #     正是修复轮"只写本批新变化"的正确形态 (实测 id 3483: 6,002 → 537 字),
+        #     必须照写, 拦掉会丢本批事实;
+        #   · 整篇抄写 —— 篇幅与上一版相当 (ratio ≥ NOTE_REPEAT_WHOLE_MAX)。实测
+        #     id 2337 / 3757 与上一版只差 3 字 / 2 字, 而输入 QA 差异达 94%/82%,
+        #     等于把旧事实原样再插一遍, 写进印序列只会污染。
+        prev_len = len(str(prev_text or "").strip())
+        ratio = (len(text.strip()) / prev_len) if prev_len else 1.0
         return {
             "status": "repetitive",
-            "reasons": [f"与上一版印重复 {overlap:.0%} (阈值 {NOTE_PREV_CONTAINMENT_MAX:.0%})"],
+            "reasons": [f"与上一版印重复 {overlap:.0%} (阈值 {NOTE_PREV_CONTAINMENT_MAX:.0%}), "
+                        f"篇幅为上一版的 {ratio:.0%}"],
             "audit": audit,
             "prev_overlap": round(overlap, 3),
+            "prev_len_ratio": round(ratio, 3),
         }
     if audit.get("missing_total"):
         detail = []
@@ -1724,6 +1743,18 @@ def _validate_note_payload(content: str, qa_count: int, prev_text: str = "") -> 
         return {"status": "repairable", "reasons": detail, "audit": audit}
     return {"status": "ok", "reasons": [], "audit": audit,
             "prev_overlap": (round(overlap, 3) if overlap is not None else None)}
+
+
+def _should_skip_repeat(verdict: dict[str, Any]) -> bool:
+    """判定"整篇抄上一版": 该批次不写库, 只推进游标并记账。
+
+    只拦篇幅相当的整篇重发; 修复轮"只写本批变化"的短版本 (ratio 小) 必须放行,
+    否则会把本批真事实一起丢掉。
+    """
+    return (
+        str(verdict.get("status") or "") == "repetitive"
+        and float(verdict.get("prev_len_ratio") or 0.0) >= NOTE_REPEAT_WHOLE_MAX
+    )
 
 
 def _repair_note_output(call_m3_fn, cfg, api_key, prompt, verdict, **call_kwargs):
@@ -4287,6 +4318,47 @@ def _segment_id_from_range(qa_range_start: int, qa_range_end: int) -> str:
     return f"{int(qa_range_start)}:{int(qa_range_end)}"
 
 
+def _record_repeat_skipped(
+    qa_range_start: int,
+    qa_range_end: int,
+    *,
+    overlap: float,
+    len_ratio: float,
+    cfg: dict[str, Any] | None = None,
+) -> None:
+    """整篇重复被拦下的批次记账 (observer_state.json → ``repeat_skipped``)。
+
+    与 ``failed_segments`` 分开: 那些是"调用失败, 待重试"; 这些是"调用成功,
+    但内容是把上一版重发一遍"——同一提示词重试不会变好, 要换输入/换提示再补跑。
+    记账只为一件用途: 事后能精确找到哪段 QA 没写进库。
+    """
+    path = _state_path(cfg)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        lst = data.get("repeat_skipped")
+        if not isinstance(lst, list):
+            lst = []
+        lst.append({
+            "qa_range": [int(qa_range_start), int(qa_range_end)],
+            "overlap": round(float(overlap), 3),
+            "len_ratio": round(float(len_ratio), 3),
+            "at": now_iso,
+        })
+        data["repeat_skipped"] = lst[-200:]
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - 记账失败不阻塞主流程
+        logger.warning("observer: 记录 repeat_skipped 失败 (%s: %s)", type(exc).__name__, exc)
+
+
 def _save_failed_segment(
     qa_range_start: int,
     qa_range_end: int,
@@ -5955,6 +6027,30 @@ def _observe_worker(
                     "observer: 修复后仍不合格 (%s): %s — 照写并计数, 不替模型补内容",
                     _verdict["status"], "; ".join(_verdict["reasons"])[:200],
                 )
+
+        # 整篇抄上一版 → 不写库 (2026-11-26): 修复轮也救不回来的"原样重发"若照写,
+        # 印序列里会插一条与上一版近乎逐字相同的快照, 还被当作下一轮 prev 继续放大。
+        # 只拦"篇幅相当"的整篇重复; "只写本批变化"的短版本照写 (那是正确形态)。
+        if _should_skip_repeat(_verdict):
+            logger.warning(
+                "observer: 整篇重复上一版 (重叠 %s / 篇幅 %s%%) — 不写 note, 推进游标;"
+                " QA %s-%s 记入 repeat_skipped 待补跑",
+                _verdict.get("prev_overlap"),
+                int(100 * float(_verdict.get("prev_len_ratio") or 0)),
+                first_qa_id, last_qa_id_now,
+            )
+            _record_repeat_skipped(
+                first_qa_id, last_qa_id_now,
+                overlap=_verdict.get("prev_overlap") or 0.0,
+                len_ratio=_verdict.get("prev_len_ratio") or 0.0,
+                cfg=cfg,
+            )
+            _save_cursor(last_qa_id_now, cfg)
+            try:
+                pg.close()
+            except Exception:
+                pass
+            return
 
         # 归属/状态词审计 (2026-11-21): 提示词只是提醒, 遵从性不是契约。
         # 只统计 + 打日志, 不自动补写 (替模型断言状态比缺失更危险)。

@@ -148,3 +148,56 @@ def test_usage_reasoning_tokens_reads_both_shapes():
     assert observer._usage_reasoning_tokens({"completion_tokens_details": {"reasoning_tokens": 163}}) == 163
     assert observer._usage_reasoning_tokens({"output_tokens_details": {"reasoning_tokens": 278}}) == 278
     assert observer._usage_reasoning_tokens({}) == 0
+
+
+# --- 2026-11-26 全量体检补的两处校验漏子 ---
+
+def _long_note(tag: str = "A", n: int = 40) -> str:
+    lines = [f"- [用户] {tag} 第{i}项进展已完成〔已实施〕[#{i}]" for i in range(1, n + 1)]
+    return "## 关键决策\n" + "\n".join(lines)
+
+
+def test_markdown_link_is_not_anchor():
+    """[#25](url) 是超链接不是问答锚点 — 否则 10 条问答的笔记会被误判"锚点越界"。"""
+    body = ("## 关键决策\n- [用户] 修好了〔已实施〕[#3]，见 PR "
+            "[#25](https://github.com/x/y/pull/25)")
+    v = observer._validate_note_payload(body, 10)
+    assert v["status"] == "ok", v.get("reasons")
+
+
+def test_plain_anchor_still_bounds_checked():
+    body = "## 关键决策\n- [用户] 修好了〔已实施〕[#25]"
+    v = observer._validate_note_payload(body, 10)
+    assert v["status"] == "invalid"
+    assert "锚点越界" in v["reasons"][0]
+
+
+def test_only_markdown_link_is_no_citation():
+    body = "## 关键决策\n- 修好了〔已实施〕见 PR [#25](https://github.com/x/y/pull/25)"
+    assert observer._empty_payload_reason(body) == "no_citation"
+
+
+def test_whole_repeat_is_flagged_with_high_ratio():
+    prev = _long_note("A")
+    v = observer._validate_note_payload(prev, 40, prev_text=prev)
+    assert v["status"] == "repetitive"
+    assert v["prev_len_ratio"] >= 0.95
+    assert observer._should_skip_repeat(v) is True
+
+
+def test_short_delta_repeat_is_not_skipped():
+    prev = _long_note("A")
+    delta = "## 关键决策\n" + "\n".join(prev.splitlines()[1:4])
+    v = observer._validate_note_payload(delta, 40, prev_text=prev)
+    assert v["status"] == "repetitive"
+    assert v["prev_len_ratio"] < observer.NOTE_REPEAT_WHOLE_MAX
+    assert observer._should_skip_repeat(v) is False
+
+
+def test_fresh_note_is_not_skipped():
+    prev = _long_note("A")
+    fresh = "## 操作知识\n" + "\n".join(
+        f"- 命令 v{i} 的作用是查询索引状态与快照版本〔已验证〕[#{i}]" for i in range(1, 41))
+    v = observer._validate_note_payload(fresh, 40, prev_text=prev)
+    assert v["status"] == "ok", v.get("reasons")
+    assert observer._should_skip_repeat(v) is False
