@@ -310,20 +310,28 @@ E1_DENY_LIST = [
 E1_SYSTEM_PROMPT = """你是一个身份提炼引擎。读下面的主题卡（记录用户的注意力分布和思考模式），输出你的"身份三问"：
 
 ## 我是谁
-- 从主题卡揭示的注意力分布判断：用户在哪些领域持续投入大量思考？关注什么层面的问题？
-- 从跨主题的行为模式判断：用户是什么样的人——他怎么分配精力、他重视什么、他厌恶什么？
+- 判断依据是主题卡揭示的**思维层面**，不是具体项目：他反复在想哪一类问题（约束、验证、边界、取舍），而不是他做过哪些项目。
+- 从跨主题的行为模式判断：他是什么样的人——怎么分配精力、重视什么、厌恶什么。每条要能迁移到新场景，不能只对某个项目成立。
 
 ## 怎么判断
-- 从各主题的执行方式中抽象用户的默认问题判断路径
-- 他面对一个陌生问题时，第一反应是什么（调研→源码→实验/讨论→验证）？
-- 他在做技术决策时，优先考虑什么（可溯源/可回滚/最小污染/全链路完整）？
+- 从各主题的执行方式中抽象他的默认判断路径
+- 他面对陌生问题时第一反应是什么（调研→源码→实验/讨论→验证）？
+- 他做技术决策时优先考虑什么（可溯源/可回滚/最小污染/全链路完整）？
 
 ## 行为基线
-- 从各主题的操作模式中提炼用户的工作纪律：编码习惯、沟通偏好、安全边界
+- 从各主题的操作模式中提炼他的工作纪律：编码习惯、沟通偏好、安全边界
 - 哪些约束条件反复出现（数据完整性、路径一致性、隔离污染、避免假实现）？
 - 他对质量验收的硬性标准是什么（生产路径真正接入、行为可观察、回归有输出）？
 
-要求：每个维度 3-5 条核心判断。每条标注引用对应的主题卡标题作为来源证据。
+要求：每个维度 5-6 条核心判断。每条标注引用对应主题卡标题作为来源证据。
+
+【正文禁令】
+正文里不得出现具体项目名、仓库名、产品名、版本号、任务编号（`P0-B3`、`v4.0.3`、`H18R` 这类）；
+它们只能出现在 `(来源: ...)` 括号里。正文每一条都必须是抽象准则，换一个项目照样成立。
+
+反例（不合格）：「第一重心是 LLM 记忆系统的幂等与失效传播链」——这是项目课题。
+正例：「注意力压在『模型输出能不能被工程约束住』这一类问题上」——这是性格。
+
 不写项目进展清单，不写经验教训列表，不写叙事——只写身份特征和判断模式。
 
 【结构化输出契约】
@@ -419,10 +427,96 @@ CATEGORY_INSTRUCTIONS = {
     "topic": "这些主题卡记录了用户在不同领域的注意力投入和思考模式。从中提炼身份特征：他持续关注什么领域、他怎么判断和处理问题、他的工作纪律和偏好是什么。按三段组织输出：我是谁 / 怎么判断 / 行为基线。每条标注来自的主题卡标题。",
 }
 
+# ── 印的机械契约 (2026-11-26) ────────────────────────────────────────────────
+# 全量补织 1,195 张历史卡时实测: 印会被项目类卡片稀释, 从「我是谁」漂移成
+# 「我做过哪些项目」——18 批跑下来,「守着自家整套基础设施」和「厌恶 AI 味汇报腔」
+# 两条核心特质整条丢失, 换成一串项目名与任务编号。这里把「印该长什么样」变成
+# 可机检条款: 不合格就重写, 重写仍不合格就不写库、保留上一版。
+_YIN_SECTION_NAMES = ("我是谁", "怎么判断", "行为基线")
+_YIN_MIN_CHARS = 2000
+_YIN_MAX_CHARS = 12000
+_YIN_MIN_BULLETS_PER_SECTION = 4
+# 正文里出现这些 = 项目清单味 (来源标注里的不算, 那是溯源)
+_YIN_PROJECT_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[Pp]\d(?:-[A-Z]\d?)?|v\d+\.\d+(?:\.\d+)?"
+    r"|[A-Z]{2,5}-?\d{2,4}[A-Z]?)(?![A-Za-z0-9])"
+)
+_YIN_PROJECT_TOKEN_MAX = 5
+# 十条核心特质锚点: 每版至少覆盖 6 条, 防止某次重写把整条性格抹平
+_YIN_ANCHORS = (
+    ("工程约束", r"(约束住|输出契约|严格 ?schema|校验器|判据)"),
+    ("基础设施", r"(基础设施|NAS|网络出口|服务器|硬盘|PT ?保种|自建|自家机器|私有部署)"),
+    ("先读懂", r"(通读|先读|读懂|先看源码|先摸)"),
+    ("规范审美", r"(版式|排版|规范|审美|视觉)"),
+    ("口语直说", r"(口语|汇报腔|直说|人话|不绕弯|少废话|直接说)"),
+    ("可验证", r"(真机|实测|可观察|真实路径|canary)"),
+    ("备份回滚", r"(备份|回滚|退路)"),
+    ("不擅自", r"(不擅自|取得.{0,6}同意|用户同意|等.{0,6}拍板)"),
+    ("可溯源", r"(溯源|可核实|来源)"),
+    ("最小变量", r"(最小变量|单变量|对照)"),
+)
+_YIN_MIN_ANCHOR_COVERAGE = 7
+# 两条底色必选: 全量补织 1,195 张卡时, 最先被项目卡淹没的就是它们
+_YIN_REQUIRED_ANCHORS = ("基础设施", "口语直说")
+
+
+def _validate_yin_content(content: str) -> dict[str, Any]:
+    """印的机械契约 — 只判形状与边界, 不判文采。
+
+    四类可机检的退化:
+    - 过短/过长 (丢了细节 or 膨胀成流水账);
+    - 三节缺失或某节条目太少 (结构塌了);
+    - 正文项目味过重 (版本号/任务号/仓库代号扎堆 = 写成项目清单);
+    - 核心特质覆盖不足 (某次重写把性格抹平)。
+    """
+    text = str(content or "").strip()
+    reasons: list[str] = []
+    if len(text) < _YIN_MIN_CHARS:
+        reasons.append("正文过短 %d 字 (<%d)" % (len(text), _YIN_MIN_CHARS))
+    if len(text) > _YIN_MAX_CHARS:
+        reasons.append("正文过长 %d 字 (>%d)" % (len(text), _YIN_MAX_CHARS))
+
+    sections: dict[str, list[str]] = {}
+    cur = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            cur = s[3:].strip()
+            sections[cur] = []
+        elif cur and s.startswith(("- ", "* ")):
+            sections[cur].append(s)
+    for need in _YIN_SECTION_NAMES:
+        key = next((k for k in sections if need in k), None)
+        if key is None:
+            reasons.append("缺少小节: " + need)
+        elif len(sections[key]) < _YIN_MIN_BULLETS_PER_SECTION:
+            reasons.append("小节「%s」只有 %d 条 (<%d)"
+                           % (need, len(sections[key]), _YIN_MIN_BULLETS_PER_SECTION))
+
+    body = re.sub(r"\(来源:[^)]*\)", "", text)
+    hits = _YIN_PROJECT_TOKEN_RE.findall(body)
+    if len(hits) > _YIN_PROJECT_TOKEN_MAX:
+        reasons.append("项目清单味过重: 正文 %d 处版本号/任务号 (>%d) 例: %s"
+                       % (len(hits), _YIN_PROJECT_TOKEN_MAX, hits[:6]))
+
+    covered = [name for name, pat in _YIN_ANCHORS if re.search(pat, body)]
+    missing_required = [n for n in _YIN_REQUIRED_ANCHORS if n not in covered]
+    if missing_required:
+        reasons.append("底色特质缺失: " + ", ".join(missing_required))
+    if len(covered) < _YIN_MIN_ANCHOR_COVERAGE:
+        missing = [n for n, _ in _YIN_ANCHORS if n not in covered]
+        reasons.append("核心特质覆盖 %d/%d (<%d), 缺: %s"
+                       % (len(covered), len(_YIN_ANCHORS), _YIN_MIN_ANCHOR_COVERAGE, missing))
+
+    return {"ok": not reasons, "reasons": reasons, "anchors": covered,
+            "chars": len(text), "project_tokens": hits[:10]}
+
+
 def synthesize_yin(
     config: dict | None = None,
     dry_run: bool = False,
     sim_now: "datetime | None" = None,  # 2026-08-24 G1A-R: 模拟时钟回放 — now 与卡片增量上界
+    card_until: "datetime | None" = None,  # 2026-11-26: 只读到此为止的卡（分批补织历史卡用, 不影响印的时间戳）
     pool: Any = None,
     on_topics_commit=None,
 ) -> str:
@@ -553,6 +647,10 @@ def synthesize_yin(
                         # 2026-08-24 G1A-R: 回放模式 — 增量上界=模拟 now, 防止"看到未来卡"
                         _sql += " AND created_at <= %s"
                         _params.append(sim_now)
+                    elif card_until is not None:
+                        # 2026-11-26: 分批补织历史卡 — 只读到此为止, 印时间戳仍取 wall clock
+                        _sql += " AND created_at <= %s"
+                        _params.append(card_until)
                     _sql += " ORDER BY length(body) DESC"
                     _cur.execute(_sql, _params)
                     _pg_rows = _cur.fetchall()
@@ -692,6 +790,36 @@ def synthesize_yin(
     y_content = _THINK_BLOCK_RE.sub("", y_content).strip()
     if not y_content:
         return "E1 合成失败: LLM 返回空"
+
+    # ── 印的机械契约闸门 (2026-11-26) ──
+    # 不合格先带原因重写一轮; 仍不合格就不写库、保留上一版 —— 宁可这轮不更新,
+    # 也不要把一版写成项目清单的印覆盖上去。
+    _v = _validate_yin_content(y_content)
+    if not _v["ok"]:
+        logger.warning("[e1] 印不合格 (%s) — 带原因重写一轮", "; ".join(_v["reasons"])[:220])
+        _hint = (
+            "\n\n## 上一轮输出不合格, 请重写\n"
+            + "\n".join("- " + r for r in _v["reasons"])
+            + "\n要求: 印只回答「我是谁 / 我怎么判断 / 我怎么做事」三件事;"
+              " 不写具体项目名、仓库名、版本号、任务编号 (这些留在主题卡里靠召回取);"
+              " 每条必须是能迁移到新场景的准则, 不能只对某个项目成立;"
+              " 三个小节各 5-6 条, 全文 3000-6000 字。\n"
+        )
+        try:
+            y_content = client.chat(e1_system_prompt + _hint, [
+                {"role": "user", "content": user_payload},
+            ], temperature=0.3)
+            y_content = _THINK_BLOCK_RE.sub("", y_content).strip()
+        except Exception as e:  # noqa: BLE001
+            return "E1 合成失败(契约重写): %s" % _safe_err(e)
+        _v = _validate_yin_content(y_content)
+        if not _v["ok"]:
+            logger.warning(
+                "[e1] 重写后仍不合格 (%s) — 本轮不写库, 保留上一版",
+                "; ".join(_v["reasons"])[:220])
+            return "E1 放弃: 印仍不合格 (%s); 保留上一版, 未写库" % "; ".join(_v["reasons"])[:160]
+        logger.info("[e1] 契约重写后通过: %d 字, 锚点 %d/%d",
+                    _v["chars"], len(_v["anchors"]), len(_YIN_ANCHORS))
 
     # ── 注入 premise 注释 ──
     # 印的每个段落来自哪些分类的 b 卡，记录为 HTML 注释（对人不可见，对程序可解析）。
