@@ -53,9 +53,10 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from . import model_params
+from . import providers
 
 # v3core.__init__._safe_err 模块级函数, 同包内直接相对导入即可。
 # 避免 daemon 线程异常时 NameError → 静默死 → 整条观察者链路断。
@@ -661,6 +662,9 @@ def _load_observer_config() -> dict[str, Any]:
             # 以前缺键就静默回落调用点字面量; 现在统一在配置层解析 (models: 表见
             # v3core.model_params), 缺模型名时 call_m3 fail-loud, 不再猜一个模型。
             cfg["models"] = legacy.get("models") or {}
+            # 2026-11-22: 通道画像 — 模型 → 端点的绑定与请求形状也一起带上,
+            # call_m3 才能只按配置拼请求 (换模型/换通道不改代码)。
+            cfg["providers"] = legacy.get("providers") or {}
             _llm_sec = legacy.get("llm") or {}
             if isinstance(_llm_sec, dict):
                 if not cfg.get("model"):
@@ -837,6 +841,82 @@ def _m3_thinking_payload(model: str, thinking: str, cfg: dict[str, Any] | None =
     return model_params.thinking_field(params, thinking or "disabled")
 
 
+
+#: Observer 输出的严格结构。支持 json_schema 的通道 (responses / 部分 chat) 直接用它
+#: 锁死字段, 不再靠提示词自律; 不支持的通道 (如 MiniMax) 自动跳过, 行为不变。
+OBSERVER_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "note": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "source_qa_range": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+            },
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+        "topic_updates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["update", "create"]},
+                    "topic_id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "new_facts": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["action", "title", "summary"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["note", "topic_updates"],
+    "additionalProperties": False,
+}
+
+
+_SESSION_AFFINITY: dict[str, str] = {}
+
+
+def _explain_http_error(status: int, body: str) -> str:
+    """把通道的典型错误翻成人话；认不出就保留原文摘要。"""
+    try:
+        from . import providers_opencode
+
+        return providers_opencode.explain_error(status, body)
+    except Exception:
+        return str(body or "")[:200]
+
+
+def _agent_session_id(cfg) -> str:
+    """会话 id：配置显式指定优先，否则用与安装绑定的稳定值。
+
+    历史实现把 pid 写进 id，进程一重启就变成「新会话」，后端亲和与提示词缓存全丢。
+    这里改成落盘生成一次的值，重启/升级不变。
+    """
+    try:
+        from .agent_identity import resolve_session_id
+
+        return resolve_session_id(cfg)
+    except Exception:
+        return str((cfg or {}).get("session_id") or "v3core")
+
+
+def _session_affinity_id(profile) -> str:
+    """给需要会话亲和头的通道一个稳定 id (同一进程内固定, 便于后端粘住缓存)。"""
+    key = getattr(profile, "name", "") or "default"
+    cached = _SESSION_AFFINITY.get(key)
+    if cached:
+        return cached
+    import os as _os
+    sid = f"v3core-{_os.getpid()}-{abs(hash(key)) % (10 ** 6):06d}"
+    _SESSION_AFFINITY[key] = sid
+    return sid
+
+
 def _llm_base_url_default() -> str:
     """配置层唯一的端点默认值 (与 llm.py 共用), 调用点不再各写字面量。
 
@@ -883,38 +963,74 @@ def call_m3(
     _params = model_params.resolve(model, cfg)
     _reasoning_effort = model_params.reasoning_effort_for(
         _params, cfg, default="low")
-    url = base_url.rstrip("/") + "/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": cfg.get("temperature", 0.3),
-        "max_completion_tokens": max_completion_tokens,
-        "reasoning_split": reasoning_split,
-    }
+    # 2026-11-22: 通道画像驱动 —— URL / 头 / payload 形状由 config 的 providers: 段决定,
+    # 这里只负责挑值。换模型 = 改配置; 换通道 = 改配置; 只有新传输协议才动代码。
+    profile = providers.resolve_profile(model, cfg, api_key=api_key, base_url=base_url)
+    # 2026-11-26: classic 形状的模型在这里 effort 是 None, 请求里就整段不发 ——
+    # 而这条通道"不发"等于"开思考"。显式补 none, 见 _effective_reasoning_effort。
+    _reasoning_effort = _effective_reasoning_effort(_reasoning_effort, thinking, profile)
+    headers = providers.build_headers(
+        profile, api_key,
+        # 安装级稳定会话 id：进程重启不变（Go 按会话粘后端 + 复用提示词缓存）
+        session_id=_agent_session_id(cfg),
+        extra=cfg.get("extra_headers") if isinstance(cfg.get("extra_headers"), Mapping) else None,
+    )
+    # 通道能强制 schema 就用它锁结构 (这才是「不再依赖模型自律」的正路);
+    # 不能强制的通道 (如 MiniMax) 跳过, 回落到本地校验 + 有界修复。
+    _schema = None
+    if providers.supports_schema(profile) and cfg.get("structured_output", True) is not False:
+        _schema = (cfg.get("response_schema") if isinstance(cfg.get("response_schema"), Mapping)
+                   else OBSERVER_RESPONSE_SCHEMA)
     _thinking_field = _m3_thinking_payload(model, thinking, cfg)
-    if _thinking_field is not None:
-        payload["thinking"] = _thinking_field
-    else:
-        # 2026-11-19: 省略 thinking 的族 (M3.1) 默认走 adaptive thinking —
-        # 必须显式压 effort, 否则长 prompt 的思考会把输出预算吃光, 表现为
-        # "每轮静默超时 / JSON 未闭合"。cfg 可覆盖, 表里写 null/omit 表示显式不发。
-        if _reasoning_effort:
-            payload["reasoning_effort"] = _reasoning_effort
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    payload = providers.build_payload(
+        profile, model, prompt,
+        max_tokens=max_completion_tokens,
+        temperature=cfg.get("temperature", 0.3),
+        schema=_schema,
+        schema_name=str(cfg.get("response_schema_name") or "observer"),
+        reasoning_effort=_reasoning_effort,
+        thinking=_thinking_field,
+        reasoning_split=reasoning_split,
+    )
+    url = profile.url()
     proxies = {"http": proxy, "https": proxy} if proxy else None
 
     def _post(body: dict[str, Any]):
         return requests.post(url, json=body, headers=headers, timeout=timeout, proxies=proxies)
 
+    # 2026-11-22: 有界重试。夜里实测长请求会被掐断 (Max retries exceeded / 5xx / 429),
+    # 原来一次失败就整批作废, 要等下一个观察周期。这里只对瞬态失败重试,
+    # 配置/鉴权/结构类 4xx 一次都不重试 —— 重试它们只会把错误拖长。
+    _attempts = max(1, int(cfg.get("retry_attempts", 3) or 1))
+    _backoff = float(cfg.get("retry_backoff_s", 2.0) or 0.0)
     t0 = time.time()
+    resp = None
     try:
-        resp = _post(payload)
+        for _i in range(_attempts):
+            try:
+                resp = _post(payload)
+            except Exception as e:
+                if _i + 1 < _attempts and providers.is_retryable_exception(e):
+                    _delay = providers.retry_delay(_i, _backoff)
+                    logger.warning(
+                        "observer: 传输失败, 重试 %d/%d (%.1fs 后): %s",
+                        _i + 1, _attempts, _delay, _safe_err(e)[:120],
+                    )
+                    time.sleep(_delay)
+                    continue
+                return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
+            if providers.is_retryable_status(resp.status_code) and _i + 1 < _attempts:
+                _delay = providers.retry_delay(_i, _backoff, resp)
+                logger.warning(
+                    "observer: HTTP %s, 重试 %d/%d (%.1fs 后): %s",
+                    resp.status_code, _i + 1, _attempts, _delay, (resp.text or "")[:100],
+                )
+                time.sleep(_delay)
+                continue
+            break
         # 服务端口径再次变化时的一次有界重试（与 llm.LLMClient 的 fallback 同义）：
         # 只有明确要求 adaptive thinking 时才去掉该字段重发，不重试其他 4xx。
-        if (resp.status_code == 400
+        if (resp is not None and resp.status_code == 400
                 and "requires adaptive thinking" in (resp.text or "").lower()
                 and "thinking" in payload):
             logger.warning(
@@ -936,23 +1052,216 @@ def call_m3(
         return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
     if resp.status_code != 200:
         return {
-            "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
+            "error": f"HTTP {resp.status_code}: {_explain_http_error(resp.status_code, resp.text)}",
             "latency": latency,
         }
     try:
         data = resp.json()
     except Exception as e:
         return {"error": f"响应非 JSON: {_safe_err(e)[:200]}", "latency": latency}
-    msg = (data.get("choices") or [{}])[0].get("message") or {}
-    text = msg.get("content", "") or ""
-    reasoning = msg.get("reasoning_content", "") or ""
-    usage = data.get("usage") or {}
+    # 2026-11-22: 三家响应结构统一折成 text/reasoning/usage (chat / responses / messages)
+    _parsed = providers.parse_response(profile, data)
+    text = _parsed["text"]
+    reasoning = _parsed["reasoning"]
+    usage = _parsed["usage"]
     return {
         "text": text,
         "reasoning": reasoning,
         "usage": usage,
+        "finish_reason": _parsed.get("finish_reason", ""),
         "latency": latency,
     }
+
+
+# ────────────────────────────────────────────────────────────
+# 退化检测与输入消毒 (2026-11-23)
+# ────────────────────────────────────────────────────────────
+# 实测事实 (2026-11-23, Y400, deepseek-v4.1-flash):
+#   · 同一批输入会"提前收尾": 声明关思考却先烧 700–1300 思考 token, 然后自己吐
+#     结束符 (finish=stop / status=completed), 正文只剩 98–720 字, JSON 半截。
+#   · 同 prompt 重发对它无效 (QA 2911 五发五断), 换输入才有效。
+#   · 触发物是输入里的 <tag 形态 (最典型 ``<think>``); 但**不是唯一** —— 用户观察
+#     到官方端点也会偶发, 自部署通道更严重, 零宽扰动实测 1/2 仍断。
+# 所以这里不赌"清掉某个标签就安全", 只做两件事:
+#   ① 判坏: 把退化识别出来 (证据可归类, 失败账不再是清一色 json_parse)
+#   ② 换变量重试: 同 prompt → 消毒 prompt → fallback 模型 → 拆批
+# 判坏只看形状, 内容质量仍归 _validate_note_payload 管。
+
+NOTE_DEGENERATE_MIN_CHARS = 900
+_TAG_LIKE_RE = re.compile(r"<(?=[A-Za-z/!?])")
+# 锚点存在性探测: 放宽到允许 `[ #23 ]` 这种带空格写法 (生产真出现过)
+# 末尾 (?!\() 排除 markdown 链接形态 `[#25](https://...)`: 那是正文里的超链接,
+# 不是问答锚点 (2026-11-26 全量体检在 Y400 库里把 2 条正常笔记误判成"无锚点")。
+_ANCHOR_LOOSE_RE = re.compile(r"\[\s*#\s*\d+\s*\](?!\()")
+
+
+def _looks_like_loop(text: str, window: int = 240) -> bool:
+    """粗检测"流口水": 末尾一段原文在全文里又出现过。
+
+    真实形态是**逐字重复**同一段 (模型陷在同一句话里), 所以判据直接取末尾窗口
+    在全文里的出现次数, 不猜周期。两份窗口 (240/120) 兜住不同长度的重复单元;
+    只在长度够长时才判, 避免短输出 (本来就该被 early_stop 判据抓住) 误伤。
+    """
+    body = str(text or "")
+    if len(body) < max(640, window * 3):
+        return False
+    for w in (window, max(120, window // 2)):
+        tail = body[-w:].strip()
+        if tail and body.count(tail) >= 2:
+            return True
+    return False
+
+
+def _degeneration_reason(result: dict[str, Any]) -> str | None:
+    """一次 LLM 返回是不是退化。返回原因码, 正常返回 None。
+
+    判据 (任一命中即坏):
+      · 正文不到 NOTE_DEGENERATE_MIN_CHARS 却已 finish —— 提示词要求 1500-8000 字,
+        几百字收尾必然是半截;
+      · 尾部出现重复窗口 —— 循环型退化。
+    思考 token 数只作为证据记录 (``_degeneration_evidence``), 不作硬门禁 ——
+    有的通道本来就允许思考, 拿它当门禁会把正常输出判死。
+    """
+    if not isinstance(result, dict) or result.get("error"):
+        return None
+    text = str(result.get("text") or "")
+    stripped = text.strip()
+    if not stripped:
+        return "empty_text"
+    if len(stripped) < NOTE_DEGENERATE_MIN_CHARS:
+        return f"early_stop_text={len(stripped)}"
+    if _looks_like_loop(stripped):
+        return "repetition_loop"
+    return None
+
+
+def _usage_reasoning_tokens(usage: Any) -> int:
+    """从三家 usage 里取思考 token 数 (没有就 0)。"""
+    u = usage if isinstance(usage, Mapping) else {}
+    det = u.get("completion_tokens_details") or u.get("output_tokens_details") or {}
+    try:
+        return int((det or {}).get("reasoning_tokens") or 0)
+    except Exception:
+        return 0
+
+
+def _effective_reasoning_effort(effort: Any, thinking: Any, profile: Any) -> Any:
+    """关思考时必须在请求里显式写 ``none`` —— 省略不等于关闭。
+
+    实测 (2026-11-26, Y400, opencode-go / deepseek-v4.1-flash, 同一条测试输入):
+      · 省略该字段      → 3/3 仍然思考, 163 / 217 / 278 token
+      · 显式 effort=none → 3/3 思考 0 token (responses 与 chat 两条通道都是)
+    官方文档同口径: omitting the effort does not disable reasoning。
+
+    只对"通道自己声明支持 reasoning_effort"的情形补; 通道不支持就不发,
+    免得把不认识该参数的供应商打成 400。
+    """
+    if effort:
+        return effort
+    if str(thinking or "").strip().lower() not in ("disabled", "none", "off"):
+        return effort
+    try:
+        if profile is not None and profile.supports_cap("reasoning_effort"):
+            return "none"
+    except Exception:
+        pass
+    return effort
+
+
+def _empty_payload_reason(content: str) -> str | None:
+    """正文是不是"空壳": 结构像笔记, 但没有任何可追溯的事实。
+
+    2026-11-25 抽查发现: 模型偶尔把提示词里的格式样板原样吐回来 (43 字的
+    "## 当轮变化 / ..." + "<当轮变化 + 来源 [#N]>"), 一文不值却被写进库, 还被
+    当作"上一版印"喂给下一轮。原校验只查"锚点越界", 不查"压根没有锚点",
+    所以整条漏过去。这里补的是存在性, 不是质量。
+
+    锚点探测刻意放宽 (允许 `[ #23 ]` 这种带空格的写法) —— 生产里真出现过,
+    用严格正则会把好笔记判死。
+    """
+    text = str(content or "").strip()
+    if not text:
+        return "empty_content"
+    if not _ANCHOR_LOOSE_RE.search(text):
+        return "no_citation"
+    return None
+
+
+def _degeneration_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    """退化证据: 判坏时随失败段一起记账, 供后续归因 (不参与判定)。"""
+    usage = (result or {}).get("usage") or {}
+    details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+    return {
+        "chars": len(str((result or {}).get("text") or "")),
+        "reasoning_tokens": int(details.get("reasoning_tokens") or 0),
+        "reasoning_chars": len(str((result or {}).get("reasoning") or "")),
+        "finish": str((result or {}).get("finish_reason") or ""),
+    }
+
+
+def _plan_parse_retries(cfg: dict[str, Any], deg_reason: str | None) -> int:
+    """JSON 解析失败后, 还要不要"原样再发一次"。
+
+    2026-11-23 用户定调: **判定为退化就不原样重试**。实测 2911 同 prompt 三发三断
+    (459/720/487 字, 每次烧 1,000 左右思考 token), 原样重发只是把同一堵墙撞三次。
+    退化直接换输入 (消毒 prompt); 只有"格式漂移"(输出够长但 JSON 坏了) 才值得原样重试。
+    """
+    if deg_reason:
+        return 0
+    return max(1, int(cfg.get("json_parse_primary_retries", 2) or 2))
+
+
+def _sanitize_special_tokens_map(text: str) -> tuple[str, dict, int]:
+    """消毒同时记下"改了哪几处": 返回 (新文本, {消毒后token: 原token}, 改动处数)。
+
+    记录是为了能还原 —— 模型会照抄被垫开的形态 (实测 note 2189 写了 `< think>`),
+    写库前把这几处换回来, 印记就没进笔记。只记整 token, 不做全局替换。
+    """
+    src = str(text or "")
+    mapping: dict[str, str] = {}
+    out: list[str] = []
+    pos = 0
+    hits = 0
+    for m in _TAG_LIKE_RE.finditer(src):
+        i = m.start()
+        out.append(src[pos:i])
+        out.append("< ")
+        j = i + 1
+        k = j
+        # token 只吃到标签字符为止: 碰到反引号/中文/空白就停 —— 否则映射会把
+        # 紧跟的 ` 也吸进去, 模型换个写法就匹配不上。
+        while k < len(src) and (src[k].isascii() and (src[k].isalnum() or src[k] in "_-./!?>")):
+            k += 1
+        mapping["< " + src[j:k]] = src[i:k]
+        hits += 1
+        pos = j
+    out.append(src[pos:])
+    return "".join(out), mapping, hits
+
+
+def _restore_sanitized_tokens(content: str, mapping: dict) -> tuple[str, int]:
+    """写库前把消毒痕迹换回原样。只匹配我们确实改过的整 token。"""
+    body = str(content or "")
+    if not body or not mapping:
+        return body, 0
+    restored = 0
+    for treated in sorted(mapping, key=len, reverse=True):
+        original = mapping[treated]
+        n = body.count(treated)
+        if n:
+            body = body.replace(treated, original)
+            restored += n
+    return body, restored
+
+
+def _sanitize_special_tokens(text: str) -> tuple[str, int]:
+    """把 ``<tag`` 形态的尖括号垫开 (``<tag`` → ``< tag``), 返回 (新文本, 改动数)。
+
+    只在**重试**时用, 首跑永远用原文 —— 动输入就动了证据。
+    选空格不选零宽: 实测零宽版本对 2911 是 1/2 (不可靠), 空格版本 2/2。
+    """
+    new_text, _mapping, hits = _sanitize_special_tokens_map(text)
+    return new_text, hits
 
 
 # ────────────────────────────────────────────────────────────
@@ -1338,11 +1647,17 @@ def _audit_note_markers(content: str) -> dict:
     }
 
 
-_ANCHOR_RE = re.compile(r"\[#(\d+)\]")
+# 问答锚点: 只认 `[#N]` 本身。末尾 (?!\() 排除 markdown 链接 `[#25](url)` ——
+# 那是正文里引用的 PR/issue 编号, 不是本批问答的序号。旧正则把它当锚点, 于是
+# `[#25]` 出现在只覆盖 10 条问答的笔记里就被判"锚点越界"(2026-11-26 实测 2 条误判)。
+_ANCHOR_RE = re.compile(r"\[#(\d+)\](?!\()")
 
 
 _NOTE_SIMPLIFY_RE = re.compile(r"[#*`>\-\s]，。、；：！？“”（）【】「」…—·.,;:!?(\[\])\"']+")
 NOTE_PREV_CONTAINMENT_MAX = 0.5
+# 整篇抄上一版的门槛: 被判定重复时, 若篇幅仍达到上一版的这个比例, 说明它不是
+# "只写本批变化"(那会明显更短), 而是把上一版原样重发 → 不写库。
+NOTE_REPEAT_WHOLE_MAX = 0.8
 
 
 def _note_overlap_with_prev(content: str, prev_text: str, k: int = 6) -> float:
@@ -1400,11 +1715,22 @@ def _validate_note_payload(content: str, qa_count: int, prev_text: str = "") -> 
         return {"status": "invalid", "reasons": reasons, "audit": audit}
     overlap = _note_overlap_with_prev(text, prev_text) if prev_text else None
     if overlap is not None and overlap > NOTE_PREV_CONTAINMENT_MAX:
+        # 区分两种重复 (2026-11-26 全量体检 1686 条得到):
+        #   · 只写变化 —— 篇幅明显短于上一版 (ratio 小)。内容虽是上一版的子集, 但这
+        #     正是修复轮"只写本批新变化"的正确形态 (实测 id 3483: 6,002 → 537 字),
+        #     必须照写, 拦掉会丢本批事实;
+        #   · 整篇抄写 —— 篇幅与上一版相当 (ratio ≥ NOTE_REPEAT_WHOLE_MAX)。实测
+        #     id 2337 / 3757 与上一版只差 3 字 / 2 字, 而输入 QA 差异达 94%/82%,
+        #     等于把旧事实原样再插一遍, 写进印序列只会污染。
+        prev_len = len(str(prev_text or "").strip())
+        ratio = (len(text.strip()) / prev_len) if prev_len else 1.0
         return {
             "status": "repetitive",
-            "reasons": [f"与上一版印重复 {overlap:.0%} (阈值 {NOTE_PREV_CONTAINMENT_MAX:.0%})"],
+            "reasons": [f"与上一版印重复 {overlap:.0%} (阈值 {NOTE_PREV_CONTAINMENT_MAX:.0%}), "
+                        f"篇幅为上一版的 {ratio:.0%}"],
             "audit": audit,
             "prev_overlap": round(overlap, 3),
+            "prev_len_ratio": round(ratio, 3),
         }
     if audit.get("missing_total"):
         detail = []
@@ -1417,6 +1743,18 @@ def _validate_note_payload(content: str, qa_count: int, prev_text: str = "") -> 
         return {"status": "repairable", "reasons": detail, "audit": audit}
     return {"status": "ok", "reasons": [], "audit": audit,
             "prev_overlap": (round(overlap, 3) if overlap is not None else None)}
+
+
+def _should_skip_repeat(verdict: dict[str, Any]) -> bool:
+    """判定"整篇抄上一版": 该批次不写库, 只推进游标并记账。
+
+    只拦篇幅相当的整篇重发; 修复轮"只写本批变化"的短版本 (ratio 小) 必须放行,
+    否则会把本批真事实一起丢掉。
+    """
+    return (
+        str(verdict.get("status") or "") == "repetitive"
+        and float(verdict.get("prev_len_ratio") or 0.0) >= NOTE_REPEAT_WHOLE_MAX
+    )
 
 
 def _repair_note_output(call_m3_fn, cfg, api_key, prompt, verdict, **call_kwargs):
@@ -3980,6 +4318,47 @@ def _segment_id_from_range(qa_range_start: int, qa_range_end: int) -> str:
     return f"{int(qa_range_start)}:{int(qa_range_end)}"
 
 
+def _record_repeat_skipped(
+    qa_range_start: int,
+    qa_range_end: int,
+    *,
+    overlap: float,
+    len_ratio: float,
+    cfg: dict[str, Any] | None = None,
+) -> None:
+    """整篇重复被拦下的批次记账 (observer_state.json → ``repeat_skipped``)。
+
+    与 ``failed_segments`` 分开: 那些是"调用失败, 待重试"; 这些是"调用成功,
+    但内容是把上一版重发一遍"——同一提示词重试不会变好, 要换输入/换提示再补跑。
+    记账只为一件用途: 事后能精确找到哪段 QA 没写进库。
+    """
+    path = _state_path(cfg)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        lst = data.get("repeat_skipped")
+        if not isinstance(lst, list):
+            lst = []
+        lst.append({
+            "qa_range": [int(qa_range_start), int(qa_range_end)],
+            "overlap": round(float(overlap), 3),
+            "len_ratio": round(float(len_ratio), 3),
+            "at": now_iso,
+        })
+        data["repeat_skipped"] = lst[-200:]
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - 记账失败不阻塞主流程
+        logger.warning("observer: 记录 repeat_skipped 失败 (%s: %s)", type(exc).__name__, exc)
+
+
 def _save_failed_segment(
     qa_range_start: int,
     qa_range_end: int,
@@ -5327,20 +5706,47 @@ def _observe_worker(
         text = result.get("text", "") or ""
         usage = result.get("usage") or {}
         logger.info(
-            "observer: M3 返 %d 字 (prompt_tokens=%s completion_tokens=%s latency=%.1fs)",
+            "observer: M3 返 %d 字 (prompt_tokens=%s completion_tokens=%s reasoning=%s latency=%.1fs)",
             len(text),
             usage.get("prompt_tokens", "?"),
             usage.get("completion_tokens", "?"),
+            _usage_reasoning_tokens(usage),
             latency,
         )
 
         # 7. 解析双输出 JSON
+        _san_map: dict = {}  # 走过消毒重试时才有内容, 用于写库前把痕迹换回原样
         parsed = _parse_observer_json(text)
+        # 2026-11-25: 结构合法但内容是空壳 (模型把格式样板原样吐回来) 也算失败批 ——
+        # 否则它会被写进库, 再被当成"上一版印"污染下一轮上下文。
+        _payload_reason: str | None = None
+        if parsed:
+            _payload_text = str((parsed.get("note") or {}).get("content") or "")
+            _payload_reason = _empty_payload_reason(_payload_text)
+            if _payload_reason:
+                logger.warning(
+                    "observer: 输出是空壳 (%s, %d 字) — 按失败批处理, 不写库",
+                    _payload_reason, len(_payload_text),
+                )
+                parsed = None
         if not parsed:
+            # 2026-11-23: 先归类再处置 —— 失败账不能清一色 json_parse,
+            # 提前收尾 / 循环 / 真格式漂移的处置路径不一样。
+            _deg_reason = _payload_reason or _degeneration_reason(result)
+            if _deg_reason:
+                logger.warning(
+                    "observer: 判定为退化输出 (%s) %s — 先同 prompt 重试, 无效再换输入",
+                    _deg_reason, _degeneration_evidence(result),
+                )
             # 恢复 primary 自身重试 (铁律: M3 偶发脏 JSON 必须重试≥3次, 不能只靠 fallback) —
             # 8/20 stage-2 把重试整段换成 fallback 一次, 导致 fallback key 失效时直接卡死整批。
             # primary 同 prompt 重发 1-3 次 (默认 2); 成功即走正常流程。
-            _primary_retries = max(1, int(cfg.get("json_parse_primary_retries", 2) or 2))
+            _primary_retries = _plan_parse_retries(cfg, _deg_reason)
+            if _primary_retries == 0:
+                logger.warning(
+                    "observer: 判定退化 (%s) — 跳过原样重试, 直接换消毒输入",
+                    _deg_reason,
+                )
             for _attempt in range(1, _primary_retries + 1):
                 logger.warning(
                     "observer: JSON 解析失败, primary 重试 %d/%d (fallback 未启用或失败时仍可救回)",
@@ -5375,6 +5781,48 @@ def _observe_worker(
                         "observer: primary 重试失败: %s",
                         str(_retry_result["error"])[:120],
                     )
+            # 2026-11-23: 同 prompt 重发救不了"内容确定性触发"的退化 (QA 2911 五发五断),
+            # 必须换输入。这一级只动输入形状、不动内容语义: 把 <tag 形态的尖括号
+            # 垫开, 断掉触发链路。实测 pos/neg 对照: 空格版 2/2 通过, 零宽版 1/2。
+            if not parsed:
+                _san_prompt, _san_map, _san_hits = _sanitize_special_tokens_map(prompt)
+                _san_retries = max(0, int(cfg.get("json_parse_sanitize_retries", 2) or 0))
+                if _san_hits and _san_retries:
+                    logger.warning(
+                        "observer: 换消毒 prompt 重发 (改动 %d 处尖括号, 最多 %d 次)",
+                        _san_hits, _san_retries,
+                    )
+                    for _attempt in range(1, _san_retries + 1):
+                        try:
+                            _san_result = call_m3(
+                                merged, api_key, _san_prompt,
+                                max_completion_tokens=max_completion_tokens,
+                                thinking=thinking, reasoning_split=reasoning_split,
+                            )
+                        except Exception as _e_san:
+                            logger.warning(
+                                "observer: 消毒重发异常: %s", _safe_err(_e_san)[:120],
+                            )
+                            continue
+                        if "error" in _san_result:
+                            logger.warning(
+                                "observer: 消毒重发失败: %s",
+                                str(_san_result["error"])[:120],
+                            )
+                            continue
+                        _san_text = _san_result.get("text", "") or ""
+                        _parsed_san = _parse_observer_json(_san_text)
+                        if _parsed_san:
+                            parsed = _parsed_san
+                            logger.info(
+                                "observer: 消毒重发成功 (第 %d 次, %d 字, 改动 %d 处)",
+                                _attempt, len(_san_text), _san_hits,
+                            )
+                            break
+                        logger.warning(
+                            "observer: 消毒重发第 %d 次仍不可解析 (%d 字, %s)",
+                            _attempt, len(_san_text), _degeneration_reason(_san_result),
+                        )
             # v4 (2026-08-20) stage-2 修复: JSON 解析失败时, 在尝试持久化失败段
             # 之前先走一次 fallback_llm (LLM 层而非 embedding 层) — 因为当前 primary
             # 模型可能只是该次输出格式漂了, 一个不同模型常常能稳定产出可解析 JSON。
@@ -5436,6 +5884,7 @@ def _observe_worker(
                     error_class="json_parse",
                     reason=(
                         f"json_parse_failed"
+                        f"{'_deg=' + _deg_reason if _deg_reason else ''}"
                         f"{'_fb_after_fallback=' + _json_secondary_fb_model if _json_secondary_fb_model else '_no_fallback'}"
                     ),
                     batch_size=len(rows),
@@ -5479,6 +5928,14 @@ def _observe_worker(
         # 8. 提取字段 (容错：缺字段给空字符串, 不抛)
         note_obj = parsed.get("note") or {}
         note_content = str(note_obj.get("content") or "").strip()
+        # 2026-11-23: 走过消毒重试的话, 笔记里可能照抄了被垫开的 `< think>` 形态。
+        # 这是我们自己造成的扰动, 写库前换回原样 (不是替模型补内容)。
+        if _san_map and note_content:
+            note_content, _restored_n = _restore_sanitized_tokens(note_content, _san_map)
+            if _restored_n:
+                logger.info(
+                    "observer: 还原消毒痕迹 %d 处 (笔记引用了被垫开的标签)", _restored_n,
+                )
         # source_qa_range 必须用代码真值 (first_qa_id/last_qa_id_now), 不信 LLM 输出
         # (M3 会编造 [1,30) 之类的默认值覆盖真实范围 — 2026-08-03 数据审计发现)
         qa_range_start = first_qa_id
@@ -5570,6 +6027,30 @@ def _observe_worker(
                     "observer: 修复后仍不合格 (%s): %s — 照写并计数, 不替模型补内容",
                     _verdict["status"], "; ".join(_verdict["reasons"])[:200],
                 )
+
+        # 整篇抄上一版 → 不写库 (2026-11-26): 修复轮也救不回来的"原样重发"若照写,
+        # 印序列里会插一条与上一版近乎逐字相同的快照, 还被当作下一轮 prev 继续放大。
+        # 只拦"篇幅相当"的整篇重复; "只写本批变化"的短版本照写 (那是正确形态)。
+        if _should_skip_repeat(_verdict):
+            logger.warning(
+                "observer: 整篇重复上一版 (重叠 %s / 篇幅 %s%%) — 不写 note, 推进游标;"
+                " QA %s-%s 记入 repeat_skipped 待补跑",
+                _verdict.get("prev_overlap"),
+                int(100 * float(_verdict.get("prev_len_ratio") or 0)),
+                first_qa_id, last_qa_id_now,
+            )
+            _record_repeat_skipped(
+                first_qa_id, last_qa_id_now,
+                overlap=_verdict.get("prev_overlap") or 0.0,
+                len_ratio=_verdict.get("prev_len_ratio") or 0.0,
+                cfg=cfg,
+            )
+            _save_cursor(last_qa_id_now, cfg)
+            try:
+                pg.close()
+            except Exception:
+                pass
+            return
 
         # 归属/状态词审计 (2026-11-21): 提示词只是提醒, 遵从性不是契约。
         # 只统计 + 打日志, 不自动补写 (替模型断言状态比缺失更危险)。

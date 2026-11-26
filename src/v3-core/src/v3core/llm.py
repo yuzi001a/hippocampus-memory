@@ -299,6 +299,8 @@ class LLMClient:
                 result = self._chat_minimax(system, messages, temperature, _output_override)
             elif self.provider == "openai":
                 result = self._chat_openai(system, messages, temperature, _output_override)
+            elif self._opencode_family():
+                result = self._chat_via_profile(system, messages, temperature, _output_override)
             else:
                 raise ValueError(f"不支持的 LLM provider: {self.provider}")
             if _llmstatus is not None:
@@ -315,6 +317,73 @@ class LLMClient:
                     pass
             raise
     
+    def _opencode_family(self) -> bool:
+        """这个 provider 是不是 OpenCode Zen/Go 家族（含自定义同族名字）。"""
+        try:
+            from . import providers_opencode
+        except Exception:
+            return False
+        raw = str(self.provider or "").strip().lower()
+        if raw in ("opencode", "opencode-go", "opencode-zen"):
+            return True
+        if raw.startswith("opencode"):
+            return True
+        return providers_opencode.family_of(raw, self.base_url) is not None
+
+    def _chat_via_profile(self, system: str, messages: list[dict], temperature: float,
+                          max_output_tokens: int | None = None) -> str:
+        """按通道画像发请求：URL / 头 / 字段名全由 providers 决定，调用点不判断模型名。
+
+        OpenCode 家族三种传输混杂（responses / chat / anthropic），而且缺
+        x-opencode-session 直接 400，所以这里统一走画像，不再各写一份。
+        """
+        from . import providers
+
+        cfg = self._raw_config
+        model = str(self.model or "")
+        profile = providers.resolve_profile(model, cfg, api_key=self.api_key, base_url=self.base_url)
+        budget = self._max_tokens if max_output_tokens is None else max_output_tokens
+        effort = self._resolved_reasoning_effort() if hasattr(self, "_resolved_reasoning_effort") else None
+
+        if profile.api_mode == "responses":
+            # /responses 用 input + instructions：把多轮历史折成带角色标记的文本，
+            # system 单独走 instructions。
+            lines = [f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages]
+            prompt = "\n\n".join(lines)
+            body = providers.build_payload(
+                profile, model, prompt, system=system, max_tokens=budget,
+                temperature=temperature, reasoning_effort=effort,
+            )
+        else:
+            body = {"model": model}
+            msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
+            body["messages"] = msgs
+            body["temperature"] = temperature
+            body[profile.max_tokens_field] = budget
+            if effort and profile.supports_cap("reasoning_effort"):
+                body["reasoning_effort"] = effort
+
+        session_id = None
+        try:
+            from .agent_identity import resolve_session_id
+
+            session_id = resolve_session_id(cfg)
+        except Exception:
+            pass
+        headers = providers.build_headers(profile, self.api_key, session_id=session_id)
+        proxies = {"http": self._proxy, "https": self._proxy} if getattr(self, "_proxy", "") else None
+        resp = requests.post(profile.url(), json=body, headers=headers,
+                            timeout=self._timeout, proxies=proxies)
+        if resp.status_code != 200:
+            from . import providers_opencode
+
+            raise RuntimeError(
+                f"OpenCode 调用失败 HTTP {resp.status_code}: "
+                f"{providers_opencode.explain_error(resp.status_code, resp.text)}"
+            )
+        parsed = providers.parse_response(profile, resp.json())
+        return str(parsed.get("text") or "")
+
     def _chat_minimax(self, system: str, messages: list[dict], temperature: float,
                       max_output_tokens: int | None = None) -> str:
         # OpenAI 兼容端点 — 优先用 self.base_url（来自 config.yaml llm.base_url），

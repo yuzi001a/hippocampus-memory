@@ -7,6 +7,132 @@
 
 ---
 
+## [4.3.0] - 2026-11-26
+
+### 修：模型「写一半就停」，以及三处让不合格产出溜过去的校验漏子
+
+**退化兜底**
+
+`deepseek-v4.1-flash` 走 opencode-go 时，遇到特定输入会先烧一段思考、再自己吐结束符，
+留下半截 JSON——服务端报 `completed`、`finish_reason=stop`，不是超时也不是预算打满。
+实测同一提示词同一批问答：原样重发 3 次全断；把输入里的 `<` 垫开一格后 3 次全通。
+
+现在判定退化后不再原样重试，直接换消毒过的输入重发；消毒痕迹按映射在写库前还原，
+印记不进笔记。判定只看形状（半截 JSON / 提前收尾 / 逐字循环），内容质量仍归校验层。
+
+**四条先前溜过去的**
+
+- **省略不等于关思考**：请求里不带 `reasoning` 字段时，模型仍然产 163–278 token 思考；
+  显式发 `"none"` 才是 0。现在通道支持 effort 且配置要求关思考时补 `"none"`。
+  实测中位单轮 80s → 28s。
+- **空壳输出**：模型偶尔把提示词里的格式样板原样吐回来（43 字）。旧校验只查「锚点越界」，
+  不查「压根没有锚点」。现在无正文 / 无引用编号按失败批处理，不写库。
+- **整篇抄上一版**：修复轮救不回来的「原样重发」以前照写。实测有两条与上一版分别只差
+  3 字 / 2 字，而输入问答差异达 94% / 82%。现在按篇幅区分——只写本批变化的短版本
+  （篇幅 < 上一版 80%）照写，整篇重发不写库、推进游标并记进 `repeat_skipped`。
+- **锚点正则**：`[#25](https://.../pull/25)` 是正文里的超链接，不是问答锚点。旧正则
+  把它算进去，实测 2 条只覆盖 10 条问答的正常笔记被判「锚点越界」。
+
+### 验证
+
+- 单元测试 25 条（本版新增 6 条）。
+- Y400 全量回放 19,271 条问答 / 1,686 条笔记：覆盖 19,270 条（余 1 条为同一句问了两遍）、
+  整篇重复 0、锚点越界 0、空壳 0、「字数 >8,000 且压缩比 >0.6」0 条。
+- 生产库 637 条历史笔记在新校验下零误判。
+- 关思考实测：单轮中位 80s → 28s；生产 11-26 03:15 真实调用 reasoning=0、33.5s、
+  写出 5,777 字。
+
+---
+
+## [4.2.1] - 2026-11-23
+
+### 修：切到 opencode-go 后 E1 报「不支持的 LLM provider」
+
+`llm.py` 原本只有 minimax / openai 两条硬编码分支，配置换成 opencode-go 后
+E1 合成、抽取、摘要这些不走观察者画像的调用直接失败。
+
+现在 OpenCode 家族（含自定义同族名字）统一走通道画像：URL、会话头、UA、
+输出字段名按画像给，responses 模式把多轮历史折进 `input`、system 走 `instructions`，
+chat 模式保留原生 messages。其余 provider 行为不变。
+
+验证：`tests/test_llm_opencode.py` 3 条 + 相关 364 passed / 5 skipped。
+
+---
+
+## [4.2.0] - 2026-11-23
+
+### OpenCode Go / Zen 适配层
+
+把这家中转自己的规矩集中到一处（`providers_opencode.py`），调用点不再判断模型名：
+
+- **按模型选传输**：`gpt-*`/`grok-*`/`muse-spark` 走 `/responses`，
+  `claude-*`/`minimax-*`/`qwen*`/`union-alpha` 走 Anthropic 线，其余走 `/chat/completions`；
+- **端点与传输成对**：官方主机上路径段按 family 纠正（`/zen` vs `/zen/go`），anthropic 线去掉 `/v1`，
+  其余补 `/v1`；自建代理端点一个字不改；
+- **会话头自动补**：`x-opencode-session` 缺失即 400，现在画像里自动带；
+- **模型 id 归一**：`opencode-go/xxx` 前缀在发请求前剥掉；
+- **错误翻译**：400 MissingSessionID / 401 模型不支持 / 403 免费档 都翻成人话再报。
+
+配置上 `providers.<name>` 可以留空（family 名或 opencode.ai 端点即可识别），
+显式写的 `api_mode` / `base_url` / `session_header` 一律优先。
+
+DEFAULT_SUPPORTS 按传输给出（responses 支持 json_schema 等），显式 `supports:` 覆盖。
+
+---
+
+## [4.1.0] - 2026-11-22
+
+### 代理身份（记忆插件作为 agent 向 provider 自报身份）
+
+OpenCode Go 的文档要求客户端「每个会话发一个稳定的 session id」并「用自己的
+User-Agent，而不是通用 SDK 或 HTTP 库的名字」。历史实现两条都不合规，且都不报错：
+
+- `_session_affinity_id` 把 pid 写进会话 id → 进程重启即「新会话」，后端亲和与提示词缓存全丢；
+- 请求从未设置 User-Agent，出去是 `python-requests/x.y`。
+
+改动：
+
+- 新增 `agent_identity`：安装首次运行生成安装 id 落盘（`agent_session.json`），
+  会话 id = 安装 id + 当天日期 —— 同日恒定（重启/升级不变），跨天换新；
+- `providers`：`ProviderProfile` 增加 `user_agent` / `client_headers`，`build_headers` 必发 UA，
+  默认 `hippocampus-memory/<version>`，可由 `providers.<name>.user_agent` 覆盖；
+- `observer`：会话 id 改走 `agent_identity`，不再含进程号；`observer.session_id` 可显式钉死。
+
+未改提示词、模型、数据结构。
+
+---
+
+## [4.0.9] - 2026-11-22
+
+### 有界重试（长请求被掐断不再整批作废）
+
+- `call_m3` 对**瞬态失败**重试：连接中断 / 超时 / 408·425·429·5xx，默认 3 次、指数退避（2s→4s，上限 30s），
+  服务端给 `Retry-After` 时听它的。
+- 配置/鉴权/结构类 4xx（400/401/403/404/422）一次都不重试——重试它们只是把错误拖长。
+- 可配：`observer.retry_attempts` / `observer.retry_backoff_s`。
+- 实测依据：500 条问答样本跑批时 23 发请求有 6 发被掐断（`Max retries exceeded`），
+  手工补跑三发内全部救回；接上重试后同类失败不再丢批。
+
+## [4.0.8] - 2026-11-22
+
+### 多模型适配（换模型/换通道不再改代码）
+
+- 新增 `providers.py`：通道画像（`chat_completions` / `responses` / `anthropic_messages`），
+  按 `config.yaml` 的 `providers:` 段解析端点、鉴权头、输出上限字段名、支持的能力，
+  并把三家响应统一折成 `{text, reasoning, usage, finish_reason}`。
+- `models:` 段新增 `provider` 绑定：换模型只改配置两行；未声明的端点保持历史形状并给一次 WARNING。
+- `observer.call_m3` 改走画像；通道能强制 `json_schema` 时自动带 `OBSERVER_RESPONSE_SCHEMA`，
+  不支持的通道（如 MiniMax）行为完全不变。
+- 真实 canary（OpenCode Go `/responses` + strict schema，9 条真实 QA）：70.2s，
+  印 3,173 字，归属/状态零缺失，3 个主题动作。
+
+### 调研结论（写入文档，避免再踩）
+
+- DeepSeek 官方 `chat/completions` 的 `response_format: json_schema` 返回 400；
+  `json_object` 可解析但字段不强制。
+- DeepSeek 官方与 OpenCode Go 的 `/responses` + `text.format.json_schema` 均**真正强制**；
+  OpenCode Go 的 `chat/completions` 也强制。
+
 ## [4.0.7] - 2026-11-21
 
 ### 修复：回放模式取批排序与游标同维度
