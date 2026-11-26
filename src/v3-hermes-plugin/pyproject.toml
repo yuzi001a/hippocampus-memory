@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "v3-core>=4.0.7,<5.0.0",
+    "v3-core>=4.3.0,<5.0.0",
     "requests",
     "pyyaml",
 ]
