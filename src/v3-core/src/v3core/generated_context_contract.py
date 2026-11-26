@@ -517,6 +517,18 @@ def validate_identity_block(text: str) -> str:
         target_max=IDENTITY_TARGET_MAX_CHARS,
     )
 
+    # 规则 2b：结尾完整性（2026-11-26）
+    # 生产实测：一份 ~100 字、断在「……因为」的身份块通过了全部校验，并从 16:53 起
+    # 被每个新会话读取注入。没有下限确实是对的（「暂无新数据。」是合法产物），
+    # 但"句子没写完"和"写得短"是两件事：前者是被截断的残块，后者只是信息少。
+    # 判据只认句末标点，不认长度。
+    _tail = stripped.rstrip()
+    if _tail and _tail[-1] not in "。！？…」』】）.!?\"'":
+        raise _reject(
+            "TRAILING_INCOMPLETE",
+            "结尾不是句末标点，疑似被截断: ..." + _tail[-24:],
+        )
+
     # 规则 3：**不适用** —— 身份块无固定标题，任何标题要求都会误杀合法产物。
 
     # 规则 4：模板 / provider 控制标记（与态势总览同一份 shape）
