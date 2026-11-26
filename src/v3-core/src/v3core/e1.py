@@ -339,7 +339,10 @@ E1_SYSTEM_PROMPT = """你是持续的自我叙事引擎。下面是一批主题�
 
 【结构】
 - 严格三段，顺序不可调换。
-- 每段 5 条，共 15 条；每条 200-300 字，全文 3500-4500 字。"""
+- 每段 5 条，共 15 条。
+- 每条 250-350 字：一条只写一个判断，但要把「原来怎么看→遇到什么→现在怎么看」讲完整，
+  讲不透就说明这条还没想清楚，不许用短句凑数。
+- 全文 4200-5200 字。低于 4000 字视为不合格 —— 实测 3,100 字那种薄版判断力掉 15 个点。"""
 
 IDENTITY_SHORT_PROMPT = """你是一个身份核心提炼引擎。根据下面这份最新的印，输出 300-500 字的第一人称身份核心。
 
@@ -433,7 +436,7 @@ CATEGORY_INSTRUCTIONS = {
 # 两条核心特质整条丢失, 换成一串项目名与任务编号。这里把「印该长什么样」变成
 # 可机检条款: 不合格就重写, 重写仍不合格就不写库、保留上一版。
 _YIN_SECTION_NAMES = ("我是谁", "怎么判断", "行为基线")
-_YIN_MIN_CHARS = 2500
+_YIN_MIN_CHARS = 3800
 _YIN_MAX_CHARS = 6000
 _YIN_MIN_BULLETS_PER_SECTION = 4
 # 正文里出现这些 = 项目清单味 (来源标注里的不算, 那是溯源)
@@ -463,6 +466,26 @@ _YIN_ANCHORS = (
 _YIN_MIN_ANCHOR_COVERAGE = 10  # 14 条里至少 10 条
 # 两条底色必选: 全量补织 1,195 张卡时, 最先被项目卡淹没的就是它们
 _YIN_REQUIRED_ANCHORS = ("基础设施", "口语直说")
+
+
+def _normalize_yin_headings(text: str) -> str:
+    """把 ``# 我是谁`` / ``### 我是谁`` 归一成 ``## 我是谁``。
+
+    实测: 同一份提示词跑四批, 有一批把二级标题写成了一级 (少一个 #)。
+    契约会判缺小节直接拒, 而切段入库 (_ingest_yin_segments) 只认 ``## `` ——
+    就算契约放行, 这份印也进不了召回池。归一化是无损的, 比重写一轮便宜。
+    """
+    if not text:
+        return text
+    out = text
+    for _name in _YIN_SECTION_NAMES:
+        out = re.sub(
+            r"^#{1,6}\s*" + re.escape(_name) + r"\s*$",
+            "## " + _name,
+            out,
+            flags=re.M,
+        )
+    return out
 
 
 def _count_units(block: str) -> list[str]:
@@ -820,6 +843,7 @@ def synthesize_yin(
     # ── 印的机械契约闸门 (2026-11-26) ──
     # 不合格先带原因重写一轮; 仍不合格就不写库、保留上一版 —— 宁可这轮不更新,
     # 也不要把一版写成项目清单的印覆盖上去。
+    y_content = _normalize_yin_headings(y_content)
     _v = _validate_yin_content(y_content)
     if not _v["ok"]:
         logger.warning("[e1] 印不合格 (%s) — 带原因重写一轮", "; ".join(_v["reasons"])[:220])
