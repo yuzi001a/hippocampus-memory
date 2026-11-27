@@ -749,3 +749,29 @@ def test_legacy_hdbscan_topic_modules_removed():
 
     for mod_name in ("topic_cluster", "topic_fusion", "topic_maintain", "topic_refine"):
         assert importlib.util.find_spec(f"v3core.{mod_name}") is None
+
+
+def test_topic_v2_supersedes_old_claim_with_parenthetical_reason():
+    from v3core.topic_v2 import TopicConsolidatorV2
+
+    consolidator = TopicConsolidatorV2(embed_fn=embed_text)
+    dossiers, report = consolidator.consolidate_qa_stream(
+        [
+            {
+                "id": 1,
+                "timestamp": _utc(10),
+                "question": "定时任务模块现在用什么？",
+                "answer": "先使用 Cron-Worker-V1 跑定时任务；因为简单所以暂用它。",
+            },
+            {
+                "id": 2,
+                "timestamp": _utc(0),
+                "question": "定时任务架构是不是改了？",
+                "answer": "正式废弃 Cron-Worker-V1（以前轮询延迟太高），改为 Event-Scheduler-V2。",
+            },
+        ]
+    )
+    assert len(dossiers) == 1
+    assert report.superseded_claims == 1
+    assert any("Event-Scheduler-V2" in c.text for c in dossiers[0].current_claims)
+    assert any("Cron-Worker-V1" in s.text for s in dossiers[0].superseded_claims)

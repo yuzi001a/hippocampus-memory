@@ -922,11 +922,14 @@ class TopicConsolidatorV2:
         if note.update_type in ("evolve", "correct"):
             new_cid = f"c_{note.evidence_qa_id}_{len(target.current_claims) + len(target.superseded_claims) + 1}"
             old_low = note.replaces_text.strip().lower()
+            old_clean = re.sub(r"[（(][^）)]*[）)]", "", old_low).strip()
+            old_codes = [c.lower() for c in _ASCII_CODE_TOKEN_RE.findall(note.replaces_text)]
+            old_terms = [t for t in dict.fromkeys([old_low, old_clean, *old_codes]) if len(t) >= 2]
             kept_claims: list[TopicClaim] = []
             for claim in target.current_claims:
                 c_low = claim.text.lower()
                 is_superseded = (
-                    (bool(old_low) and old_low in c_low)
+                    any(term in c_low for term in old_terms)
                     or claim.kind in ("legacy_seed", "problem")
                 )
                 if is_superseded:
@@ -953,10 +956,12 @@ class TopicConsolidatorV2:
                     )
                 )
             # Prune obsolete identifier from keywords and add new clean keywords.
-            if old_low:
-                target.keywords = [kw for kw in target.keywords if kw.lower() != old_low]
+            if old_terms:
+                target.keywords = [
+                    kw for kw in target.keywords if not any(term == kw.lower() for term in old_terms)
+                ]
             for kw in note.keywords:
-                if kw and (not old_low or kw.lower() != old_low) and kw not in target.keywords:
+                if kw and not any(term == kw.lower() for term in old_terms) and kw not in target.keywords:
                     target.keywords.append(kw)
 
         elif note.update_type == "historical_note":

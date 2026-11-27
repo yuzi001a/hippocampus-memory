@@ -103,7 +103,7 @@ from v3core.topic_v2 import (  # noqa: E402
 )
 
 _QA_PREFIX = "tv2_pg_qa_"
-_TOPIC_PREFIX = "topic_"
+_TOPIC_PREFIX = "tv2_"
 _LEGACY_TOPIC_ID = "tv2_pg_legacy_topic"
 _NOTE_PREFIX = "tv2_pg_note_"
 
