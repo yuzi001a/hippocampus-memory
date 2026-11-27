@@ -3544,22 +3544,96 @@ class V3Core:
 
     # ── 手帐 ──
 
+    @staticmethod
+    def _is_topic_v2_enabled(cfg: Any) -> bool:
+        if cfg is None:
+            return False
+        if isinstance(cfg, dict):
+            return bool((cfg.get("prefetch") or {}).get("topic_v2_mode", False))
+        pf = getattr(cfg, "prefetch", None)
+        if pf is not None:
+            return bool(getattr(pf, "topic_v2_mode", False))
+        return False
 
+    def consolidate_topics_v2(
+        self,
+        *,
+        dry_run: bool = False,
+        batch_limit: int = 100,
+        use_llm: bool = True,
+        embed_fn=None,
+        llm_fn=None,
+    ) -> dict:
+        """Incrementally consolidate new PG QA rows into Topic V2 dossiers."""
+        import threading as _threading
+        from .config import _resolve_data_dir
+        from .topic_v2 import consolidate_pg_incremental, make_gateway_llm_fn
 
+        lock = getattr(self, "_topic_v2_lock", None)
+        if lock is None:
+            lock = _threading.Lock()
+            self._topic_v2_lock = lock
 
+        cfg = getattr(self, "_config", None) or getattr(self, "config", None)
+        pg = getattr(self, "_pg", None) or getattr(self, "pg", None)
+        if pg is None:
+            return {"skipped": True, "reason": "no_pg"}
 
+        eff_embed_fn = embed_fn
+        if eff_embed_fn is None:
+            embed_cfg = safe_embed_cfg(cfg) if cfg is not None else None
+            if embed_cfg is None:
+                return {"skipped": True, "reason": "no_embedding"}
+            eff_embed_fn = lambda text: call_embedding(str(text or ""), embed_cfg) or []
 
+        eff_llm_fn = llm_fn
+        if eff_llm_fn is None and use_llm:
+            try:
+                eff_llm_fn = make_gateway_llm_fn(cfg)
+            except Exception:
+                eff_llm_fn = None
 
-
-
+        state_dir = _resolve_data_dir(cfg)
+        with lock:
+            result = consolidate_pg_incremental(
+                pg,
+                embed_fn=eff_embed_fn,
+                llm_fn=eff_llm_fn,
+                state_dir=state_dir,
+                dry_run=bool(dry_run),
+                batch_limit=max(int(batch_limit or 100), 1),
+            )
+        if not dry_run and int(result.get("upserted_topics") or 0) > 0:
+            try:
+                self._notify_topic_recall_invalidation()
+            except Exception as e:
+                logger.warning("consolidate_topics_v2 on_topics_commit 失败 (非阻塞): %s", _safe_err(e)[:100])
+        return result
 
     def _on_live_flush(self, items: list):
-        """LiveBuffer 刷入 PG 后的回调 — 触发轻量主题匹配.
+        """LiveBuffer 刷入 PG 后的回调 — 触发轻量主题匹配或 Topic V2 增量巩固.
 
         Bound to V3Core (not LiveBuffer). TopicRecallCache.invalidate runs only
         after the pool lease / direct connection is fully released.
         """
         if not items:
+            return
+        cfg_v2 = getattr(self, "_config", None) or getattr(self, "config", None)
+        if self._is_topic_v2_enabled(cfg_v2):
+            import threading as _threading
+
+            lock = getattr(self, "_topic_v2_lock", None)
+            if lock is None:
+                lock = _threading.Lock()
+                self._topic_v2_lock = lock
+            if getattr(lock, "locked", lambda: False)():
+                return
+            try:
+                self.consolidate_topics_v2(dry_run=False, batch_limit=20)
+            except ValueError:
+                raise
+            except Exception as e:
+                logger.warning("_on_live_flush topic_v2 consolidation error: %s", _safe_err(e)[:100])
             return
         mutated = False
         try:

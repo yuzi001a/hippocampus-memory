@@ -251,6 +251,14 @@ def main():
     serve_p.add_argument("--ready-json", action="store_true",
                          help="绑定成功后向 stdout 打印一条确定性 ready JSON(含实际端口)")
 
+    tv2_p = sub.add_parser("topics-v2", help="查看或增量整理 Topic V2 结构化主题档案")
+    tv2_p.add_argument("--inspect", action="store_true", help="查看当前 Topic V2 水位线与主题档案摘要")
+    tv2_p.add_argument("--dry-run", action="store_true", help="仅预览增量整理结果，不写入数据库与状态文件")
+    tv2_p.add_argument("--limit", type=int, default=100, help="单次最多处理的增量 QA 条数 (默认 100)")
+    tv2_p.add_argument("--deterministic", action="store_true", help="强制使用离线规则整理，不调用 LLM")
+    tv2_p.add_argument("--state-dir", default="", help="覆盖状态与档案目录")
+    tv2_p.add_argument("--json", action="store_true", help="以 JSON 格式输出")
+
     # Thin config control plane (subcommands: show / validate /
     # set-provider / set-key / set-toggle / test). Keep legacy commands
     # usable if the config surface cannot import or register, but fail
@@ -295,6 +303,23 @@ def main():
             print("error: config CLI unavailable (config_cli import failed)", file=sys.stderr)
             sys.exit(2)
         sys.exit(run_config(args))
+    elif args.command == "topics-v2":
+        from .topic_v2 import main as topic_v2_main
+
+        tv2_argv: list[str] = []
+        if args.inspect:
+            tv2_argv.append("--inspect")
+        if args.dry_run:
+            tv2_argv.append("--dry-run")
+        if args.limit != 100:
+            tv2_argv.extend(["--limit", str(args.limit)])
+        if args.deterministic:
+            tv2_argv.append("--deterministic")
+        if args.state_dir:
+            tv2_argv.extend(["--state-dir", args.state_dir])
+        if args.json:
+            tv2_argv.append("--json")
+        sys.exit(topic_v2_main(tv2_argv))
     else:
         parser.print_help()
 

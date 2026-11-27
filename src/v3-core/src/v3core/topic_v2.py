@@ -105,7 +105,8 @@ _PHASE1_SYSTEM_PROMPT = (
     "}\n"
     "规则：1) 发生 A->B 演进或纠正时必须标为 evolve/correct 并填 replaces_text；\n"
     "2) 回溯历史下线原因时标为 historical_note，不得污染当前结论；\n"
-    "3) claim_text 只陈述真实明确信息，不杜撰。"
+    "3) claim_text 只陈述真实明确信息，不杜撰；\n"
+    "4) 若当前 QA 只是零碎上下文或子模块代号、缺乏独立主题价值，优先 attach 到最相关的候选主题或 skip，避免拆出碎小主题。"
 )
 
 
@@ -1415,3 +1416,126 @@ def consolidate_pg_incremental(
         "skipped_qas": report.skipped_qas,
         "upserted_topics": 0 if dry_run else len(changed_dossiers),
     }
+
+
+def inspect_dossiers_summary(state_dir: str | Path) -> dict[str, Any]:
+    """Return a concise JSON-serializable snapshot of persisted Topic V2 state."""
+    root = Path(state_dir)
+    state_path = root / "topic_v2_state.json"
+    dossiers_path = root / "topic_v2_dossiers.json"
+
+    state: dict[str, Any] = {}
+    if state_path.is_file():
+        try:
+            raw = json.loads(state_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                state = raw
+        except Exception:
+            state = {}
+
+    dossiers = load_dossiers(dossiers_path)
+    return {
+        "state_dir": str(root),
+        "last_qa_id": int(state.get("last_qa_id") or 0),
+        "updated_at": str(state.get("updated_at") or ""),
+        "topic_count": len(dossiers),
+        "topics": [
+            {
+                "topic_id": d.topic_id,
+                "title": d.title,
+                "last_evidence_qa_id": int(d.last_evidence_qa_id),
+                "current_claims_count": len(d.current_claims),
+                "superseded_claims_count": len(d.superseded_claims),
+                "summary": d.summary,
+            }
+            for d in dossiers
+        ],
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI entrypoint for inspecting or incrementally running Topic V2 consolidation."""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="v3core.topic_v2",
+        description="Inspect or incrementally consolidate Topic V2 structured dossiers.",
+    )
+    parser.add_argument("--inspect", action="store_true", help="Inspect current Topic V2 watermark and dossiers.")
+    parser.add_argument("--dry-run", action="store_true", help="Preview incremental consolidation without writing PG or state files.")
+    parser.add_argument("--limit", type=int, default=100, help="Max new QA rows to process per run (default: 100).")
+    parser.add_argument("--deterministic", action="store_true", help="Force offline deterministic consolidation without calling LLM.")
+    parser.add_argument("--state-dir", default="", help="Override state/dossier directory (defaults to configured profile data dir).")
+    parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    from .config import _resolve_data_dir, resolve_config
+
+    cfg = None
+    if args.state_dir:
+        state_dir = Path(args.state_dir)
+    else:
+        cfg = resolve_config()
+        state_dir = _resolve_data_dir(cfg)
+
+    if args.inspect:
+        payload = inspect_dossiers_summary(state_dir)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"topic_v2 inspect: state_dir={payload['state_dir']} "
+                f"last_qa_id={payload['last_qa_id']} topics={payload['topic_count']}"
+            )
+            for item in payload["topics"]:
+                print(
+                    f"  - {item['topic_id']} | {item['title']} "
+                    f"(last_qa={item['last_evidence_qa_id']}, "
+                    f"current={item['current_claims_count']}, "
+                    f"superseded={item['superseded_claims_count']}): {item['summary'][:80]}"
+                )
+        return 0
+
+    if cfg is None:
+        cfg = resolve_config()
+
+    from .embedding import call_embedding, safe_embed_cfg
+    from .pg_store import PgEmbedStore
+
+    embed_cfg = safe_embed_cfg(cfg)
+    if embed_cfg is None:
+        print("topic_v2 error: embedding endpoint/config is not configured.", file=sys.stderr)
+        return 1
+
+    pg_cfg = getattr(cfg, "pg", None)
+    if pg_cfg is None:
+        print("topic_v2 error: PostgreSQL storage is not configured.", file=sys.stderr)
+        return 1
+
+    pg = PgEmbedStore(cfg)
+    llm_fn = None if args.deterministic else make_gateway_llm_fn(cfg)
+    embed_fn = lambda text: call_embedding(str(text or ""), embed_cfg) or []
+
+    result = consolidate_pg_incremental(
+        pg,
+        embed_fn=embed_fn,
+        llm_fn=llm_fn,
+        state_dir=state_dir,
+        dry_run=bool(args.dry_run),
+        batch_limit=max(int(args.limit or 100), 1),
+    )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"topic_v2 sync: dry_run={result['dry_run']} "
+            f"processed={result['processed_qas']} created={result['created_topics']} "
+            f"updated={result['updated_topics']} superseded={result['superseded_claims']} "
+            f"upserted={result['upserted_topics']} last_qa_id={result['new_last_qa_id']}"
+        )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

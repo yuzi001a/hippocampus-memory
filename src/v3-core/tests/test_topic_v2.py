@@ -490,3 +490,142 @@ def test_live_bench_config_parsing_and_zero_key_leakage(tmp_path, monkeypatch):
     assert fake_secret not in report_txt
     assert fake_secret not in summary_txt
     assert "[REDACTED]" in summary_txt
+
+
+def test_config_control_set_toggle_topic_v2_mode(tmp_path):
+    from v3core.config_control import ConfigControlService
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        f"mode: cloud\nbasePath: {tmp_path}\nprefetch:\n  enabled: true\n  dual_path: true\n",
+        encoding="utf-8",
+    )
+    svc = ConfigControlService(path=cfg_path)
+    svc.set_toggle("prefetch.topic_v2_mode", True)
+    rep_on = json.loads(svc.show(as_json=True, redact=True))
+    assert rep_on["toggles"]["prefetch.topic_v2_mode"] is True
+
+    svc.set_toggle("prefetch.topic_v2_mode", False)
+    rep_off = json.loads(svc.show(as_json=True, redact=True))
+    assert rep_off["toggles"]["prefetch.topic_v2_mode"] is False
+
+
+def test_topic_v2_cli_inspect_prints_watermark_and_dossiers(tmp_path, capsys):
+    from v3core.topic_v2 import TopicConsolidatorV2, main as topic_v2_main, save_dossiers
+
+    state_dir = tmp_path / "profile_data"
+    state_dir.mkdir()
+    cons = TopicConsolidatorV2(embed_fn=embed_text)
+    dossiers, rep = cons.consolidate_qa_stream(
+        [
+            {
+                "id": 42,
+                "timestamp": _utc(1),
+                "question": "关于日志压缩格式决定用什么？",
+                "answer": "正式废弃 Gzip-Legacy，改为 Zstd-Frame-v1 作为唯一当前方案。",
+            }
+        ]
+    )
+    save_dossiers(state_dir / "topic_v2_dossiers.json", dossiers)
+    (state_dir / "topic_v2_state.json").write_text(
+        json.dumps({"last_qa_id": rep.max_qa_id, "updated_at": "2026-11-28T00:00:00Z"}),
+        encoding="utf-8",
+    )
+
+    rc = topic_v2_main(["--inspect", "--state-dir", str(state_dir), "--json"])
+    assert rc == 0
+    captured = json.loads(capsys.readouterr().out)
+    assert captured["last_qa_id"] == 42
+    assert captured["topic_count"] == 1
+    assert captured["topics"][0]["last_evidence_qa_id"] == 42
+    assert "Zstd-Frame-v1" in captured["topics"][0]["summary"]
+
+
+def test_v3core_on_live_flush_routes_topic_v2_and_respects_toggle(tmp_path, monkeypatch):
+    import contextlib
+    import v3core
+    import v3core.config as v3_config
+    from v3core.config_model import from_legacy_dict
+
+    monkeypatch.setattr(v3_config, "_resolve_data_dir", lambda cfg=None: tmp_path)
+
+    class _FakeCur:
+        def __init__(self, store):
+            self.store = store
+            self.rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            p = list(params or ())
+            if q.startswith("select topic_id, title"):
+                self.rows = []
+            elif "from qa_pairs" in q and "where id >" in q:
+                wm, lim = int(p[0]), int(p[1])
+                self.rows = [
+                    (r["id"], r["timestamp"], r["question"], r["answer"])
+                    for r in self.store.qas
+                    if r["id"] > wm
+                ][:lim]
+            elif q.startswith("insert into topics"):
+                tid = p[0]
+                self.store.topics[tid] = p[3]
+                self.rows = []
+
+        def fetchall(self):
+            return list(self.rows)
+
+    class _FakeConn:
+        def __init__(self, store):
+            self.store = store
+
+        def cursor(self):
+            return _FakeCur(self.store)
+
+        def commit(self):
+            pass
+
+    class _FakePg:
+        def __init__(self, qas):
+            self.qas = qas
+            self.topics = {}
+
+        @contextlib.contextmanager
+        def lease(self, timeout=10.0):
+            yield _FakeConn(self)
+
+    qas = [
+        {
+            "id": 9,
+            "timestamp": _utc(1),
+            "question": "队列协议目前选用什么？",
+            "answer": "正式废弃 AMQP-Legacy，改为 gRPC-Stream-V2 作为唯一当前方案。",
+        }
+    ]
+    core_on = v3core.V3Core.__new__(v3core.V3Core)
+    core_on._config = from_legacy_dict({"basePath": str(tmp_path), "prefetch": {"topic_v2_mode": True}})
+    core_on._pg = _FakePg(qas)
+    invalidations = []
+    monkeypatch.setattr(core_on, "_notify_topic_recall_invalidation", lambda: invalidations.append(1))
+    monkeypatch.setattr(v3core, "safe_embed_cfg", lambda cfg: {"endpoint": "http://fake", "_fingerprint": "fp"})
+    monkeypatch.setattr(v3core, "call_embedding", lambda text, cfg: embed_text(text))
+
+    core_on._on_live_flush([("sess1", "m1", "msg", "user")])
+    assert len(core_on._pg.topics) == 1
+    assert len(invalidations) == 1
+    assert any("gRPC-Stream-V2" in body for body in core_on._pg.topics.values())
+
+    # Toggle OFF must leave PG topics untouched and never invoke topic_v2 consolidation.
+    core_off = v3core.V3Core.__new__(v3core.V3Core)
+    core_off._config = from_legacy_dict({"basePath": str(tmp_path), "prefetch": {"topic_v2_mode": False}})
+    core_off._pg = _FakePg(qas)
+    called_v2 = []
+    monkeypatch.setattr(core_off, "consolidate_topics_v2", lambda **kw: called_v2.append(kw) or {})
+    core_off._on_live_flush([("sess1", "m1", "msg", "user")])
+    assert called_v2 == []
+    assert core_off._pg.topics == {}
