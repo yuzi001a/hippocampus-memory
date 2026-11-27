@@ -439,9 +439,10 @@ def test_pg_a_to_b_evolution_and_default_prefetch_freshness_guard(
     assert second["new_last_qa_id"] == qa2
 
     # Check raw qa_pairs untouched & dossiers updated
-    dossiers_data = json.loads((state_dir / "topic_v2_dossiers.json").read_text(encoding="utf-8"))
-    assert len(dossiers_data) == 1
-    dossier = dossiers_data[0]
+    dossiers_payload = json.loads((state_dir / "topic_v2_dossiers.json").read_text(encoding="utf-8"))
+    dossiers_list = dossiers_payload.get("topics") if isinstance(dossiers_payload, dict) else dossiers_payload
+    assert len(dossiers_list) == 1
+    dossier = dossiers_list[0]
     assert len(dossier["superseded_claims"]) >= 1
     assert any("Event-Scheduler-V2" in c["text"] for c in dossier["current_claims"])
 
