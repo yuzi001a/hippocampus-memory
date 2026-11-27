@@ -537,3 +537,76 @@ test("status reports the real state and never claims a failed send was remembere
   assert.ok(broken.runtime.status().startsWith("unavailable (config unreadable)"),
     `got: ${broken.runtime.status()}`);
 });
+
+test("first-turn concurrent session/event and agent/pre-step share one handshake and both succeed", async () => {
+  let healthCalls = 0;
+  let releaseHealth;
+  const gate = new Promise((resolve) => { releaseHealth = resolve; });
+  const sentEvents = [];
+  const fetchImpl = async (url, init = {}) => {
+    const path = String(url).replace(/^https?:\/\/[^/]+/, "");
+    if (path === "/health") {
+      healthCalls += 1;
+      await gate;
+      return { status: 200, json: async () => HEALTH.payload };
+    }
+    if (path === "/events") {
+      sentEvents.push(JSON.parse(init.body));
+      return { status: 200, json: async () => ACCEPTED.payload };
+    }
+    if (path === "/prefetch") {
+      return { status: 200, json: async () => ({ ok: true, block: BLOCK, references: REFERENCES }) };
+    }
+    return { status: 404, json: async () => ({ ok: false }) };
+  };
+  const rt = createMemoryRuntime({ config: CONFIG, fetchImpl, warn: () => {} });
+  const session = { id: "sess-concurrent", header: {} };
+  rt.onSessionEvent(session, userEvent("u1", "hello"));
+  const preStepPromise = rt.onPreStep(preStep("sess-concurrent", claimed("hello")), async () => enterDecision(claimed("hello")));
+  releaseHealth();
+  const decision = await preStepPromise;
+  await rt.whenIdle();
+  assert.equal(healthCalls, 1);
+  assert.equal(sentEvents.length, 1);
+  assert.equal(decision.messages.length, 2);
+});
+
+test("failed handshake backs off and recovers once backend becomes healthy", async () => {
+  let healthy = false;
+  let clock = 1000;
+  const warnings = [];
+  const fetchImpl = async (url) => {
+    const path = String(url).replace(/^https?:\/\/[^/]+/, "");
+    if (path === "/health") {
+      if (!healthy) return { status: 503, json: async () => ({ ok: false }) };
+      return { status: 200, json: async () => HEALTH.payload };
+    }
+    if (path === "/events") return { status: 200, json: async () => ACCEPTED.payload };
+    return { status: 404, json: async () => ({ ok: false }) };
+  };
+  const rt = createMemoryRuntime({
+    config: CONFIG,
+    fetchImpl,
+    warn: (m) => warnings.push(m),
+    handshakeRetryMs: 5000,
+    now: () => clock,
+  });
+  const session = { id: "sess-recover", header: {} };
+  rt.onSessionEvent(session, userEvent("u1", "first"));
+  await rt.whenIdle();
+  assert.equal(rt.seen.size, 0);
+  assert.equal(warnings.length, 1);
+
+  // Within backoff window: still skipped without warning storm.
+  clock += 1000;
+  rt.onSessionEvent(session, userEvent("u1", "first"));
+  await rt.whenIdle();
+  assert.equal(rt.seen.size, 0);
+
+  // Backend recovers after backoff expires.
+  healthy = true;
+  clock += 5000;
+  rt.onSessionEvent(session, userEvent("u1", "first"));
+  await rt.whenIdle();
+  assert.equal(rt.seen.size, 1);
+});

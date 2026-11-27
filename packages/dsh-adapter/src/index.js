@@ -14,6 +14,8 @@ import { RecallLatch, RECALL_NOTE } from "./recall.js";
 import { TurnTracker, mapSessionEvent, textOf, userQueryOf } from "./mapping.js";
 
 export const name = "hippocampus";
+const DEFAULT_HANDSHAKE_RETRY_MS = 5000;
+const MAX_SEEN = 10000;
 
 // Optional DSH service injection (see upstream `export const inject` in
 // packages/acp/acp/src/index.ts:62). `sessions` backs `session/event`; the
@@ -39,6 +41,8 @@ export function createMemoryRuntime({
   configState = "ok",
   fetchImpl = globalThis.fetch,
   warn = () => {},
+  handshakeRetryMs = DEFAULT_HANDSHAKE_RETRY_MS,
+  now = Date.now,
 } = {}) {
   const client = config ? new BridgeClient({ baseUrl: config.bridgeUrl, timeoutMs: config.timeoutMs, fetchImpl }) : null;
   const latch = new RecallLatch({ warn });
@@ -46,21 +50,50 @@ export function createMemoryRuntime({
   const seen = new Set();          // `${sessionId}::${eventId}` — native identity only
   let chain = Promise.resolve();   // serial capture chain: emission order preserved
   let handshake = null;
-  let handshakeAttempted = false;
+  let handshakePromise = null;
+  let nextRetryAt = 0;
+  let handshakeWarned = false;
 
   const active = () => Boolean(config) && !latch.disabled;
 
+  function rememberSeen(key) {
+    if (seen.has(key)) return;
+    if (seen.size >= MAX_SEEN) {
+      const oldest = seen.values().next().value;
+      if (oldest !== undefined) seen.delete(oldest);
+    }
+    seen.add(key);
+  }
+
   // Lazy: no socket, no timer, no work until the host actually emits an event.
+  // Shares in-flight handshake promise across concurrent hooks (e.g. session/event
+  // and agent/pre-step on turn 1) and backs off after failures so a transient
+  // outage can recover without spamming warnings.
   async function ensureReady() {
     if (!client) return null;
-    if (handshakeAttempted) return handshake?.ok ? client : null;
-    handshakeAttempted = true;
-    handshake = await client.handshake();
-    if (!handshake.ok) {
-      warn("hippocampus: memory backend unavailable (handshake failed); memory features are off");
+    if (handshake?.ok) return client;
+    if (handshakePromise) return await handshakePromise;
+    if (handshake && !handshake.ok && now() < nextRetryAt) return null;
+    handshakePromise = (async () => {
+      const result = await client.handshake();
+      handshake = result;
+      if (result.ok) {
+        nextRetryAt = 0;
+        handshakeWarned = false;
+        return client;
+      }
+      nextRetryAt = now() + handshakeRetryMs;
+      if (!handshakeWarned) {
+        handshakeWarned = true;
+        warn("hippocampus: memory backend unavailable (handshake failed); memory features are off");
+      }
       return null;
+    })();
+    try {
+      return await handshakePromise;
+    } finally {
+      handshakePromise = null;
     }
-    return client;
   }
 
   // One drain at a time, so a later message can never overtake an earlier one.
@@ -92,7 +125,7 @@ export function createMemoryRuntime({
         warn("hippocampus: an event was not acknowledged by the memory backend; it will be retried");
         return;
       }
-      seen.add(key);
+      rememberSeen(key);
     });
   }
 

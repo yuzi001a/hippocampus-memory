@@ -4,6 +4,7 @@
 线程模型: ThreadingHTTPServer, 每个请求一个 daemon 线程.
 """
 from __future__ import annotations
+import contextlib
 import json
 import logging
 import os
@@ -94,12 +95,27 @@ def _check_embed(core) -> bool:
         return False
 
 
+# ── HTTP 安全校验 ──
+def _has_disallowed_origin(headers) -> bool:
+    """本地桥接客户端（DSH/pi/CLI）不发 Origin；浏览器跨站请求必带 Origin。"""
+    origin = (headers.get("Origin") or "").strip() if headers is not None else ""
+    return bool(origin)
+
+
+def _is_json_content_type(headers) -> bool:
+    """仅接受 application/json（忽略 charset 等参数），阻断浏览器 text/plain 简单请求 CSRF。"""
+    raw = (headers.get("Content-Type") or "") if headers is not None else ""
+    media_type = raw.split(";", 1)[0].strip().lower()
+    return media_type == "application/json"
+
+
 # ── Handler ──
 class _Handler(BaseHTTPRequestHandler):
     # 由 build_handler 注入
     core: Any = None
     msg_buffer: dict[str, list[dict]] = {}
     buffer_last_seen: dict[str, float] = {}
+    buffer_lock: threading.RLock = threading.RLock()
     server_version: str = "v3core-serve/1.0"
 
     # 静音 BaseHTTPServer 默认 access log — 我们有自己的 logger
@@ -180,6 +196,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            if _has_disallowed_origin(self.headers):
+                self._send_json(403, {"ok": False, "error": "cross-origin requests are not allowed"})
+                return
+            if not _is_json_content_type(self.headers):
+                self._send_json(415, {"ok": False, "error": "Content-Type must be application/json"})
+                return
             body = self._read_body()
             if body is None:
                 # body 为空但路径已知 — POST 端点都要求 body
@@ -210,20 +232,22 @@ class _Handler(BaseHTTPRequestHandler):
         Never a correctness authority — evicted events are still durable on
         disk, so a re-send is detected as a duplicate rather than re-ingested.
         """
-        now = time.time()
-        buf = self.msg_buffer
-        last = self.buffer_last_seen
-        for sid in [s for s, seen in last.items() if now - seen > BUFFER_IDLE_TTL_S]:
-            buf.pop(sid, None)
-            last.pop(sid, None)
-        for sid, msgs in list(buf.items()):
-            if len(msgs) > MAX_BUFFER_EVENTS_PER_SESSION:
-                buf[sid] = msgs[-MAX_BUFFER_EVENTS_PER_SESSION:]
-        if len(buf) > MAX_BUFFER_SESSIONS:
-            ordered = sorted(last.items(), key=lambda kv: kv[1])
-            for sid, _ in ordered[: len(buf) - MAX_BUFFER_SESSIONS]:
+        lock = getattr(self, "buffer_lock", None)
+        with (lock if lock is not None else contextlib.nullcontext()):
+            now = time.time()
+            buf = self.msg_buffer
+            last = self.buffer_last_seen
+            for sid in [s for s, seen in last.items() if now - seen > BUFFER_IDLE_TTL_S]:
                 buf.pop(sid, None)
                 last.pop(sid, None)
+            for sid, msgs in list(buf.items()):
+                if len(msgs) > MAX_BUFFER_EVENTS_PER_SESSION:
+                    buf[sid] = msgs[-MAX_BUFFER_EVENTS_PER_SESSION:]
+            if len(buf) > MAX_BUFFER_SESSIONS:
+                ordered = sorted(last.items(), key=lambda kv: kv[1])
+                for sid, _ in ordered[: len(buf) - MAX_BUFFER_SESSIONS]:
+                    buf.pop(sid, None)
+                    last.pop(sid, None)
 
     @staticmethod
     def _event_status_from_receipt(receipt, event_id: str) -> str:
@@ -306,16 +330,15 @@ class _Handler(BaseHTTPRequestHandler):
                 if value not in (None, ""):
                     msg[field_name] = value
 
-            buf = self.msg_buffer
-            session_msgs = buf.get(session_id)
-            if session_msgs is None:
-                session_msgs = []
-                buf[session_id] = session_msgs
-            session_msgs.append(msg)
-            self.buffer_last_seen[session_id] = time.time()
-            self._trim_buffer()
+            lock = getattr(self, "buffer_lock", None)
+            with (lock if lock is not None else contextlib.nullcontext()):
+                buf = self.msg_buffer
+                buf.setdefault(session_id, []).append(msg)
+                self.buffer_last_seen[session_id] = time.time()
+                self._trim_buffer()
+                session_snapshot = [m for m in buf.get(session_id, []) if m.get("host") == host]
 
-            receipt = self.core.sync_turn(session_id, session_msgs, host=host)
+            receipt = self.core.sync_turn(session_id, session_snapshot, host=host)
             status = self._event_status_from_receipt(receipt, msg_id)
             ack = ack_from_receipt({
                 "status": status,
@@ -379,6 +402,7 @@ def build_handler(core, msg_buffer=None):
     # B01: last-seen map is fresh per bound handler; the buffer itself is
     # injected so callers/tests can observe it.
     BoundHandler.buffer_last_seen = {}
+    BoundHandler.buffer_lock = threading.RLock()
     return BoundHandler
 
 
@@ -405,10 +429,8 @@ def serve(host: str = "127.0.0.1", port: int = 39090, profile: str = "default",
         sys.exit(1)
 
     # 2. 起 ThreadingHTTPServer
-    #    msg_buffer: per-session 全量消息缓冲 dict[session_id, list[dict]]
-    #    ── serve 是常驻进程 ── 缓冲不设上限, dsh 会话消息量有限 (几十到几百);
-    #    若未来服务化到多用户/多 session 长期运行, 需要加 LRU/TTL 兜底
-    #    (避免内存泄漏).
+    #    msg_buffer: per-session 消息缓冲 dict[session_id, list[dict]]，
+    #    由 _trim_buffer() 做 TTL/条数/会话数上限裁剪，并由 buffer_lock 保护并发读写。
     msg_buffer: dict[str, list[dict]] = {}
     handler_cls = build_handler(core, msg_buffer)
     try:

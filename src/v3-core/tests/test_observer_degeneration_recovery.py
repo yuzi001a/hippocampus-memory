@@ -201,3 +201,167 @@ def test_fresh_note_is_not_skipped():
     v = observer._validate_note_payload(fresh, 40, prev_text=prev)
     assert v["status"] == "ok", v.get("reasons")
     assert observer._should_skip_repeat(v) is False
+
+
+# --- 2026-11-27 审查修复回归: 重试空壳拦截 / fallback 互斥 / _san_map 隔离 / 原子状态写 ---
+
+
+def test_parse_non_empty_observer_json_rejects_empty_shell():
+    import json
+    shell = json.dumps({"note": {"content": "## 当轮变化\n<没有引用>"}, "topic_updates": []})
+    parsed, reason = observer._parse_non_empty_observer_json(shell)
+    assert parsed is None and reason == "no_citation"
+
+    good = json.dumps({"note": {"content": _normal_note()}, "topic_updates": []})
+    parsed2, reason2 = observer._parse_non_empty_observer_json(good)
+    assert parsed2 is not None and reason2 is None
+
+
+def _run_worker_stub(monkeypatch, tmp_path, *, qa_question: str, call_m3_fn):
+    from datetime import datetime, timezone
+
+    state_path = tmp_path / "observer_state.json"
+    written_notes: list[str] = []
+    ts = datetime(2026, 11, 27, 10, 0, tzinfo=timezone.utc)
+
+    class _Cur:
+        def __init__(self):
+            self._mode = ""
+
+        def execute(self, sql, params=None):
+            s = " ".join(str(sql).split())
+            if "SELECT COUNT(*)" in s:
+                self._mode = "stats_count"
+            elif "GROUP BY session_id" in s:
+                self._mode = "stats_sess"
+            elif "FROM qa_pairs" in s:
+                self._mode = "qa_rows"
+            else:
+                self._mode = "prev"
+
+        def fetchone(self):
+            if self._mode == "stats_count":
+                return (1, len(qa_question) + 20, ts)
+            return None
+
+        def fetchall(self):
+            if self._mode == "stats_sess":
+                return [("sess-1", len(qa_question) + 20)]
+            if self._mode == "qa_rows":
+                return [(1, "sess-1", ts, qa_question, "这是完整回答内容。", len(qa_question) + 20)]
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    class _Lease:
+        connection = _Conn()
+
+    monkeypatch.setattr(observer, "_recall_candidates", lambda **kw: [])
+    monkeypatch.setattr(observer, "_observer_resolve_api_key", lambda: ("sk-test", None))
+    monkeypatch.setattr(observer, "_load_identity_layer", lambda cfg: "")
+    monkeypatch.setattr(observer, "_write_observation_note",
+                        lambda pg, *, content, **kw: written_notes.append(content) or 101)
+    monkeypatch.setattr(observer.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(observer, "call_m3", call_m3_fn)
+
+    cfg = {
+        "model": "primary-m",
+        "state_path": str(state_path),
+        "count_threshold": 1,
+        "token_threshold_chars": 1,
+        "debounce_minutes": 0,
+        "json_parse_primary_retries": 1,
+        "json_parse_sanitize_retries": 1,
+        "fallback_llm": {"model": "fallback-m", "api_key": "sk-fb"},
+    }
+    observer._observe_worker(cfg, "", _pinned_lease=_Lease(), _manage_lease=False)
+    return written_notes, state_path
+
+
+def test_worker_rejects_empty_shell_in_all_retry_and_fallback_paths(monkeypatch, tmp_path):
+    import json
+    models_called: list[str] = []
+    shell = json.dumps({"note": {"content": "## 当轮变化\n<没有引用>"}, "topic_updates": []})
+
+    def fake_m3(cfg, api_key, prompt, **kw):
+        models_called.append(cfg.get("model", ""))
+        return {"text": shell, "usage": {}}
+
+    written, state_path = _run_worker_stub(
+        monkeypatch, tmp_path, qa_question="去掉 <think> 标签", call_m3_fn=fake_m3
+    )
+    assert written == []
+    assert "primary-m" in models_called and "fallback-m" in models_called
+    assert state_path.exists()
+
+
+def test_worker_sanitized_retry_success_skips_fallback_and_restores_tokens(monkeypatch, tmp_path):
+    import json
+    calls: list[tuple[str, str]] = []
+    good_sanitized_note = (
+        "## 关键决策\n- [用户] 去掉 `< think>` 标签处理〔已实施〕[#1]\n"
+        + "\n".join(f"- [用户] 第{i}条补充事实记录〔已实施〕[#1]" for i in range(2, 55))
+    )
+
+    def fake_m3(cfg, api_key, prompt, **kw):
+        model = cfg.get("model", "")
+        calls.append((model, prompt))
+        if model == "primary-m" and "<think>" in prompt:
+            return {"text": '{"note": {"content": "半截', "finish_reason": "stop", "usage": {}}
+        if model == "primary-m" and "< think>" in prompt:
+            return {"text": json.dumps({"note": {"content": good_sanitized_note}, "topic_updates": []}), "usage": {}}
+        raise AssertionError(f"unexpected call_m3: {model}")
+
+    written, _ = _run_worker_stub(
+        monkeypatch, tmp_path, qa_question="去掉 <think> 标签", call_m3_fn=fake_m3
+    )
+    assert len(written) == 1
+    assert "<think>" in written[0]
+    assert "< think>" not in written[0]
+    assert all(m == "primary-m" for m, _ in calls)
+
+
+def test_worker_sanitized_fail_then_fallback_success_does_not_apply_san_map(monkeypatch, tmp_path):
+    import json
+    fb_note = (
+        "## 关键决策\n- [用户] 原文保留 `< think>` 字面量〔已实施〕[#1]\n"
+        + "\n".join(f"- [用户] 第{i}条补充事实记录〔已实施〕[#1]" for i in range(2, 55))
+    )
+
+    def fake_m3(cfg, api_key, prompt, **kw):
+        model = cfg.get("model", "")
+        if model == "primary-m":
+            return {"text": '{"note": {"content": "半截', "finish_reason": "stop", "usage": {}}
+        return {"text": json.dumps({"note": {"content": fb_note}, "topic_updates": []}), "usage": {}}
+
+    written, _ = _run_worker_stub(
+        monkeypatch, tmp_path, qa_question="去掉 <think> 标签", call_m3_fn=fake_m3
+    )
+    assert len(written) == 1
+    assert "< think>" in written[0], "fallback 使用原 prompt，不得被上一级失败的 _san_map 误替换"
+
+
+def test_record_repeat_skipped_writes_atomically_without_tmp_leftovers(tmp_path):
+    import json
+    state_path = tmp_path / "observer_state.json"
+    cfg = {"state_path": str(state_path)}
+    observer._record_repeat_skipped(1, 10, overlap=0.9, len_ratio=0.95, cfg=cfg)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert len(data["repeat_skipped"]) == 1
+    assert data["repeat_skipped"][0]["qa_range"] == [1, 10]
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []

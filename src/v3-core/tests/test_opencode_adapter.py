@@ -125,3 +125,51 @@ def test_missing_session_error_is_explained():
 
 def test_unknown_error_falls_back_to_body():
     assert "boom" in oc.explain_error(500, "boom")
+
+
+def test_anthropic_payload_puts_system_top_level_and_drops_unsupported():
+    cfg = {
+        "providers": {"opencode-go": {}},
+        "models": {"claude-sonnet-5-5": {"provider": "opencode-go"}},
+    }
+    prof = providers.resolve_profile("opencode-go/claude-sonnet-5-5", cfg, api_key="k")
+    body = providers.build_payload(
+        prof,
+        "opencode-go/claude-sonnet-5-5",
+        "",
+        system="你是记忆整理者",
+        messages=[
+            {"role": "system", "content": "补充系统规则"},
+            {"role": "user", "content": "hi"},
+        ],
+        max_tokens=128,
+        temperature=0.2,
+        reasoning_effort="none",
+        schema={"type": "object"},
+        reasoning_split=True,
+    )
+    assert body["model"] == "claude-sonnet-5-5"
+    assert "你是记忆整理者" in body["system"] and "补充系统规则" in body["system"]
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+    assert body["max_tokens"] == 128
+    assert "reasoning_effort" not in body
+    assert "response_format" not in body
+    assert "reasoning_split" not in body
+
+
+def test_resolve_profile_explicit_base_url_still_normalizes_for_anthropic():
+    cfg = {
+        "providers": {"opencode-go": {}},
+        "models": {"claude-sonnet-5-5": {"provider": "opencode-go"}},
+    }
+    prof = providers.resolve_profile(
+        "claude-sonnet-5-5", cfg, api_key="k", base_url="https://opencode.ai/zen/go/v1"
+    )
+    assert prof.api_mode == "anthropic_messages"
+    assert prof.base_url == "https://opencode.ai/zen/go"
+    assert prof.url() == "https://opencode.ai/zen/go/messages"
+
+    custom = providers.resolve_profile(
+        "claude-sonnet-5-5", cfg, api_key="k", base_url="https://my-proxy.test/zen/go/v1"
+    )
+    assert custom.base_url == "https://my-proxy.test/zen/go/v1"

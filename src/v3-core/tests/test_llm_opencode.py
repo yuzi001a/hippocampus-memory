@@ -85,3 +85,55 @@ def test_other_provider_still_rejected(monkeypatch):
     client = llm.LLMClient(cfg)
     with pytest.raises(ValueError, match="不支持的 LLM provider"):
         client.chat("s", [{"role": "user", "content": "x"}])
+
+
+def test_opencode_anthropic_mode_sends_top_level_system_and_strips_prefix(monkeypatch):
+    captured: list = []
+    payload = {"content": [{"type": "text", "text": "anthropic-ok"}],
+               "stop_reason": "end_turn",
+               "usage": {"input_tokens": 4, "output_tokens": 2}}
+    _patch(monkeypatch, captured, payload)
+    cfg = {
+        "llm": {
+            "provider": "opencode-go",
+            "model": "opencode-go/claude-sonnet-5-5",
+            "api_key": "sk-test",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "thinking": False,
+            "timeout": 10,
+        },
+        "providers": {"opencode-go": {}},
+        "models": {"claude-sonnet-5-5": {"provider": "opencode-go"}},
+    }
+    client = llm.LLMClient(cfg)
+    out = client.chat("sys-prompt", [{"role": "user", "content": "hello"}], temperature=0.1)
+    assert out == "anthropic-ok"
+    sent = captured[0]
+    assert sent["url"] == "https://opencode.ai/zen/go/messages"
+    assert sent["headers"]["x-api-key"] == "sk-test"
+    assert sent["headers"]["x-opencode-session"]
+    assert sent["body"]["model"] == "claude-sonnet-5-5"
+    assert sent["body"]["system"] == "sys-prompt"
+    assert sent["body"]["messages"] == [{"role": "user", "content": "hello"}]
+    assert "reasoning_effort" not in sent["body"]
+
+
+@pytest.mark.parametrize("api_mode,expected_field", [
+    ("responses", ("reasoning", {"effort": "none"})),
+    ("chat_completions", ("reasoning_effort", "none")),
+])
+def test_opencode_thinking_off_explicitly_sends_none(monkeypatch, api_mode, expected_field):
+    captured: list = []
+    payload = (
+        {"status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}], "usage": {}}
+        if api_mode == "responses"
+        else {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {}}
+    )
+    _patch(monkeypatch, captured, payload)
+    cfg = json.loads(json.dumps(CFG))
+    cfg["llm"]["thinking"] = False
+    cfg["providers"]["opencode-go"]["api_mode"] = api_mode
+    client = llm.LLMClient(cfg)
+    assert client.chat("sys", [{"role": "user", "content": "hi"}]) == "ok"
+    key, val = expected_field
+    assert captured[0]["body"][key] == val

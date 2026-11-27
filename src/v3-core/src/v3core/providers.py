@@ -228,7 +228,16 @@ def resolve_profile(model: str, cfg: Any, *, api_key: str = "", base_url: str = 
         profile = build_profile(provider_name, raw, api_key=api_key)
         # 端点允许调用点覆盖（同一通道挂不同入口时用），其余形状仍以画像为准
         if base_url:
-            profile = ProviderProfile(**{**profile.__dict__, "base_url": base_url})
+            normalized_override = base_url
+            try:
+                from . import providers_opencode
+
+                normalized_override = providers_opencode.normalize_base_url(
+                    provider_name, profile.api_mode, base_url
+                )
+            except Exception:
+                pass
+            profile = ProviderProfile(**{**profile.__dict__, "base_url": normalized_override})
         return profile
     if base_url:
         return _legacy_profile(base_url)
@@ -327,6 +336,7 @@ def build_payload(
     prompt: str,
     *,
     system: str | None = None,
+    messages: list[dict[str, Any]] | None = None,
     max_tokens: int,
     temperature: float | None = 0.3,
     schema: Mapping[str, Any] | None = None,
@@ -344,9 +354,24 @@ def build_payload(
         pass
     payload: dict[str, Any] = {"model": model}
     if profile.api_mode == API_RESPONSES:
-        payload["input"] = prompt
-        if system:
-            payload["instructions"] = system
+        eff_system = system
+        eff_input = prompt
+        if messages is not None and not prompt:
+            sys_parts = [str(system)] if system else []
+            conv_lines: list[str] = []
+            for m in messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if role == "system":
+                    if content:
+                        sys_parts.append(str(content))
+                else:
+                    conv_lines.append(f"{role}: {content}")
+            eff_system = "\n\n".join(p for p in sys_parts if p) or None
+            eff_input = "\n\n".join(conv_lines)
+        payload["input"] = eff_input
+        if eff_system:
+            payload["instructions"] = eff_system
         payload[profile.max_tokens_field] = max_tokens
         if schema is not None:
             payload["text"] = {
@@ -356,7 +381,32 @@ def build_payload(
             payload["reasoning"] = {"effort": reasoning_effort}
         return payload
 
-    payload["messages"] = _messages_from_prompt(prompt, system)
+    if profile.api_mode == API_ANTHROPIC:
+        raw_msgs = list(messages) if messages is not None else [{"role": "user", "content": prompt}]
+        sys_parts = [str(system)] if system else []
+        non_system_msgs: list[dict[str, Any]] = []
+        for m in raw_msgs:
+            if m.get("role") == "system":
+                content = m.get("content")
+                if content:
+                    sys_parts.append(str(content))
+            else:
+                non_system_msgs.append(m)
+        payload["messages"] = non_system_msgs
+        eff_system = "\n\n".join(p for p in sys_parts if p)
+        if eff_system:
+            payload["system"] = eff_system
+        payload[profile.max_tokens_field] = max_tokens
+        if temperature is not None and profile.supports_cap("temperature"):
+            payload["temperature"] = temperature
+        if thinking is not None and profile.supports_cap("thinking"):
+            payload["thinking"] = dict(thinking)
+        return payload
+
+    if messages is not None:
+        payload["messages"] = ([{"role": "system", "content": system}] if system else []) + list(messages)
+    else:
+        payload["messages"] = _messages_from_prompt(prompt, system)
     payload[profile.max_tokens_field] = max_tokens
     if temperature is not None and profile.supports_cap("temperature"):
         payload["temperature"] = temperature

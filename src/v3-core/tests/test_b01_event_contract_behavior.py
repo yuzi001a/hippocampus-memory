@@ -269,3 +269,100 @@ def test_serve_receipt_status_mapping(status, expect_ok, expect_retryable):
     ack = ack_from_receipt({"status": mapped, "event_id": "e1", "host": "h"})
     assert ack["ok"] is expect_ok
     assert ("retryable" in ack["status"]) is expect_retryable
+
+
+# ── 安全校验 + 并发隔离 ────────────────────────────────────────────────
+
+def _post_raw(port, path, raw_body: bytes, headers: dict[str, str]):
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=raw_body,
+        method="POST",
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8"))
+
+
+def test_post_rejects_non_json_content_type():
+    core = _FakeCore(receipt={"ok": True})
+    server, port = _serve(core)
+    try:
+        status, body = _post_raw(
+            port,
+            "/tool",
+            json.dumps({"name": "v3_status", "args": {}}).encode("utf-8"),
+            {"Content-Type": "text/plain"},
+        )
+        assert status == 415 and body["ok"] is False
+    finally:
+        server.shutdown()
+
+
+def test_post_rejects_cross_origin_requests():
+    core = _FakeCore(receipt={"ok": True})
+    server, port = _serve(core)
+    try:
+        status, body = _post_raw(
+            port,
+            "/tool",
+            json.dumps({"name": "v3_status", "args": {}}).encode("utf-8"),
+            {"Content-Type": "application/json", "Origin": "https://evil.example"},
+        )
+        assert status == 403 and body["ok"] is False
+    finally:
+        server.shutdown()
+
+
+def test_concurrent_events_across_hosts_are_thread_safe_and_isolated():
+    seen_snapshots: list[tuple[str, list[dict]]] = []
+    seen_lock = threading.Lock()
+
+    class _SnapCore:
+        pg = None
+        config = {}
+
+        def sync_turn(self, session_id, messages=None, host=None):
+            snap = [dict(m) for m in (messages or [])]
+            with seen_lock:
+                seen_snapshots.append((host, snap))
+            events = {m["event_id"]: "accepted" for m in snap}
+            return {"ok": True, "events": events}
+
+    server, port = _serve(_SnapCore(), {})
+    errors: list[Exception] = []
+
+    def worker(host: str, count: int) -> None:
+        try:
+            for i in range(count):
+                status, body = _post(
+                    port,
+                    "/events",
+                    {
+                        "host": host,
+                        "session_id": "shared-sess",
+                        "event_id": f"{host}-{i}",
+                        "role": "user",
+                        "content": f"msg-{i}",
+                    },
+                )
+                assert status == 200 and body["ok"] is True
+        except Exception as exc:
+            errors.append(exc)
+
+    try:
+        t1 = threading.Thread(target=worker, args=("dsh", 15))
+        t2 = threading.Thread(target=worker, args=("pi", 15))
+        t1.start()
+        t2.start()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+        assert not errors
+        assert len(seen_snapshots) == 30
+        for host, snap in seen_snapshots:
+            assert snap and all(m.get("host") == host for m in snap)
+    finally:
+        server.shutdown()

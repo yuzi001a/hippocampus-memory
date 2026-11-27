@@ -343,25 +343,29 @@ class LLMClient:
         model = str(self.model or "")
         profile = providers.resolve_profile(model, cfg, api_key=self.api_key, base_url=self.base_url)
         budget = self._max_tokens if max_output_tokens is None else max_output_tokens
-        effort = self._resolved_reasoning_effort() if hasattr(self, "_resolved_reasoning_effort") else None
+        effort = (
+            self._resolved_reasoning_effort()
+            if hasattr(self, "_resolved_reasoning_effort")
+            else self._reasoning_effort_cfg
+        )
+        if (
+            not effort
+            and not getattr(self, "_thinking", True)
+            and profile.api_mode != providers.API_ANTHROPIC
+            and profile.supports_cap("reasoning_effort")
+        ):
+            effort = "none"
 
-        if profile.api_mode == "responses":
-            # /responses 用 input + instructions：把多轮历史折成带角色标记的文本，
-            # system 单独走 instructions。
-            lines = [f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages]
-            prompt = "\n\n".join(lines)
-            body = providers.build_payload(
-                profile, model, prompt, system=system, max_tokens=budget,
-                temperature=temperature, reasoning_effort=effort,
-            )
-        else:
-            body = {"model": model}
-            msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
-            body["messages"] = msgs
-            body["temperature"] = temperature
-            body[profile.max_tokens_field] = budget
-            if effort and profile.supports_cap("reasoning_effort"):
-                body["reasoning_effort"] = effort
+        body = providers.build_payload(
+            profile,
+            model,
+            "",
+            system=system,
+            messages=messages,
+            max_tokens=budget,
+            temperature=temperature,
+            reasoning_effort=effort,
+        )
 
         session_id = None
         try:

@@ -680,6 +680,30 @@ def _load_observer_config() -> dict[str, Any]:
 # 游标持久化 — observer_state.json (跟 compression_trigger 共存目录)
 # ────────────────────────────────────────────────────────────
 
+_STATE_FILE_LOCK = threading.RLock()
+
+
+def _atomic_write_state_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write observer state JSON (mkdir + temp file + fsync + os.replace)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
 def _state_path(cfg: dict[str, Any] | None = None):
     """观察状态文件路径 — 可配置 (回放/隔离时指向独立文件, 不污染生产游标)。
 
@@ -723,20 +747,19 @@ def _save_cursor(last_qa_id: int, cfg: dict[str, Any] | None = None) -> None:
     """
     path = _state_path(cfg)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # 读到现有 + 增量更新, 别直接覆盖 (留扩展位)
-        old: dict[str, Any] = {}
-        if path.exists():
-            try:
-                old = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+        with _STATE_FILE_LOCK:
+            # 读到现有 + 增量更新, 别直接覆盖 (留扩展位)
+            old: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    old = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    old = {}
+            if not isinstance(old, dict):
                 old = {}
-        old["last_qa_id"] = int(last_qa_id)
-        old["updated_at"] = datetime.now(timezone.utc).isoformat()
-        path.write_text(
-            json.dumps(old, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+            old["last_qa_id"] = int(last_qa_id)
+            old["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _atomic_write_state_json(path, old)
     except Exception as e:
         logger.warning("保存 observer 游标失败(下次重试): %s", _safe_err(e)[:120])
 
@@ -748,19 +771,19 @@ def _save_known_sessions(new_session_ids: set[str], cfg: dict[str, Any] | None =
     失败不抛 — 仅下次 new_session 判定可能略多触发, 不影响数据正确性。"""
     path = _state_path(cfg)
     try:
-        old: dict[str, Any] = {}
-        if path.exists():
-            try:
-                old = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+        with _STATE_FILE_LOCK:
+            old: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    old = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    old = {}
+            if not isinstance(old, dict):
                 old = {}
-        known = set(old.get("known_sessions", []) or [])
-        known.update(new_session_ids)
-        old["known_sessions"] = sorted(known)
-        path.write_text(
-            json.dumps(old, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+            known = set(old.get("known_sessions", []) or [])
+            known.update(new_session_ids)
+            old["known_sessions"] = sorted(known)
+            _atomic_write_state_json(path, old)
     except Exception as e:
         logger.warning("保存 known_sessions 失败(下次可能略多触发): %s", _safe_err(e)[:120])
 
@@ -1185,6 +1208,22 @@ def _empty_payload_reason(content: str) -> str | None:
     if not _ANCHOR_LOOSE_RE.search(text):
         return "no_citation"
     return None
+
+
+def _parse_non_empty_observer_json(text: str) -> tuple[dict[str, Any] | None, str | None]:
+    """解析双输出 JSON 并拦截“空壳模板”；正常返回 (parsed, None)。"""
+    parsed = _parse_observer_json(text)
+    if not parsed:
+        return None, None
+    payload_text = str((parsed.get("note") or {}).get("content") or "")
+    empty_reason = _empty_payload_reason(payload_text)
+    if empty_reason:
+        logger.warning(
+            "observer: 输出是空壳 (%s, %d 字) — 按失败批处理, 不写库",
+            empty_reason, len(payload_text),
+        )
+        return None, empty_reason
+    return parsed, None
 
 
 def _degeneration_evidence(result: dict[str, Any]) -> dict[str, Any]:
@@ -3890,18 +3929,20 @@ def _save_adaptive_batch(batch_size: int, source_end_id: int,
     """记录一次超长输出后的时间流拆批计划，供下一轮自动恢复。"""
     path = _state_path(cfg)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8")) or {}
-            except Exception:
+        with _STATE_FILE_LOCK:
+            data: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    data = {}
+            if not isinstance(data, dict):
                 data = {}
-        data["adaptive_batch_size"] = max(1, int(batch_size))
-        data["adaptive_source_end_id"] = int(source_end_id)
-        data["adaptive_reason"] = "note_output_over_target_time_split"
-        data["adaptive_updated_at"] = datetime.now(timezone.utc).isoformat()
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            data["adaptive_batch_size"] = max(1, int(batch_size))
+            data["adaptive_source_end_id"] = int(source_end_id)
+            data["adaptive_reason"] = "note_output_over_target_time_split"
+            data["adaptive_updated_at"] = datetime.now(timezone.utc).isoformat()
+            _atomic_write_state_json(path, data)
     except Exception as e:
         logger.warning("保存自动拆批状态失败(本轮不推进, 下次仍会重试): %s", _safe_err(e)[:120])
 
@@ -3910,13 +3951,16 @@ def _clear_adaptive_batch(cfg: dict[str, Any] | None = None) -> None:
     """清除已经完整消费到 source_end_id 的自动拆批状态。"""
     path = _state_path(cfg)
     try:
-        if not path.exists():
-            return
-        data = json.loads(path.read_text(encoding="utf-8")) or {}
-        for key in ("adaptive_batch_size", "adaptive_source_end_id", "adaptive_reason",
-                    "adaptive_updated_at"):
-            data.pop(key, None)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        with _STATE_FILE_LOCK:
+            if not path.exists():
+                return
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict):
+                return
+            for key in ("adaptive_batch_size", "adaptive_source_end_id", "adaptive_reason",
+                        "adaptive_updated_at"):
+                data.pop(key, None)
+            _atomic_write_state_json(path, data)
     except Exception as e:
         logger.warning("清除自动拆批状态失败: %s", _safe_err(e)[:120])
 
@@ -4029,28 +4073,30 @@ def _record_skipped_sensitive(
     """
     path = _state_path(cfg)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8")) or {}
-            except Exception:
+        with _STATE_FILE_LOCK:
+            data: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    data = {}
+            if not isinstance(data, dict):
                 data = {}
-        lst = data.get("skipped_sensitive")
-        if not isinstance(lst, list):
-            lst = []
-        lst.append({
-            "segment_id": f"{int(qa_range_start)}:{int(qa_range_end)}",
-            "qa_range_start": int(qa_range_start),
-            "qa_range_end": int(qa_range_end),
-            "error_class": "m3_sensitive_deterministic",
-            "reason": str(reason)[:200],
-            "skipped_at": datetime.now(timezone.utc).isoformat(),
-        })
-        if len(lst) > _SKIPPED_SENSITIVE_AUDIT_CAP:
-            lst = lst[-_SKIPPED_SENSITIVE_AUDIT_CAP:]
-        data["skipped_sensitive"] = lst
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            lst = data.get("skipped_sensitive")
+            if not isinstance(lst, list):
+                lst = []
+            lst.append({
+                "segment_id": f"{int(qa_range_start)}:{int(qa_range_end)}",
+                "qa_range_start": int(qa_range_start),
+                "qa_range_end": int(qa_range_end),
+                "error_class": "m3_sensitive_deterministic",
+                "reason": str(reason)[:200],
+                "skipped_at": datetime.now(timezone.utc).isoformat(),
+            })
+            if len(lst) > _SKIPPED_SENSITIVE_AUDIT_CAP:
+                lst = lst[-_SKIPPED_SENSITIVE_AUDIT_CAP:]
+            data["skipped_sensitive"] = lst
+            _atomic_write_state_json(path, data)
     except Exception as e:
         logger.warning(
             "记录 skipped_sensitive 审计失败 (不阻塞): %s", _safe_err(e)[:120])
@@ -4335,26 +4381,26 @@ def _record_repeat_skipped(
     path = _state_path(cfg)
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8")) or {}
-            except Exception:
+        with _STATE_FILE_LOCK:
+            data: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    data = {}
+            if not isinstance(data, dict):
                 data = {}
-        if not isinstance(data, dict):
-            data = {}
-        lst = data.get("repeat_skipped")
-        if not isinstance(lst, list):
-            lst = []
-        lst.append({
-            "qa_range": [int(qa_range_start), int(qa_range_end)],
-            "overlap": round(float(overlap), 3),
-            "len_ratio": round(float(len_ratio), 3),
-            "at": now_iso,
-        })
-        data["repeat_skipped"] = lst[-200:]
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            lst = data.get("repeat_skipped")
+            if not isinstance(lst, list):
+                lst = []
+            lst.append({
+                "qa_range": [int(qa_range_start), int(qa_range_end)],
+                "overlap": round(float(overlap), 3),
+                "len_ratio": round(float(len_ratio), 3),
+                "at": now_iso,
+            })
+            data["repeat_skipped"] = lst[-200:]
+            _atomic_write_state_json(path, data)
     except Exception as exc:  # noqa: BLE001 - 记账失败不阻塞主流程
         logger.warning("observer: 记录 repeat_skipped 失败 (%s: %s)", type(exc).__name__, exc)
 
@@ -4391,47 +4437,47 @@ def _save_failed_segment(
     now_iso = datetime.now(timezone.utc).isoformat()
     updated_entry: dict[str, Any] | None = None
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8")) or {}
-            except Exception:
+        with _STATE_FILE_LOCK:
+            data: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    data = {}
+            if not isinstance(data, dict):
                 data = {}
-        if not isinstance(data, dict):
-            data = {}
-        existing_list = data.get("failed_segments") or []
-        if not isinstance(existing_list, list):
-            existing_list = []
-        # 找同 segment_id 的旧条目, 累加 attempts; 找不到则新增
-        found_idx: int | None = None
-        for i, entry in enumerate(existing_list):
-            if isinstance(entry, dict) and entry.get("segment_id") == segment_id:
-                found_idx = i
-                break
-        if found_idx is not None:
-            existing = existing_list[found_idx]
-            existing["attempts"] = int(existing.get("attempts", 0)) + 1
-            existing["reason"] = str(reason)[:200]
-            existing["error_class"] = str(error_class)
-            existing["last_attempt_at"] = now_iso
-            existing["batch_size"] = max(1, int(batch_size))
-            updated_entry = existing
-        else:
-            updated_entry = {
-                "segment_id": segment_id,
-                "qa_range_start": int(qa_range_start),
-                "qa_range_end": int(qa_range_end),
-                "error_class": str(error_class),
-                "reason": str(reason)[:200],
-                "attempts": 1,
-                "first_attempt_at": now_iso,
-                "last_attempt_at": now_iso,
-                "batch_size": max(1, int(batch_size)),
-            }
-            existing_list.append(updated_entry)
-        data["failed_segments"] = existing_list
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            existing_list = data.get("failed_segments") or []
+            if not isinstance(existing_list, list):
+                existing_list = []
+            # 找同 segment_id 的旧条目, 累加 attempts; 找不到则新增
+            found_idx: int | None = None
+            for i, entry in enumerate(existing_list):
+                if isinstance(entry, dict) and entry.get("segment_id") == segment_id:
+                    found_idx = i
+                    break
+            if found_idx is not None:
+                existing = existing_list[found_idx]
+                existing["attempts"] = int(existing.get("attempts", 0)) + 1
+                existing["reason"] = str(reason)[:200]
+                existing["error_class"] = str(error_class)
+                existing["last_attempt_at"] = now_iso
+                existing["batch_size"] = max(1, int(batch_size))
+                updated_entry = existing
+            else:
+                updated_entry = {
+                    "segment_id": segment_id,
+                    "qa_range_start": int(qa_range_start),
+                    "qa_range_end": int(qa_range_end),
+                    "error_class": str(error_class),
+                    "reason": str(reason)[:200],
+                    "attempts": 1,
+                    "first_attempt_at": now_iso,
+                    "last_attempt_at": now_iso,
+                    "batch_size": max(1, int(batch_size)),
+                }
+                existing_list.append(updated_entry)
+            data["failed_segments"] = existing_list
+            _atomic_write_state_json(path, data)
     except Exception as e:
         logger.warning(
             "保存 failed_segment (segment=%s, error_class=%s) 失败 — 下次重启会丢失败原因: %s",
@@ -4479,33 +4525,34 @@ def _clear_failed_segment(
     end_id = int(qa_range_end)
     removed = False
     try:
-        if not path.exists():
-            return False
-        data = json.loads(path.read_text(encoding="utf-8")) or {}
-        if not isinstance(data, dict):
-            return False
-        lst = data.get("failed_segments") or []
-        if not isinstance(lst, list):
-            return False
-        new_list: list[dict[str, Any]] = []
-        for entry in lst:
-            if not isinstance(entry, dict):
-                continue
-            entry_end = entry.get("qa_range_end")
-            try:
-                if entry_end is not None and int(entry_end) == end_id:
-                    removed = True
+        with _STATE_FILE_LOCK:
+            if not path.exists():
+                return False
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict):
+                return False
+            lst = data.get("failed_segments") or []
+            if not isinstance(lst, list):
+                return False
+            new_list: list[dict[str, Any]] = []
+            for entry in lst:
+                if not isinstance(entry, dict):
                     continue
-            except Exception:
-                pass
-            new_list.append(entry)
-        if not removed:
-            return False
-        if new_list:
-            data["failed_segments"] = new_list
-        else:
-            data.pop("failed_segments", None)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                entry_end = entry.get("qa_range_end")
+                try:
+                    if entry_end is not None and int(entry_end) == end_id:
+                        removed = True
+                        continue
+                except Exception:
+                    pass
+                new_list.append(entry)
+            if not removed:
+                return False
+            if new_list:
+                data["failed_segments"] = new_list
+            else:
+                data.pop("failed_segments", None)
+            _atomic_write_state_json(path, data)
     except Exception as e:
         logger.warning(
             "清理 failed_segment (qa_range_end=%s) 失败 (不阻塞): %s",
@@ -4544,46 +4591,46 @@ def _save_stalled_state(
     segment_id = _segment_id_from_range(qa_range_start, qa_range_end)
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {}
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8")) or {}
-            except Exception:
+        with _STATE_FILE_LOCK:
+            data: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    data = {}
+            if not isinstance(data, dict):
                 data = {}
-        if not isinstance(data, dict):
-            data = {}
-        data["stalled_state"] = {
-            "segment_id": segment_id,
-            "qa_range_start": int(qa_range_start),
-            "qa_range_end": int(qa_range_end),
-            "error_class": str(error_class),
-            "reason": str(reason)[:200],
-            "attempts": max(1, int(attempts)),
-            "last_attempt_at": now_iso,
-            "written_at": now_iso,
-        }
-        # 同步清掉对应 failed_segment, 避免双源歧义
-        lst = data.get("failed_segments") or []
-        if isinstance(lst, list):
-            data["failed_segments"] = [
-                e for e in lst
-                if not (isinstance(e, dict) and e.get("segment_id") == segment_id)
-            ]
-            if not data["failed_segments"]:
-                data.pop("failed_segments", None)
-        # 同步清掉 adaptive_batch_* 字段 — 旧 supervisor 看到 adaptive 会无限重试。
-        # 必须 hard-pop, 不能保留 (失败段已被 stalled 接管, 自适应拆批对 supervisor
-        # 无意义)。仅本场景需要; 其它非失败语境 (例如 JSON parse 失败) 走原
-        # _save_adaptive_batch 不会经过此函数, 因此不会误清。
-        for _adapt_key in (
-            "adaptive_batch_size",
-            "adaptive_source_end_id",
-            "adaptive_reason",
-            "adaptive_updated_at",
-        ):
-            data.pop(_adapt_key, None)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            data["stalled_state"] = {
+                "segment_id": segment_id,
+                "qa_range_start": int(qa_range_start),
+                "qa_range_end": int(qa_range_end),
+                "error_class": str(error_class),
+                "reason": str(reason)[:200],
+                "attempts": max(1, int(attempts)),
+                "last_attempt_at": now_iso,
+                "written_at": now_iso,
+            }
+            # 同步清掉对应 failed_segment, 避免双源歧义
+            lst = data.get("failed_segments") or []
+            if isinstance(lst, list):
+                data["failed_segments"] = [
+                    e for e in lst
+                    if not (isinstance(e, dict) and e.get("segment_id") == segment_id)
+                ]
+                if not data["failed_segments"]:
+                    data.pop("failed_segments", None)
+            # 同步清掉 adaptive_batch_* 字段 — 旧 supervisor 看到 adaptive 会无限重试。
+            # 必须 hard-pop, 不能保留 (失败段已被 stalled 接管, 自适应拆批对 supervisor
+            # 无意义)。仅本场景需要; 其它非失败语境 (例如 JSON parse 失败) 走原
+            # _save_adaptive_batch 不会经过此函数, 因此不会误清。
+            for _adapt_key in (
+                "adaptive_batch_size",
+                "adaptive_source_end_id",
+                "adaptive_reason",
+                "adaptive_updated_at",
+            ):
+                data.pop(_adapt_key, None)
+            _atomic_write_state_json(path, data)
         logger.warning(
             "observer: 失败段 %s 达到重试上限 (attempts=%d, error_class=%s) — 写 stalled 状态, "
             "supervisor 不再重试, 需人工 review 后 _clear_stalled_state 重置",
@@ -4619,14 +4666,15 @@ def _clear_stalled_state(cfg: dict[str, Any] | None = None) -> bool:
     """
     path = _state_path(cfg)
     try:
-        if not path.exists():
-            return False
-        data = json.loads(path.read_text(encoding="utf-8")) or {}
-        if not isinstance(data, dict) or "stalled_state" not in data:
-            return False
-        data.pop("stalled_state", None)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        return True
+        with _STATE_FILE_LOCK:
+            if not path.exists():
+                return False
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(data, dict) or "stalled_state" not in data:
+                return False
+            data.pop("stalled_state", None)
+            _atomic_write_state_json(path, data)
+            return True
     except Exception as e:
         logger.warning("清除 stalled_state 失败: %s", _safe_err(e)[:120])
         return False
@@ -5716,19 +5764,9 @@ def _observe_worker(
 
         # 7. 解析双输出 JSON
         _san_map: dict = {}  # 走过消毒重试时才有内容, 用于写库前把痕迹换回原样
-        parsed = _parse_observer_json(text)
         # 2026-11-25: 结构合法但内容是空壳 (模型把格式样板原样吐回来) 也算失败批 ——
         # 否则它会被写进库, 再被当成"上一版印"污染下一轮上下文。
-        _payload_reason: str | None = None
-        if parsed:
-            _payload_text = str((parsed.get("note") or {}).get("content") or "")
-            _payload_reason = _empty_payload_reason(_payload_text)
-            if _payload_reason:
-                logger.warning(
-                    "observer: 输出是空壳 (%s, %d 字) — 按失败批处理, 不写库",
-                    _payload_reason, len(_payload_text),
-                )
-                parsed = None
+        parsed, _payload_reason = _parse_non_empty_observer_json(text)
         if not parsed:
             # 2026-11-23: 先归类再处置 —— 失败账不能清一色 json_parse,
             # 提前收尾 / 循环 / 真格式漂移的处置路径不一样。
@@ -5767,14 +5805,14 @@ def _observe_worker(
                     continue
                 if "error" not in _retry_result:
                     _retry_text = _retry_result.get("text", "") or ""
-                    _parsed_retry = _parse_observer_json(_retry_text)
+                    _parsed_retry, _retry_empty = _parse_non_empty_observer_json(_retry_text)
                     if _parsed_retry:
                         parsed = _parsed_retry
                         logger.info("observer: primary 重试成功 (%d 字)", len(_retry_text))
                         break
                     logger.warning(
-                        "observer: primary 重试返 %d 字仍不可解析, 继续重试",
-                        len(_retry_text),
+                        "observer: primary 重试返 %d 字仍不可解析 (%s), 继续重试",
+                        len(_retry_text), _retry_empty or "json_parse",
                     )
                 else:
                     logger.warning(
@@ -5785,7 +5823,7 @@ def _observe_worker(
             # 必须换输入。这一级只动输入形状、不动内容语义: 把 <tag 形态的尖括号
             # 垫开, 断掉触发链路。实测 pos/neg 对照: 空格版 2/2 通过, 零宽版 1/2。
             if not parsed:
-                _san_prompt, _san_map, _san_hits = _sanitize_special_tokens_map(prompt)
+                _san_prompt, _candidate_san_map, _san_hits = _sanitize_special_tokens_map(prompt)
                 _san_retries = max(0, int(cfg.get("json_parse_sanitize_retries", 2) or 0))
                 if _san_hits and _san_retries:
                     logger.warning(
@@ -5811,9 +5849,10 @@ def _observe_worker(
                             )
                             continue
                         _san_text = _san_result.get("text", "") or ""
-                        _parsed_san = _parse_observer_json(_san_text)
+                        _parsed_san, _san_empty = _parse_non_empty_observer_json(_san_text)
                         if _parsed_san:
                             parsed = _parsed_san
+                            _san_map = _candidate_san_map
                             logger.info(
                                 "observer: 消毒重发成功 (第 %d 次, %d 字, 改动 %d 处)",
                                 _attempt, len(_san_text), _san_hits,
@@ -5821,7 +5860,7 @@ def _observe_worker(
                             break
                         logger.warning(
                             "observer: 消毒重发第 %d 次仍不可解析 (%d 字, %s)",
-                            _attempt, len(_san_text), _degeneration_reason(_san_result),
+                            _attempt, len(_san_text), _san_empty or _degeneration_reason(_san_result),
                         )
             # v4 (2026-08-20) stage-2 修复: JSON 解析失败时, 在尝试持久化失败段
             # 之前先走一次 fallback_llm (LLM 层而非 embedding 层) — 因为当前 primary
@@ -5829,46 +5868,47 @@ def _observe_worker(
             # fallback 仍由 cfg.fallback_llm 显式配置; 配置缺失时直接走持久化路径。
             _json_secondary_fb_text: str | None = None
             _json_secondary_fb_model: str | None = None
-            try:
-                _fb_cfg = dict(cfg.get("fallback_llm") or {}) \
-                    if isinstance(cfg.get("fallback_llm"), dict) else {}
-                if _fb_cfg.get("model"):
-                    _fb_key = _fb_cfg.get("api_key") or _fb_cfg.get("apiKey") or api_key
-                    logger.warning(
-                        "observer: JSON 解析失败, 切 fallback_llm (%s) 重试一次 (阶段 2 修复)",
-                        _fb_cfg.get("model"),
-                    )
-                    _fb_result_2 = call_m3(
-                        {**merged, "model": _fb_cfg.get("model"),
-                         "base_url": _fb_cfg.get("base_url") or merged.get("base_url"),
-                         "proxy": _fb_cfg.get("proxy") or merged.get("proxy")},
-                        _fb_key, prompt,
-                        max_completion_tokens=max_completion_tokens,
-                        thinking=thinking, reasoning_split=reasoning_split,
-                    )
-                    if "error" not in _fb_result_2:
-                        _json_secondary_fb_text = _fb_result_2.get("text", "") or ""
-                        _json_secondary_fb_model = _fb_cfg.get("model")
-                        logger.info(
-                            "observer: fallback_llm 返 %d 字 (%s)",
-                            len(_json_secondary_fb_text), _json_secondary_fb_model,
-                        )
-                        parsed = _parse_observer_json(_json_secondary_fb_text)
-                        if parsed:
-                            logger.info(
-                                "observer: fallback_llm 输出解析成功, 走正常流程"
-                            )
-                    else:
+            if not parsed:
+                try:
+                    _fb_cfg = dict(cfg.get("fallback_llm") or {}) \
+                        if isinstance(cfg.get("fallback_llm"), dict) else {}
+                    if _fb_cfg.get("model"):
+                        _fb_key = _fb_cfg.get("api_key") or _fb_cfg.get("apiKey") or api_key
                         logger.warning(
-                            "observer: fallback_llm 也失败: %s",
-                            str(_fb_result_2["error"])[:120],
+                            "observer: JSON 解析失败, 切 fallback_llm (%s) 重试一次 (阶段 2 修复)",
+                            _fb_cfg.get("model"),
                         )
-            except Exception as _e_fb_parse:
-                logger.warning(
-                    "observer: fallback_llm 重试异常(走持久化路径): %s",
-                    _safe_err(_e_fb_parse)[:120],
-                )
-                parsed = None
+                        _fb_result_2 = call_m3(
+                            {**merged, "model": _fb_cfg.get("model"),
+                             "base_url": _fb_cfg.get("base_url") or merged.get("base_url"),
+                             "proxy": _fb_cfg.get("proxy") or merged.get("proxy")},
+                            _fb_key, prompt,
+                            max_completion_tokens=max_completion_tokens,
+                            thinking=thinking, reasoning_split=reasoning_split,
+                        )
+                        if "error" not in _fb_result_2:
+                            _json_secondary_fb_text = _fb_result_2.get("text", "") or ""
+                            _json_secondary_fb_model = _fb_cfg.get("model")
+                            logger.info(
+                                "observer: fallback_llm 返 %d 字 (%s)",
+                                len(_json_secondary_fb_text), _json_secondary_fb_model,
+                            )
+                            parsed, _fb_empty = _parse_non_empty_observer_json(_json_secondary_fb_text)
+                            if parsed:
+                                logger.info(
+                                    "observer: fallback_llm 输出解析成功, 走正常流程"
+                                )
+                        else:
+                            logger.warning(
+                                "observer: fallback_llm 也失败: %s",
+                                str(_fb_result_2["error"])[:120],
+                            )
+                except Exception as _e_fb_parse:
+                    logger.warning(
+                        "observer: fallback_llm 重试异常(走持久化路径): %s",
+                        _safe_err(_e_fb_parse)[:120],
+                    )
+                    parsed = None
             if not parsed:
                 # 解析失败恢复 (primary + fallback_llm 均失败): 多条 QA 批次尝试
                 # 自适应拆批 (复用现有 _save_adaptive_batch), 把 batch 减半 → 下次
