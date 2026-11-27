@@ -144,6 +144,29 @@ test("a replayed entry that the backend answers as duplicate counts as seen", as
   assert.equal(fetchImpl.calls.filter((c) => c.path === "/events").length, 1);
 });
 
+test("long session beyond 10000 messages uses incremental cursor and does not replay history", async () => {
+  const { adapter, fetchImpl } = makeAdapter({
+    "/health": { payload: { ok: true, bridge_protocol_version: REQUIRED_PROTOCOL } },
+    "/events": OK,
+  });
+  const entries = [];
+  for (let i = 0; i < 10001; i += 1) {
+    entries.push(userEntry(`u-${i}`, i === 0 ? null : `u-${i - 1}`, `msg-${i}`));
+  }
+  await adapter.drain(ctxFor(entries));
+  assert.equal(fetchImpl.calls.filter((c) => c.path === "/events").length, 10001);
+  assert.equal(adapter.seen.size, 10000);
+
+  await adapter.drain(ctxFor(entries));
+  assert.equal(fetchImpl.calls.filter((c) => c.path === "/events").length, 10001);
+
+  entries.push(userEntry("u-10001", "u-10000", "msg-10001"));
+  await adapter.drain(ctxFor(entries));
+  const sent = fetchImpl.calls.filter((c) => c.path === "/events");
+  assert.equal(sent.length, 10002);
+  assert.equal(sent[sent.length - 1].body.event_id, "u-10001");
+});
+
 // ── 4. failure: retry + order ───────────────────────────────────────────
 test("a failed event stays retryable and stops the drain so the answer cannot pass it", async () => {
   let userAttempts = 0;

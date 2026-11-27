@@ -44,28 +44,11 @@ def _get_store(config=None):
     return TopicStore(DB_PATH(config))
 
 
-def _llm_cfg():
-    """从 .env 加载 LLM 配置（不隐式指向任何厂商，要求显式配置）"""
-    env_path = os.path.expanduser("~/AppData/Local/hermes/.env")
-    if not os.path.exists(env_path):
-        return None
-    api_key = ""
-    for line in open(env_path, encoding="utf-8"):
-        stripped = line.strip()
-        if stripped.startswith("LLM_API_KEY="):
-            api_key = stripped.split("=", 1)[1]
-            break
-        if stripped.startswith("MINIMAX_CN_API_KEY="):
-            api_key = stripped.split("=", 1)[1]
-            break
-    if not api_key:
-        return None
-    return {
-        "endpoint": os.environ.get("LLM_BASE_URL", ""),
-        "model": os.environ.get("LLM_MODEL", ""),
-        "api_key": api_key,
-        "proxy": os.environ.get("V3CORE_LLM_PROXY", ""),
-    }
+def _llm_cfg(cfg=None):
+    """加载完整 LLM 配置（保留 providers/models 上下文）"""
+    from .llm_gateway import resolve_simple_llm_cfg
+
+    return resolve_simple_llm_cfg(cfg)
 
 
 def _try_seed_from_buffer(dry_run: bool = False, config=None) -> dict:
@@ -142,9 +125,9 @@ def _try_seed_from_buffer(dry_run: bool = False, config=None) -> dict:
 
                     # 用 LLM 命名
                     try:
-                        llm_cfg = _llm_cfg()
+                        llm_cfg = _llm_cfg(cfg)
                         if llm_cfg:
-                            title = _name_cluster(f"{items[i]['text']} {items[j]['text']}", llm_cfg)
+                            title = _name_cluster(f"{items[i]['text']} {items[j]['text']}", llm_cfg, cfg=cfg)
                         else:
                             title = None
                     except Exception:
@@ -307,7 +290,7 @@ def cluster_orphans(dry_run: bool = False, config=None) -> dict:
                 return final_result
 
             # 对每个簇创建新主题
-            llm = _llm_cfg()
+            llm = _llm_cfg(cfg)
             now = datetime.now().isoformat()
             new_topics = 0
 
@@ -318,7 +301,7 @@ def cluster_orphans(dry_run: bool = False, config=None) -> dict:
 
                 # 用 LLM 命名（如果可用）
                 cluster_text = " ".join(it["text"] for it in items[:5])
-                title = _name_cluster(cluster_text, llm) if llm else f"orphan_cluster_{cluster_id}"
+                title = _name_cluster(cluster_text, llm, cfg=cfg) if llm else f"orphan_cluster_{cluster_id}"
                 # 避免兜底名导致多簇塌缩（_topic_id 从 title 生成确定性 ID）
                 if not title or title == "auto_cluster":
                     title = f"topic_cluster_{cluster_id}"
@@ -412,19 +395,21 @@ def _drain_old_candidates(store) -> int:
     return drained
 
 
-def _name_cluster(text: str, llm_cfg: dict) -> str:
+def _name_cluster(text: str, llm_cfg: dict, cfg=None) -> str:
     """LLM 给聚类簇命名"""
     if not llm_cfg:
         return "auto_cluster"
     try:
         from .llm_gateway import invoke_simple
 
+        effective_cfg = cfg if cfg is not None else (llm_cfg.get("config") if isinstance(llm_cfg, dict) else None)
         res = invoke_simple(
             llm_cfg,
             [{"role": "user", "content": f"以下是一组相关对话片段，请用 2-5 个字概括其共同主题：\n\n{text[:800]}"}],
             max_tokens=200,
             temperature=0.3,
             timeout=30,
+            cfg=effective_cfg,
         )
         if not res.ok:
             return "auto_cluster"

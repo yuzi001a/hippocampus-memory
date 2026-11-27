@@ -293,7 +293,7 @@ def _format_for_llm(members: list) -> str:
     return '\n'.join(parts)
 
 
-def name_cluster(cluster_members: list, cluster_idx: int, llm_cfg: dict) -> dict:
+def name_cluster(cluster_members: list, cluster_idx: int, llm_cfg: dict, cfg=None) -> dict:
     """让 LLM 给一个簇命名、摘要、提取关键词"""
     structured_data = _format_for_llm(cluster_members)
     
@@ -322,32 +322,37 @@ def name_cluster(cluster_members: list, cluster_idx: int, llm_cfg: dict) -> dict
     try:
         from .llm_gateway import invoke_simple
 
-        endpoint = llm_cfg.get('endpoint', '')
+        effective_cfg = cfg if cfg is not None else (llm_cfg.get('config') if isinstance(llm_cfg, dict) else None)
+        endpoint = llm_cfg.get('endpoint', '') or llm_cfg.get('base_url', '')
         model = llm_cfg.get('model', '')
         api_key = llm_cfg.get('apiKey', '') or llm_cfg.get('api_key', '')
         proxy = llm_cfg.get('proxy', '')
 
-        if not endpoint:
+        if not endpoint and effective_cfg is None:
             return _fallback_name(cluster_idx)
 
         # 外部厂商 API 默认不走代理（如 minimaxi.com / siliconflow）；
         # 内网/自建端点按代理走。判断标准：endpoint 域名含已知外部厂商特征。
+        endpoint_l = endpoint.lower()
         use_no_proxy = (
-            'minimaxi.com' in endpoint.lower()
-            or 'api.siliconflow.cn' in endpoint.lower()
+            'minimaxi.com' in endpoint_l
+            or 'api.siliconflow.cn' in endpoint_l
         )
         proxies = {} if use_no_proxy else ({"http": proxy, "https": proxy} if proxy else None)
+        call_cfg = {
+            **(llm_cfg if isinstance(llm_cfg, dict) else {}),
+            "endpoint": endpoint,
+            "model": model or "deepseek-chat",
+            "api_key": api_key,
+            "proxy": "" if use_no_proxy else proxy,
+        }
         res = invoke_simple(
-            {
-                "endpoint": endpoint,
-                "model": model or "deepseek-chat",
-                "api_key": api_key,
-                "proxy": "" if use_no_proxy else proxy,
-            },
+            call_cfg,
             [{"role": "user", "content": prompt}],
             max_tokens=500,
             temperature=0.3,
             timeout=60,
+            cfg=effective_cfg,
             proxies=proxies,
         )
         if not res.ok:
@@ -510,7 +515,7 @@ def _to_dict(obj):
 
 
 def secondary_cluster(labels: list, pairs: list, named: dict,
-                     threshold: float = 0.65, llm_cfg: dict = None) -> dict:
+                     threshold: float = 0.65, llm_cfg: dict = None, cfg=None) -> dict:
     """二次聚簇：合并相似簇、重命名 fallback（标准后处理流程）
     
     实验验证（2026-07-07）：累积文本匹配已有主题，前 5-9 轮可收敛到正确或相近主题。
@@ -539,12 +544,14 @@ def secondary_cluster(labels: list, pairs: list, named: dict,
             try:
                 from .llm_gateway import invoke_simple
 
+                effective_cfg = cfg if cfg is not None else (llm_cfg.get('config') if isinstance(llm_cfg, dict) else None)
                 res = invoke_simple(
                     llm_cfg,
                     [{"role": "user", "content": prompt}],
                     max_tokens=20,
                     temperature=0.1,
                     timeout=30,
+                    cfg=effective_cfg,
                 )
                 if res.ok and res.text:
                     clean = res.text.split('：')[-1].strip().replace('<think>', '').split('\n')[0][:15]
@@ -609,33 +616,19 @@ def main():
         print("未配置 embedding，无法运行主题聚类")
         return
 
-    # LLM config — 默认从 cfg.llm 读取（config.yaml 已显式配置），不隐式指向任何厂商
-    # 优先从 .env 读 LLM_API_KEY，回退到不同厂商命名变量
-    llm_api_key = ''
-    env_path = os.path.expanduser('~/AppData/Local/hermes/.env')
-    if os.path.exists(env_path):
-        for line in open(env_path):
-            stripped = line.strip()
-            if stripped.startswith('LLM_API_KEY='):
-                llm_api_key = stripped.split('=', 1)[1]
-                break
-            if stripped.startswith('MINIMAX_CN_API_KEY='):
-                llm_api_key = stripped.split('=', 1)[1]
-                break
-    if not llm_api_key:
-        llm_api_key = os.environ.get('LLM_API_KEY', '') or os.environ.get('MINIMAX_CN_API_KEY', '')
-
-    # 从配置读取 LLM proxy
-    llm_proxy = ''
-    if hasattr(cfg, 'llm') and cfg.llm:
-        llm_proxy = cfg.llm.proxy if hasattr(cfg.llm, 'proxy') else ''
-
-    llm_cfg = {
-        'endpoint': getattr(cfg.llm, 'base_url', '') if hasattr(cfg.llm, 'base_url') else '',
-        'model': getattr(cfg.llm, 'model', '') if hasattr(cfg.llm, 'model') else '',
-        'api_key': getattr(cfg.llm, 'api_key', '') or llm_api_key,
-        'proxy': llm_proxy or os.environ.get('V3CORE_LLM_PROXY', '')
-    }
+    # LLM config — 复用 unified resolver，保留完整 cfg (providers/models)
+    from .llm_gateway import resolve_simple_llm_cfg
+    llm_cfg = resolve_simple_llm_cfg(cfg)
+    if llm_cfg is None:
+        llm_proxy = cfg.llm.proxy if hasattr(cfg, 'llm') and cfg.llm and hasattr(cfg.llm, 'proxy') else ''
+        llm_cfg = {
+            'provider': getattr(cfg.llm, 'provider', '') if hasattr(cfg, 'llm') and cfg.llm else '',
+            'endpoint': getattr(cfg.llm, 'base_url', '') if hasattr(cfg, 'llm') and cfg.llm else '',
+            'model': getattr(cfg.llm, 'model', '') if hasattr(cfg, 'llm') and cfg.llm else '',
+            'api_key': '',
+            'proxy': llm_proxy or os.environ.get('V3CORE_LLM_PROXY', ''),
+            'config': cfg,
+        }
     
     db_path = args.db or str(_resolve_data_dir() / 'v3_topic.db')
     store = TopicStore(db_path)

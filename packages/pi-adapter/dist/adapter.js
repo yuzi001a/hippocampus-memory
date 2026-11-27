@@ -9,6 +9,7 @@ import { BridgeClient, OwnedBackend, HOST_ID } from "./bridge.js";
 export const MEMORY_CUSTOM_TYPE = "hippocampus-memory";
 const TEXT_ONLY_NOTE = "[hippocampus memory — recalled context, not a new user fact]";
 const MAX_SEEN = 10000;
+const MAX_SESSIONS = 256;
 
 // Only these two roles are recordable; custom/system/toolResult entries and
 // compaction/branch summaries are structurally not messages we own.
@@ -69,6 +70,7 @@ export class MemoryAdapter {
     this.owned = null;
     this.handshake = null;
     this.seen = new Set();          // `${sessionId}::${entryId}` — native identity only
+    this.cursors = new Map();       // sessionId -> { index, lastId } incremental anchor
     this.recallArmed = false;        // per-input latch; local control, not an event
     this.chain = Promise.resolve();  // serial drain
     this.closed = false;
@@ -124,6 +126,16 @@ export class MemoryAdapter {
     this.seen.add(key);
   }
 
+  #rememberCursor(sessionId, index, lastId) {
+    if (this.cursors.has(sessionId)) {
+      this.cursors.delete(sessionId);
+    } else if (this.cursors.size >= MAX_SESSIONS) {
+      const oldestSession = this.cursors.keys().next().value;
+      if (oldestSession !== undefined) this.cursors.delete(oldestSession);
+    }
+    this.cursors.set(sessionId, { index, lastId });
+  }
+
   // Serialized: one drain at a time, so ordering is never raced.
   #serial(task) {
     const run = this.chain.then(task, task);
@@ -161,12 +173,25 @@ export class MemoryAdapter {
       const client = await this.#ensureClient();
       if (!client) return;
       const { sessionId, events } = snapshot;
-      for (const event of events) {
+      const cursor = this.cursors.get(sessionId);
+      let startIndex = 0;
+      if (
+        cursor &&
+        cursor.index > 0 &&
+        cursor.index <= events.length &&
+        events[cursor.index - 1].event_id === cursor.lastId
+      ) {
+        startIndex = cursor.index;
+      }
+      for (let i = startIndex; i < events.length; i += 1) {
+        const event = events[i];
         const key = `${sessionId}::${event.event_id}`;
-        if (this.seen.has(key)) continue;
-        const ack = await client.sendEvent(event);
-        if (!ack.ok) { this.warn("hippocampus: event not acknowledged; will retry"); return; }
-        this.#rememberSeen(key);
+        if (!this.seen.has(key)) {
+          const ack = await client.sendEvent(event);
+          if (!ack.ok) { this.warn("hippocampus: event not acknowledged; will retry"); return; }
+          this.#rememberSeen(key);
+        }
+        this.#rememberCursor(sessionId, i + 1, event.event_id);
       }
     });
   }

@@ -119,6 +119,15 @@ def _legacy_profile(base_url: str) -> ProviderProfile:
             # reasoning_effort 也在: M3.1 族不下发 thinking, 改发 effort 压思考
             supports=frozenset({"temperature", "thinking", "reasoning_split", "reasoning_effort"}),
         )
+    if "siliconflow.cn" in host or "siliconflow.com" in host:
+        # SiliconFlow: OpenAI Chat 兼容端点，只认 max_tokens
+        return ProviderProfile(
+            name="siliconflow(legacy-inferred)",
+            api_mode=API_CHAT,
+            base_url=base_url,
+            max_tokens_field="max_tokens",
+            supports=frozenset({"temperature", "response_format"}),
+        )
     # 未声明的端点: 保持历史形状 + 一次 WARNING。
     # 选警告而不是抛错, 是因为老配置在升级后就崩会直接打断生产; 而形状不对时
     # 服务端 400 一样看得见。新配置请显式写 providers: 段。
@@ -202,10 +211,30 @@ def _model_binding(model: str, cfg: Any) -> tuple[str, dict[str, Any]]:
     return str(table[best].get("provider") or "").strip(), dict(table[best])
 
 
-def resolve_profile(model: str, cfg: Any, *, api_key: str = "", base_url: str = "") -> ProviderProfile:
-    """按模型绑定解析通道画像；未绑定则回落到历史推断。"""
+def resolve_profile(
+    model: str,
+    cfg: Any,
+    *,
+    api_key: str = "",
+    base_url: str = "",
+    provider: str = "",
+) -> ProviderProfile:
+    """按模型绑定解析通道画像；未绑定则按显式/llm.provider 或回落历史推断。"""
     providers = _cfg_section(cfg, "providers")
     provider_name, _spec = _model_binding(model, cfg)
+    if not provider_name:
+        hint = str(provider or "").strip()
+        if not hint and cfg is not None:
+            llm_obj = cfg.get("llm") if isinstance(cfg, Mapping) else getattr(cfg, "llm", None)
+            if isinstance(llm_obj, Mapping):
+                hint = str(llm_obj.get("provider") or "").strip()
+            elif llm_obj is not None:
+                hint = str(getattr(llm_obj, "provider", "") or "").strip()
+        if hint:
+            from . import providers_opencode as _oc
+
+            if hint in providers or _oc.family_of(hint) is not None:
+                provider_name = hint
     if provider_name:
         raw = _as_mapping(providers.get(provider_name))
         if not raw:

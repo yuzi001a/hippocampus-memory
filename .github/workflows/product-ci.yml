@@ -282,6 +282,7 @@ jobs:
               tests/test_observer_retry.py \
               tests/test_observer_sensitive_isolation.py \
               tests/test_b01_event_contract_behavior.py \
+              tests/test_p0a_late_assistant_derivation.py \
               tests/test_serve_tool_profile_scoping.py \
               tests/test_recall_pool_premise_deadline.py \
               tests/test_schema_packaged_parity.py

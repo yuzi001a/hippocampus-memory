@@ -11,7 +11,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from v3core import llm_gateway, providers, topic_fusion, topic_maintain
+from v3core import llm_gateway, providers, topic_cluster, topic_fusion, topic_maintain
 from v3core.llm_gateway import (
     AnthropicMessagesTransport,
     ModelRequest,
@@ -20,6 +20,7 @@ from v3core.llm_gateway import (
     get_transport,
     invoke,
     invoke_simple,
+    resolve_simple_llm_cfg,
     resolve_thinking_policy,
 )
 
@@ -181,3 +182,84 @@ def test_invoke_simple_supports_opencode_responses_and_topic_helpers(monkeypatch
         {"endpoint": "https://example.test/v1", "model": "m", "api_key": "sk"},
     )
     assert name == "融合摘要"
+
+
+def test_topic_modules_preserve_siliconflow_and_custom_provider_configs(monkeypatch, tmp_path):
+    sent = []
+
+    def fake_post(url, json=None, headers=None, timeout=None, proxies=None):
+        sent.append({"url": url, "body": json, "headers": headers})
+        return _FakeResp(
+            200,
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"topic_name":"主题A","summary":"摘要","keywords":["k1"],"category":"技术"}'
+                        }
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    # 1) SiliconFlow 必须走 OpenAI 兼容 max_tokens 协议，且不得下发 MiniMax 历史字段
+    sf_cfg = {
+        "endpoint": "https://api.siliconflow.cn/v1",
+        "model": "Qwen/Qwen3-32B",
+        "api_key": "sk-sf",
+    }
+    res_cluster = topic_cluster.name_cluster(
+        [{"qa_pairs": [{"user": "问", "assistant": "答"}], "turn_count": 1, "file": "/a/b"}],
+        0,
+        sf_cfg,
+    )
+    assert res_cluster["topic_name"] == "主题A"
+    topic_fusion._call_llm([{"role": "user", "content": "汇总"}], sf_cfg)
+    assert topic_maintain._name_cluster("片段", sf_cfg).startswith("{")
+    assert len(sent) == 3
+    for call in sent:
+        body = call["body"]
+        assert "max_tokens" in body
+        assert "max_completion_tokens" not in body
+        assert "thinking" not in body
+
+    # 2) resolve_simple_llm_cfg 保留完整 cfg (providers/models)，主题模块按自定义通道配置发包
+    sent.clear()
+    custom_cfg = {
+        "llm": {
+            "provider": "custom-gw",
+            "model": "custom-model-v1",
+            "api_key": "sk-custom",
+            "base_url": "https://gw.example.internal/v1",
+        },
+        "providers": {
+            "custom-gw": {
+                "api_mode": "chat_completions",
+                "base_url": "https://gw.example.internal/v1",
+                "max_tokens_field": "max_tokens",
+                "headers": {"X-Custom-Tenant": "tenant-42"},
+                "supports": {"temperature": True},
+            }
+        },
+        "models": {},
+    }
+    resolved = resolve_simple_llm_cfg(custom_cfg, env_path=str(tmp_path / "missing.env"))
+    assert resolved is not None and resolved["config"] is custom_cfg
+    assert resolved["provider"] == "custom-gw"
+
+    topic_cluster.name_cluster(
+        [{"qa_pairs": [{"user": "问", "assistant": "答"}], "turn_count": 1, "file": "/a/b"}],
+        1,
+        resolved,
+    )
+    topic_fusion._call_llm([{"role": "user", "content": "汇总"}], resolved)
+    topic_maintain._name_cluster("片段", resolved)
+    assert len(sent) == 3
+    for call in sent:
+        assert call["url"] == "https://gw.example.internal/v1/chat/completions"
+        assert call["headers"]["X-Custom-Tenant"] == "tenant-42"
+        assert "max_tokens" in call["body"]
+        assert "max_completion_tokens" not in call["body"]
+        assert "thinking" not in call["body"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Callable, Mapping
 
@@ -259,6 +260,110 @@ def invoke(
     )
 
 
+_INFERRED_HOSTS = ("opencode.ai", "minimaxi.com", "minimax", "siliconflow.cn", "siliconflow.com")
+
+
+def _extract_llm_section(cfg: Any) -> dict[str, Any]:
+    if cfg is None:
+        return {}
+    llm_obj = cfg.get("llm") if isinstance(cfg, Mapping) else getattr(cfg, "llm", None)
+    if llm_obj is None:
+        return {}
+    if isinstance(llm_obj, Mapping):
+        return dict(llm_obj)
+    out: dict[str, Any] = {}
+    for key in (
+        "provider",
+        "model",
+        "api_key",
+        "base_url",
+        "proxy",
+        "reasoning_effort",
+        "thinking_mode",
+    ):
+        val = getattr(llm_obj, key, None)
+        if val is not None:
+            out[key] = val
+    return out
+
+
+def resolve_simple_llm_cfg(cfg: Any = None, *, env_path: str | None = None) -> dict[str, Any] | None:
+    """Resolve unified topic/helper LLM configuration while preserving full ``cfg``."""
+    if cfg is None:
+        try:
+            from ..config import resolve_config
+
+            cfg = resolve_config()
+        except Exception:
+            cfg = None
+
+    llm_sec = _extract_llm_section(cfg)
+    provider = str(llm_sec.get("provider") or "").strip()
+    endpoint = str(llm_sec.get("base_url") or llm_sec.get("endpoint") or "").strip()
+    model = str(llm_sec.get("model") or "").strip()
+    proxy = str(llm_sec.get("proxy") or "").strip()
+    api_key = str(llm_sec.get("api_key") or llm_sec.get("apiKey") or "").strip()
+
+    if not api_key:
+        target_env = env_path or os.path.expanduser("~/AppData/Local/hermes/.env")
+        if target_env and os.path.exists(target_env):
+            try:
+                with open(target_env, encoding="utf-8") as fh:
+                    for line in fh:
+                        stripped = line.strip()
+                        if stripped.startswith("LLM_API_KEY="):
+                            api_key = stripped.split("=", 1)[1].strip()
+                            break
+                        if stripped.startswith("MINIMAX_CN_API_KEY="):
+                            api_key = stripped.split("=", 1)[1].strip()
+                            break
+            except Exception:
+                pass
+    if not api_key:
+        api_key = (
+            os.environ.get("LLM_API_KEY", "").strip()
+            or os.environ.get("MINIMAX_CN_API_KEY", "").strip()
+        )
+
+    if not endpoint:
+        endpoint = os.environ.get("LLM_BASE_URL", "").strip()
+    if not model:
+        model = os.environ.get("LLM_MODEL", "").strip()
+    if not proxy:
+        proxy = os.environ.get("V3CORE_LLM_PROXY", "").strip()
+
+    if not api_key:
+        return None
+
+    return {
+        "provider": provider,
+        "endpoint": endpoint,
+        "model": model,
+        "api_key": api_key,
+        "proxy": proxy,
+        "reasoning_effort": llm_sec.get("reasoning_effort"),
+        "thinking_mode": llm_sec.get("thinking_mode"),
+        "config": cfg,
+    }
+
+
+def _has_declared_provider_binding(model: str, cfg: Any, provider_hint: str) -> bool:
+    if cfg is not None:
+        bound_provider, _ = providers._model_binding(model, cfg)
+        if bound_provider:
+            return True
+    if not provider_hint and cfg is not None:
+        provider_hint = str(_extract_llm_section(cfg).get("provider") or "").strip()
+    if not provider_hint:
+        return False
+    from .. import providers_opencode as _oc
+
+    if _oc.family_of(provider_hint) is not None:
+        return True
+    provs = providers._cfg_section(cfg, "providers")
+    return provider_hint in provs
+
+
 def invoke_simple(
     llm_cfg: Mapping[str, Any],
     messages: list[dict[str, Any]],
@@ -275,14 +380,37 @@ def invoke_simple(
     base_url = str(llm_cfg.get("base_url") or llm_cfg.get("endpoint") or "").strip()
     api_key = str(llm_cfg.get("apiKey") or llm_cfg.get("api_key") or "").strip()
     proxy = str(llm_cfg.get("proxy") or "").strip() or None
+    provider_hint = str(llm_cfg.get("provider") or "").strip()
     effective_cfg = cfg if cfg is not None else llm_cfg.get("config")
+
+    host = providers._host_of(base_url) if base_url else ""
+    inferred_known = any(marker in host for marker in _INFERRED_HOSTS)
+    if _has_declared_provider_binding(model, effective_cfg, provider_hint) or inferred_known:
+        profile = providers.resolve_profile(
+            model,
+            effective_cfg,
+            api_key=api_key,
+            base_url=base_url,
+            provider=provider_hint,
+        )
+    elif base_url:
+        profile = providers.ProviderProfile(
+            name="openai-compat(simple)",
+            api_mode=providers.API_CHAT,
+            base_url=base_url,
+            max_tokens_field="max_tokens",
+            supports=frozenset({"temperature"}),
+        )
+    else:
+        profile = None
+
     req = ModelRequest(
         model=model,
         messages=messages,
         system=system,
         max_tokens=max_tokens,
         temperature=temperature,
-        thinking_intent="auto",
+        thinking_intent=str(llm_cfg.get("thinking_mode") or "auto"),
         effort_source="explicit",
         explicit_effort=llm_cfg.get("reasoning_effort"),
         force_none_when_disabled=False,
@@ -293,5 +421,6 @@ def invoke_simple(
         timeout=timeout,
         retry_attempts=int(llm_cfg.get("retry_attempts", 2) or 2),
         cfg=effective_cfg,
+        profile=profile,
     )
     return invoke(req)

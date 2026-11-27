@@ -2,7 +2,7 @@
 """Unified model-calling adapter layer for ``v3core``."""
 from __future__ import annotations
 
-from .gateway import invoke, invoke_simple
+from .gateway import invoke, invoke_simple, resolve_simple_llm_cfg
 from .policy import explain_http_error, resolve_session_id, resolve_thinking_policy
 from .transports import (
     TRANSPORT_REGISTRY,
@@ -27,5 +27,6 @@ __all__ = [
     "invoke",
     "invoke_simple",
     "resolve_session_id",
+    "resolve_simple_llm_cfg",
     "resolve_thinking_policy",
 ]
