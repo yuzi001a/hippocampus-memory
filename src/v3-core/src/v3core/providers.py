@@ -345,126 +345,31 @@ def build_payload(
     thinking: Mapping[str, Any] | None = None,
     reasoning_split: bool = False,
 ) -> dict[str, Any]:
-    """按画像拼请求体；画像说不支持的字段一律不发。"""
-    try:
-        from . import providers_opencode
+    """按画像拼请求体；统一委托给 ``v3core.llm_gateway.transports``。"""
+    from .llm_gateway.transports import get_transport
 
-        model = providers_opencode.normalize_model_id(profile.name, model, profile.base_url)
-    except Exception:
-        pass
-    payload: dict[str, Any] = {"model": model}
-    if profile.api_mode == API_RESPONSES:
-        eff_system = system
-        eff_input = prompt
-        if messages is not None and not prompt:
-            sys_parts = [str(system)] if system else []
-            conv_lines: list[str] = []
-            for m in messages:
-                role = m.get("role", "user")
-                content = m.get("content", "")
-                if role == "system":
-                    if content:
-                        sys_parts.append(str(content))
-                else:
-                    conv_lines.append(f"{role}: {content}")
-            eff_system = "\n\n".join(p for p in sys_parts if p) or None
-            eff_input = "\n\n".join(conv_lines)
-        payload["input"] = eff_input
-        if eff_system:
-            payload["instructions"] = eff_system
-        payload[profile.max_tokens_field] = max_tokens
-        if schema is not None:
-            payload["text"] = {
-                "format": {"type": "json_schema", "name": schema_name, "strict": True, "schema": dict(schema)}
-            }
-        if reasoning_effort and profile.supports_cap("reasoning_effort"):
-            payload["reasoning"] = {"effort": reasoning_effort}
-        return payload
-
-    if profile.api_mode == API_ANTHROPIC:
-        raw_msgs = list(messages) if messages is not None else [{"role": "user", "content": prompt}]
-        sys_parts = [str(system)] if system else []
-        non_system_msgs: list[dict[str, Any]] = []
-        for m in raw_msgs:
-            if m.get("role") == "system":
-                content = m.get("content")
-                if content:
-                    sys_parts.append(str(content))
-            else:
-                non_system_msgs.append(m)
-        payload["messages"] = non_system_msgs
-        eff_system = "\n\n".join(p for p in sys_parts if p)
-        if eff_system:
-            payload["system"] = eff_system
-        payload[profile.max_tokens_field] = max_tokens
-        if temperature is not None and profile.supports_cap("temperature"):
-            payload["temperature"] = temperature
-        if thinking is not None and profile.supports_cap("thinking"):
-            payload["thinking"] = dict(thinking)
-        return payload
-
-    if messages is not None:
-        payload["messages"] = ([{"role": "system", "content": system}] if system else []) + list(messages)
-    else:
-        payload["messages"] = _messages_from_prompt(prompt, system)
-    payload[profile.max_tokens_field] = max_tokens
-    if temperature is not None and profile.supports_cap("temperature"):
-        payload["temperature"] = temperature
-    if schema is not None and profile.supports_cap("response_format"):
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {"name": schema_name, "strict": True, "schema": dict(schema)},
-        }
-    if thinking is not None and profile.supports_cap("thinking"):
-        payload["thinking"] = dict(thinking)
-    if reasoning_effort and profile.supports_cap("reasoning_effort"):
-        payload["reasoning_effort"] = reasoning_effort
-    if reasoning_split and profile.supports_cap("reasoning_split"):
-        payload["reasoning_split"] = True
-    return payload
+    return get_transport(profile.api_mode).build_payload(
+        profile,
+        model,
+        prompt=prompt,
+        system=system,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        schema=schema,
+        schema_name=schema_name,
+        reasoning_effort=reasoning_effort,
+        thinking=thinking,
+        reasoning_split=reasoning_split,
+    )
 
 
 # ── 响应解析 ────────────────────────────────────────────────────────────────
 def parse_response(profile: ProviderProfile, data: Mapping[str, Any]) -> dict[str, Any]:
     """把三家响应折成 ``{text, reasoning, usage, finish_reason}``。"""
-    text = ""
-    reasoning = ""
-    usage: dict[str, Any] = {}
-    finish = ""
-    mode = profile.api_mode
-    if mode == API_RESPONSES:
-        for item in data.get("output") or []:
-            itype = (item or {}).get("type")
-            if itype == "reasoning":
-                for part in (item or {}).get("summary") or []:
-                    reasoning += str((part or {}).get("text") or "")
-                continue
-            for part in (item or {}).get("content") or []:
-                ptype = (part or {}).get("type")
-                if ptype in ("output_text", "text"):
-                    text += str((part or {}).get("text") or "")
-        usage = dict(data.get("usage") or {})
-        finish = str(data.get("status") or "")
-        if data.get("incomplete_details"):
-            finish = "incomplete"
-    elif mode == API_ANTHROPIC:
-        for block in data.get("content") or []:
-            btype = (block or {}).get("type")
-            if btype == "text":
-                text += str((block or {}).get("text") or "")
-            elif btype == "thinking":
-                reasoning += str((block or {}).get("thinking") or "")
-        usage = dict(data.get("usage") or {})
-        finish = str(data.get("stop_reason") or "")
-    else:
-        choices = data.get("choices") or []
-        first = (choices[0] if choices else {}) or {}
-        msg = first.get("message") or {}
-        text = str(msg.get("content") or "")
-        reasoning = str(msg.get("reasoning_content") or msg.get("reasoning") or "")
-        usage = dict(data.get("usage") or {})
-        finish = str(first.get("finish_reason") or "")
-    return {"text": text, "reasoning": reasoning, "usage": usage, "finish_reason": finish}
+    from .llm_gateway.transports import get_transport
+
+    return get_transport(profile.api_mode).parse_response(data)
 
 
 def supports_schema(profile: ProviderProfile) -> bool:

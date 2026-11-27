@@ -960,15 +960,13 @@ def call_m3(
     reasoning_split: bool = True,
     timeout: int = 180,
 ) -> dict[str, Any]:
-    """调 M3 Chat Completion, 返 {text, usage, latency}。
+    """调 M3 Chat Completion, 返 {text, reasoning, usage, finish_reason, latency}。
 
-    实验定案参数 (phase0_m3_length_test.py L95 + phase0e 验证):
-    - max_completion_tokens=16384 (旧 max_tokens 已弃用)
-    - thinking={"type": "disabled"} — 跳过思考直接答（M3.1 家族改为省略该字段，
-      见 ``_m3_thinking_payload``）
-    - reasoning_split=True — thinking 拆到 reasoning_content, 不进 content
+    统一委托给 ``v3core.llm_gateway.invoke``，保证通道画像、thinking/effort 互斥、
+    有界重试与 400 adaptive 兜底与其余调用点完全同源。
     """
-    import requests
+    from .llm_gateway import ModelRequest, invoke as _gw_invoke
+
     model = cfg.get("model") or cfg.get("llm_model") or ""
     if not model:
         # 没有模型名就不发请求: 静默回落到字面量会掩盖配置错误 (2026-11-19 起 fail-loud)
@@ -978,121 +976,57 @@ def call_m3(
         or _llm_base_url_default()
     )
     proxy = cfg.get("proxy") or cfg.get("llm_proxy")
-    # 2026-08-09: timeout 支持 cfg 配置 — 大输入+大输出 (印 2-3万字 + 50 QA) M3 处理慢,
-    # 默认 180s 不够 (实测连续超时); 生产可配 timeout: 300
     timeout = int(cfg.get("timeout", timeout) or timeout)
-    # 2026-11-19: adaptive 族 (省略 thinking) 需要显式 effort, 否则长 prompt 的思考
-    # 吃满输出预算。默认档来自 models: 表; cfg.reasoning_effort 显式覆盖。
     _params = model_params.resolve(model, cfg)
-    _reasoning_effort = model_params.reasoning_effort_for(
-        _params, cfg, default="low")
-    # 2026-11-22: 通道画像驱动 —— URL / 头 / payload 形状由 config 的 providers: 段决定,
-    # 这里只负责挑值。换模型 = 改配置; 换通道 = 改配置; 只有新传输协议才动代码。
     profile = providers.resolve_profile(model, cfg, api_key=api_key, base_url=base_url)
-    # 2026-11-26: classic 形状的模型在这里 effort 是 None, 请求里就整段不发 ——
-    # 而这条通道"不发"等于"开思考"。显式补 none, 见 _effective_reasoning_effort。
-    _reasoning_effort = _effective_reasoning_effort(_reasoning_effort, thinking, profile)
-    headers = providers.build_headers(
-        profile, api_key,
-        # 安装级稳定会话 id：进程重启不变（Go 按会话粘后端 + 复用提示词缓存）
-        session_id=_agent_session_id(cfg),
-        extra=cfg.get("extra_headers") if isinstance(cfg.get("extra_headers"), Mapping) else None,
-    )
-    # 通道能强制 schema 就用它锁结构 (这才是「不再依赖模型自律」的正路);
-    # 不能强制的通道 (如 MiniMax) 跳过, 回落到本地校验 + 有界修复。
     _schema = None
     if providers.supports_schema(profile) and cfg.get("structured_output", True) is not False:
-        _schema = (cfg.get("response_schema") if isinstance(cfg.get("response_schema"), Mapping)
-                   else OBSERVER_RESPONSE_SCHEMA)
-    _thinking_field = _m3_thinking_payload(model, thinking, cfg)
-    payload = providers.build_payload(
-        profile, model, prompt,
-        max_tokens=max_completion_tokens,
-        temperature=cfg.get("temperature", 0.3),
-        schema=_schema,
-        schema_name=str(cfg.get("response_schema_name") or "observer"),
-        reasoning_effort=_reasoning_effort,
-        thinking=_thinking_field,
-        reasoning_split=reasoning_split,
+        _schema = (
+            cfg.get("response_schema")
+            if isinstance(cfg.get("response_schema"), Mapping)
+            else OBSERVER_RESPONSE_SCHEMA
+        )
+    _fallback_effort = str(cfg.get("reasoning_effort") or _params.reasoning_effort or "low")
+    res = _gw_invoke(
+        ModelRequest(
+            model=model,
+            prompt=prompt,
+            max_tokens=max_completion_tokens,
+            temperature=cfg.get("temperature", 0.3),
+            thinking_intent=thinking or "disabled",
+            effort_source="table",
+            explicit_effort=cfg.get("reasoning_effort"),
+            default_adaptive_effort="low",
+            force_none_when_disabled=True,
+            reasoning_split=reasoning_split,
+            response_schema=_schema,
+            response_schema_name=str(cfg.get("response_schema_name") or "observer"),
+            api_key=api_key,
+            base_url=base_url,
+            proxy=proxy,
+            timeout=timeout,
+            retry_attempts=max(1, int(cfg.get("retry_attempts", 3) or 1)),
+            retry_backoff_s=float(cfg.get("retry_backoff_s", 2.0) or 0.0),
+            extra_headers=(
+                cfg.get("extra_headers")
+                if isinstance(cfg.get("extra_headers"), Mapping)
+                else None
+            ),
+            adaptive_retry_effort_fallback=_fallback_effort,
+            adaptive_retry_effort_only_minimax=False,
+            cfg=cfg,
+            profile=profile,
+        ),
+        sleep_fn=time.sleep,
     )
-    url = profile.url()
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-
-    def _post(body: dict[str, Any]):
-        return requests.post(url, json=body, headers=headers, timeout=timeout, proxies=proxies)
-
-    # 2026-11-22: 有界重试。夜里实测长请求会被掐断 (Max retries exceeded / 5xx / 429),
-    # 原来一次失败就整批作废, 要等下一个观察周期。这里只对瞬态失败重试,
-    # 配置/鉴权/结构类 4xx 一次都不重试 —— 重试它们只会把错误拖长。
-    _attempts = max(1, int(cfg.get("retry_attempts", 3) or 1))
-    _backoff = float(cfg.get("retry_backoff_s", 2.0) or 0.0)
-    t0 = time.time()
-    resp = None
-    try:
-        for _i in range(_attempts):
-            try:
-                resp = _post(payload)
-            except Exception as e:
-                if _i + 1 < _attempts and providers.is_retryable_exception(e):
-                    _delay = providers.retry_delay(_i, _backoff)
-                    logger.warning(
-                        "observer: 传输失败, 重试 %d/%d (%.1fs 后): %s",
-                        _i + 1, _attempts, _delay, _safe_err(e)[:120],
-                    )
-                    time.sleep(_delay)
-                    continue
-                return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
-            if providers.is_retryable_status(resp.status_code) and _i + 1 < _attempts:
-                _delay = providers.retry_delay(_i, _backoff, resp)
-                logger.warning(
-                    "observer: HTTP %s, 重试 %d/%d (%.1fs 后): %s",
-                    resp.status_code, _i + 1, _attempts, _delay, (resp.text or "")[:100],
-                )
-                time.sleep(_delay)
-                continue
-            break
-        # 服务端口径再次变化时的一次有界重试（与 llm.LLMClient 的 fallback 同义）：
-        # 只有明确要求 adaptive thinking 时才去掉该字段重发，不重试其他 4xx。
-        if (resp is not None and resp.status_code == 400
-                and "requires adaptive thinking" in (resp.text or "").lower()
-                and "thinking" in payload):
-            logger.warning(
-                "observer: M3 拒绝 thinking 参数(requires adaptive thinking), 去掉该字段重试一次 model=%s",
-                model,
-            )
-            # 重试体同样要压 effort: 去掉 thinking 后走的就是 adaptive 默认档,
-            # 不压会重演"思考吃满输出预算"的静默失败。
-            _retry_body = {k: v for k, v in payload.items() if k != "thinking"}
-            # 服务端说"要 adaptive" = 运行时证据推翻了表里的 classic 判断;
-            # 这一发必须按 adaptive 走, 所以 effort 兜到 low/cfg, 不能省。
-            _retry_body.setdefault(
-                "reasoning_effort",
-                str(cfg.get("reasoning_effort") or _params.reasoning_effort or "low"),
-            )
-            resp = _post(_retry_body)
-        latency = time.time() - t0
-    except Exception as e:
-        return {"error": f"请求失败: {_safe_err(e)[:200]}", "latency": time.time() - t0}
-    if resp.status_code != 200:
-        return {
-            "error": f"HTTP {resp.status_code}: {_explain_http_error(resp.status_code, resp.text)}",
-            "latency": latency,
-        }
-    try:
-        data = resp.json()
-    except Exception as e:
-        return {"error": f"响应非 JSON: {_safe_err(e)[:200]}", "latency": latency}
-    # 2026-11-22: 三家响应结构统一折成 text/reasoning/usage (chat / responses / messages)
-    _parsed = providers.parse_response(profile, data)
-    text = _parsed["text"]
-    reasoning = _parsed["reasoning"]
-    usage = _parsed["usage"]
+    if not res.ok:
+        return {"error": res.error, "latency": res.latency}
     return {
-        "text": text,
-        "reasoning": reasoning,
-        "usage": usage,
-        "finish_reason": _parsed.get("finish_reason", ""),
-        "latency": latency,
+        "text": res.text,
+        "reasoning": res.reasoning,
+        "usage": res.usage,
+        "finish_reason": res.finish_reason,
+        "latency": res.latency,
     }
 
 

@@ -74,26 +74,19 @@ def _load_llm_cfg():
 
 
 def _call_llm(messages: list, llm_cfg: dict) -> str:
-    """调 LLM 生成文本（OpenAI 兼容协议）"""
-    import requests
-    headers = {
-        'Authorization': f'Bearer {llm_cfg["api_key"]}',
-        'Content-Type': 'application/json',
-    }
-    payload = {
-        'model': llm_cfg['model'],
-        'messages': messages,
-        'max_tokens': 800,
-        'temperature': 0.3,
-    }
-    resp = requests.post(
-        f'{llm_cfg["endpoint"]}/chat/completions',
-        headers=headers,
-        json=payload,
+    """调 LLM 生成文本（统一走 llm_gateway 通道适配）"""
+    from .llm_gateway import invoke_simple
+
+    res = invoke_simple(
+        llm_cfg,
+        messages,
+        max_tokens=800,
+        temperature=0.3,
         timeout=120,  # 大 topic 需要更长时间
     )
-    data = resp.json()
-    return data['choices'][0]['message']['content']
+    if not res.ok:
+        raise RuntimeError(res.error or "topic_fusion llm call failed")
+    return res.text
 
 
 FUSION_PROMPT = """你是一个主题总结专家。给你一个主题的名称、摘要，和一组来自对话的相关条目（每条有时间标签），请你把它们融合成一段连贯、简洁的短文。

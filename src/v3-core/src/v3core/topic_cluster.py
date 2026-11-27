@@ -320,38 +320,39 @@ def name_cluster(cluster_members: list, cluster_idx: int, llm_cfg: dict) -> dict
 
     # 调用 LLM
     try:
+        from .llm_gateway import invoke_simple
+
         endpoint = llm_cfg.get('endpoint', '')
         model = llm_cfg.get('model', '')
         api_key = llm_cfg.get('apiKey', '') or llm_cfg.get('api_key', '')
         proxy = llm_cfg.get('proxy', '')
-        
+
         if not endpoint:
             return _fallback_name(cluster_idx)
-        
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        
-        body = {
-            "model": model or "deepseek-chat",
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": 500
-        }
-        import requests
+
         # 外部厂商 API 默认不走代理（如 minimaxi.com / siliconflow）；
         # 内网/自建端点按代理走。判断标准：endpoint 域名含已知外部厂商特征。
-        headers_for_request = dict(headers)
-        if ('minimaxi.com' in endpoint.lower()
-                or 'api.siliconflow.cn' in endpoint.lower()):
-            resp = requests.post(endpoint.rstrip('/') + '/chat/completions',
-                                 json=body, headers=headers_for_request, timeout=60)
-        else:
-            proxies = {"http": proxy, "https": proxy} if proxy else None
-            resp = requests.post(endpoint.rstrip('/') + '/chat/completions',
-                                 json=body, headers=headers_for_request, proxies=proxies, timeout=60)
-        resp.raise_for_status()
-        reply = resp.json()['choices'][0]['message']['content']
+        use_no_proxy = (
+            'minimaxi.com' in endpoint.lower()
+            or 'api.siliconflow.cn' in endpoint.lower()
+        )
+        proxies = {} if use_no_proxy else ({"http": proxy, "https": proxy} if proxy else None)
+        res = invoke_simple(
+            {
+                "endpoint": endpoint,
+                "model": model or "deepseek-chat",
+                "api_key": api_key,
+                "proxy": "" if use_no_proxy else proxy,
+            },
+            [{"role": "user", "content": prompt}],
+            max_tokens=500,
+            temperature=0.3,
+            timeout=60,
+            proxies=proxies,
+        )
+        if not res.ok:
+            raise RuntimeError(res.error or "llm_gateway error")
+        reply = res.text
         
         # 解析 JSON — 兼容各种格式
         reply = reply.strip()
@@ -536,16 +537,17 @@ def secondary_cluster(labels: list, pairs: list, named: dict,
                 continue
             prompt = '用8字内概括主题名（只说名称）：\n' + text
             try:
-                headers = {'Authorization': f'Bearer {llm_cfg.get("api_key", "")}',
-                           'Content-Type': 'application/json'}
-                body = {'model': llm_cfg.get('model', ''),
-                        'messages': [{'role': 'user', 'content': prompt}],
-                        'temperature': 0.1, 'max_tokens': 20}
-                r = requests.post(f"{llm_cfg.get('endpoint', '')}/chat/completions",
-                                   json=body, headers=headers, timeout=30)
-                if r.status_code == 200:
-                    reply = r.json()['choices'][0]['message']['content']
-                    clean = reply.split('：')[-1].strip().replace('<think>', '').split('\n')[0][:15]
+                from .llm_gateway import invoke_simple
+
+                res = invoke_simple(
+                    llm_cfg,
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=20,
+                    temperature=0.1,
+                    timeout=30,
+                )
+                if res.ok and res.text:
+                    clean = res.text.split('：')[-1].strip().replace('<think>', '').split('\n')[0][:15]
                     if clean:
                         named[k]['title'] = clean
             except Exception:

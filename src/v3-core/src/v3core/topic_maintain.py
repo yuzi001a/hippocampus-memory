@@ -417,22 +417,18 @@ def _name_cluster(text: str, llm_cfg: dict) -> str:
     if not llm_cfg:
         return "auto_cluster"
     try:
-        import requests
-        resp = requests.post(
-            f"{llm_cfg['endpoint']}/chat/completions",
-            headers={"Authorization": f"Bearer {llm_cfg['api_key']}", "Content-Type": "application/json"},
-            json={
-                "model": llm_cfg["model"],
-                "messages": [
-                    {"role": "user", "content": f"以下是一组相关对话片段，请用 2-5 个字概括其共同主题：\n\n{text[:800]}"}
-                ],
-                "max_tokens": 200,
-                "temperature": 0.3,
-            },
+        from .llm_gateway import invoke_simple
+
+        res = invoke_simple(
+            llm_cfg,
+            [{"role": "user", "content": f"以下是一组相关对话片段，请用 2-5 个字概括其共同主题：\n\n{text[:800]}"}],
+            max_tokens=200,
+            temperature=0.3,
             timeout=30,
         )
-        data = resp.json()
-        raw = (data.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+        if not res.ok:
+            return "auto_cluster"
+        raw = (res.text or "").strip()
         # 剥离 think 块
         import re
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
