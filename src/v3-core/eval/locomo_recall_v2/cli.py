@@ -820,6 +820,9 @@ def build_isolated_lab_config(
     embed_cfg: Mapping[str, Any],
     rerank: bool = False,
     rerank_endpoint_env: str = "",
+    include_topic: bool = True,
+    include_notes: bool = True,
+    include_yin: bool = True,
 ) -> dict[str, Any]:
     """Build a plain-dict isolated lab config — never a ``V3Config``.
 
@@ -872,7 +875,7 @@ def build_isolated_lab_config(
         exc_cls=LabConfigRefused,
     )
 
-    return {
+    cfg_out: dict[str, Any] = {
         "lab": True,
         # A real empty disposable experiment directory, NOT
         # an empty string and NOT a fallback. Production
@@ -891,6 +894,13 @@ def build_isolated_lab_config(
         "output_dir": str(output_dir),
         "cache_dir": str(cache_dir),
     }
+    if not (bool(include_topic) and bool(include_notes) and bool(include_yin)):
+        cfg_out["prefetch"] = {
+            "include_topic": bool(include_topic),
+            "include_notes": bool(include_notes),
+            "include_yin": bool(include_yin),
+        }
+    return cfg_out
 
 
 # ---------------------------------------------------------------------
@@ -1317,6 +1327,9 @@ def run_dry_run(
         embed_cfg=embed_section,
         rerank=rerank,
         rerank_endpoint_env=rerank_endpoint_env,
+        include_topic=not bool(getattr(args, "disable_topic", False)),
+        include_notes=not bool(getattr(args, "disable_notes", False)),
+        include_yin=not bool(getattr(args, "disable_yin", False)),
     )
 
     _ensure_dir(output_dir)
@@ -2250,6 +2263,9 @@ def run_semantic(
         embed_cfg=embed_section,
         rerank=False,
         rerank_endpoint_env="",
+        include_topic=not bool(getattr(args, "disable_topic", False)),
+        include_notes=not bool(getattr(args, "disable_notes", False)),
+        include_yin=not bool(getattr(args, "disable_yin", False)),
     )
     embed_cfg_input: dict[str, Any] = {"embed": dict(embed_section)}
     dataset_sha = str(getattr(data, "source_sha256", "") or sha)
@@ -3896,6 +3912,15 @@ def make_argument_parser() -> argparse.ArgumentParser:
                      help="40-char git SHA to stamp the manifest with.")
     run.add_argument("--write-rows", action="store_true",
                      help="Write import-rows.json to --output-dir for inspection.")
+    run.add_argument("--disable-topic", dest="disable_topic", action="store_true",
+                     default=False,
+                     help="Ablation switch: disable the topic lane (vector + keyword).")
+    run.add_argument("--disable-notes", dest="disable_notes", action="store_true",
+                     default=False,
+                     help="Ablation switch: disable observation_notes recall.")
+    run.add_argument("--disable-yin", dest="disable_yin", action="store_true",
+                     default=False,
+                     help="Ablation switch: disable yin_paragraphs recall.")
 
     return p
 
