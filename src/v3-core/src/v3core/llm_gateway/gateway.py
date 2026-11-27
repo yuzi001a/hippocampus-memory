@@ -375,7 +375,7 @@ def invoke_simple(
     cfg: Any = None,
     proxies: Mapping[str, str] | None = None,
 ) -> ModelResponse:
-    """Convenience entrypoint for lightweight callers (topic_cluster / topic_fusion / topic_maintain)."""
+    """Convenience entrypoint for lightweight callers (e.g. topic_v2)."""
     model = str(llm_cfg.get("model") or "").strip()
     base_url = str(llm_cfg.get("base_url") or llm_cfg.get("endpoint") or "").strip()
     api_key = str(llm_cfg.get("apiKey") or llm_cfg.get("api_key") or "").strip()

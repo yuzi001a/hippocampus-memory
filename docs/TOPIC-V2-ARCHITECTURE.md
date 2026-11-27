@@ -1,17 +1,17 @@
 # Topic V2: Codex-Style Two-Phase Consolidation & Freshness Guard
 
-**Status**: Implemented as an **opt-in** feature (`prefetch.topic_v2_mode: false` by default).  
+**Status**: **Enabled by default** (`prefetch.topic_v2_mode: true` by default; set `false` only to opt out).  
 **Related Philosophy**: [DESIGN-PHILOSOPHY.md](DESIGN-PHILOSOPHY.md)
 
 ## 1. Why Replace Unsupervised Vector Clustering?
 
-The legacy topic pipeline (`topic_cluster.py`, `topic_maintain.py`, `topic_fusion.py`) relied on HDBSCAN density clustering, an orphan buffer, and hardcoded cosine thresholds (`SEED_COSINE = 0.65`) followed by prose rewriting:
+The legacy topic pipeline (`topic_cluster.py`, `topic_maintain.py`, `topic_fusion.py`, `topic_refine.py`) relied on HDBSCAN density clustering, an orphan buffer, and hardcoded cosine thresholds (`SEED_COSINE = 0.65`) followed by prose rewriting:
 
 1. **Embedding-model brittleness**: Cosine distributions vary across OpenAI, BGE, Qwen, and Ollama models, so hardcoded thresholds misclassify or stall when developers swap providers.
 2. **Stale prose accumulation**: Rewriting discussions into narrative paragraphs blurred old choices (`A`) and new decisions (`B`), causing outdated `Topic` cards (weighted `2.0` vs QA `1.0` in RRF) to outrank newer raw QA pairs.
 3. **High maintenance complexity**: Nine intertwined modules and auxiliary state machines hindered debugging and open-source adoption.
 
-Topic V2 replaces clustering with **scale-free Vector Top-K routing** + **Two-Phase Structured Consolidation** + a **Read-Side Freshness & Supersession Guard**.
+Topic V2 replaces clustering with **scale-free Vector Top-K routing** + **Two-Phase Structured Consolidation** + a **Read-Side Freshness & Supersession Guard**, and removes the 4 obsolete HDBSCAN/SQLite-refine modules for a net reduction in core code size and complexity.
 
 ## 2. Two-Phase Architecture (`v3core/topic_v2.py`)
 
@@ -65,15 +65,14 @@ python -m v3core topics-v2 --inspect
 # Preview incremental PG consolidation without writing
 python -m v3core topics-v2 --dry-run
 
-# Run live-PG / offline evaluators with Topic V2
-python -m eval.topic_ablation_bench --out-dir ./out/ablation
-python -m eval.locomo_recall_v2.cli run --topic-v2-mode ...
+# LoCoMo evaluator runs Topic V2 by default (use --no-topic-v2-mode for baseline ablation)
+python -m eval.locomo_recall_v2.cli run ...
 ```
 
-When `prefetch.topic_v2_mode` is `true`, `V3Core._on_live_flush` routes incremental flush consolidation to `V3Core.consolidate_topics_v2()` (and invalidates `TopicRecallCache` after DB commit) instead of the legacy SQLite `topic_refine.py` path.
+By default (`prefetch.topic_v2_mode: true`), `V3Core._on_live_flush` and `v3_topic_maintain` route incremental consolidation directly to Topic V2 (invalidating `TopicRecallCache` after PG commit). Setting `prefetch.topic_v2_mode` to `false` disables both flush-time consolidation and the read-side ranking guard.
 
-## 5. Deprecation Roadmap for Legacy Topic Modules
+## 5. Legacy Module Retirement & Verification
 
-1. **Current stage (Opt-in Beta)**: `prefetch.topic_v2_mode` defaults to `false`; legacy modules remain intact for zero-risk rollback.
-2. **Next validation gate**: Complete full LoCoMo long-session `--topic-v2-mode` A/B run against isolated PG and verify no regressions on multi-hundred-turn histories.
-3. **Default flip & cleanup**: Once LoCoMo A/B confirms parity or improvement, switch `PrefetchConfig.topic_v2_mode` default to `true`, mark `topic_cluster.py`, `topic_maintain.py`, and `topic_fusion.py` deprecated, and remove them in the subsequent minor release.
+1. **Default-on + net code reduction (Current)**: `PrefetchConfig.topic_v2_mode` defaults to `true`, `v3_topic_maintain` routes through Topic V2, and the legacy clustering/fusion/maintain/refine modules (`topic_cluster.py`, `topic_fusion.py`, `topic_maintain.py`, `topic_refine.py`) have been removed.
+2. **Isolated PostgreSQL + pgvector CI gate**: `.github/workflows/product-ci.yml` (`isolated-pg-topic-v2`) runs idempotent `bootstrap_alpha_db.py` and `tests/test_topic_v2_pg_integration.py` against a live `pgvector/pgvector:pg16` instance on every PR.
+3. **Next milestone**: Run full live-model LoCoMo long-session benchmarking against real PG and align E1/observer extraction with the same structured `llm_gateway` contract.

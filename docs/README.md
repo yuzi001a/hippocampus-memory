@@ -28,7 +28,7 @@ If you are new to the project, do **not** start with milestone files such as `B0
 - [WHY_HIPPOCAMPUS.md](WHY_HIPPOCAMPUS.md) — project motivation and design philosophy.
 - [DESIGN-PHILOSOPHY.md](DESIGN-PHILOSOPHY.md) — complete design philosophy, 15 core principles, non-goals, and PR review benchmark.
 - [ARCHITECTURE-OVERVIEW.md](ARCHITECTURE-OVERVIEW.md) — core architecture.
-- [TOPIC-V2-ARCHITECTURE.md](TOPIC-V2-ARCHITECTURE.md) — opt-in two-phase structured topic consolidation & freshness guard (`prefetch.topic_v2_mode`).
+- [TOPIC-V2-ARCHITECTURE.md](TOPIC-V2-ARCHITECTURE.md) — default-on two-phase structured topic consolidation & freshness guard (`prefetch.topic_v2_mode`).
 - [COMPARISON.md](COMPARISON.md) / [COMPARISON.zh-CN.md](COMPARISON.zh-CN.md) — how Hippocampus differs from other memory approaches.
 - [COST.md](COST.md) — provider/cost considerations.
 - [PRIVACY-DATA-FLOW.md](PRIVACY-DATA-FLOW.md) — what can leave the machine and under which configuration.

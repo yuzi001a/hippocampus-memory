@@ -105,15 +105,15 @@ def test_locomo_cli_parses_ablation_flags_without_breaking_defaults(tmp_path):
     assert ns_default.disable_topic is False
     assert ns_default.disable_notes is False
     assert ns_default.disable_yin is False
-    assert ns_default.topic_v2_mode is False
+    assert ns_default.topic_v2_mode is True
 
     ns_disabled = parser.parse_args(
-        base_argv + ["--disable-topic", "--disable-notes", "--disable-yin", "--topic-v2-mode"]
+        base_argv + ["--disable-topic", "--disable-notes", "--disable-yin", "--no-topic-v2-mode"]
     )
     assert ns_disabled.disable_topic is True
     assert ns_disabled.disable_notes is True
     assert ns_disabled.disable_yin is True
-    assert ns_disabled.topic_v2_mode is True
+    assert ns_disabled.topic_v2_mode is False
 
     base_dir = tmp_path / "lab_base"
     base_dir.mkdir()
@@ -142,15 +142,15 @@ def test_locomo_cli_parses_ablation_flags_without_breaking_defaults(tmp_path):
         "include_yin": False,
     }
 
-    v2_only_cfg = locomo_cli.build_isolated_lab_config(
+    v2_off_cfg = locomo_cli.build_isolated_lab_config(
         base_path=str(base_dir),
         dsn="host=127.0.0.1 port=55465 dbname=lab user=lab password=lab",
         output_dir=str(tmp_path / "out"),
         cache_dir=str(tmp_path / "cache"),
         embed_cfg={"provider": "siliconflow", "model": "BAAI/bge-m3"},
-        topic_v2_mode=True,
+        topic_v2_mode=False,
     )
-    assert v2_only_cfg["prefetch"]["topic_v2_mode"] is True
+    assert v2_off_cfg["prefetch"]["topic_v2_mode"] is False
 
 
 def test_topic_ablation_bench_runs_all_profiles_and_g2_beats_g1(tmp_path):

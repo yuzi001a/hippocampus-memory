@@ -283,9 +283,11 @@ def test_prefetch_topic_v2_mode_opt_in_strips_header_and_respects_query_intent(t
 def test_prefetch_config_topic_v2_mode_default_and_override():
     from v3core.config_model import PrefetchConfig, from_legacy_dict
 
-    assert PrefetchConfig().topic_v2_mode is False
+    assert PrefetchConfig().topic_v2_mode is True
     cfg_default = from_legacy_dict({})
-    assert cfg_default.prefetch.topic_v2_mode is False
+    assert cfg_default.prefetch.topic_v2_mode is True
+    cfg_disabled = from_legacy_dict({"prefetch": {"topic_v2_mode": False}})
+    assert cfg_disabled.prefetch.topic_v2_mode is False
     cfg_enabled = from_legacy_dict({"prefetch": {"topic_v2_mode": True}})
     assert cfg_enabled.prefetch.topic_v2_mode is True
 
@@ -608,12 +610,13 @@ def test_v3core_on_live_flush_routes_topic_v2_and_respects_toggle(tmp_path, monk
         }
     ]
     core_on = v3core.V3Core.__new__(v3core.V3Core)
-    core_on._config = from_legacy_dict({"basePath": str(tmp_path), "prefetch": {"topic_v2_mode": True}})
+    # Default config without explicit prefetch.topic_v2_mode enables Topic V2 flush.
+    core_on._config = from_legacy_dict({"basePath": str(tmp_path)})
     core_on._pg = _FakePg(qas)
     invalidations = []
     monkeypatch.setattr(core_on, "_notify_topic_recall_invalidation", lambda: invalidations.append(1))
     monkeypatch.setattr(v3core, "safe_embed_cfg", lambda cfg: {"endpoint": "http://fake", "_fingerprint": "fp"})
-    monkeypatch.setattr(v3core, "call_embedding", lambda text, cfg: embed_text(text))
+    monkeypatch.setattr(v3core, "call_embedding", lambda text, cfg, **kw: embed_text(text))
 
     core_on._on_live_flush([("sess1", "m1", "msg", "user")])
     assert len(core_on._pg.topics) == 1
@@ -629,3 +632,120 @@ def test_v3core_on_live_flush_routes_topic_v2_and_respects_toggle(tmp_path, monk
     core_off._on_live_flush([("sess1", "m1", "msg", "user")])
     assert called_v2 == []
     assert core_off._pg.topics == {}
+
+
+def test_v3_topic_maintain_tool_routes_to_topic_v2_and_respects_runtime_guard(tmp_path):
+    import contextlib
+    import json
+    from v3core.tools.topic_maintain_tool import handle_v3_topic_maintain
+
+    class _FakeCur:
+        def __init__(self, store):
+            self.store = store
+            self.rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            p = list(params or ())
+            if q.startswith("select topic_id, title"):
+                self.rows = []
+            elif "from qa_pairs" in q and "where id >" in q:
+                wm, lim = int(p[0]), int(p[1])
+                self.rows = [
+                    (r["id"], r["timestamp"], r["question"], r["answer"])
+                    for r in self.store.qas
+                    if r["id"] > wm
+                ][:lim]
+            elif q.startswith("insert into topics"):
+                self.store.topics[p[0]] = p[3]
+                self.rows = []
+
+        def fetchall(self):
+            return list(self.rows)
+
+    class _FakeConn:
+        def __init__(self, store):
+            self.store = store
+
+        def cursor(self):
+            return _FakeCur(self.store)
+
+        def commit(self):
+            pass
+
+    class _FakePg:
+        def __init__(self, qas):
+            self.qas = qas
+            self.topics = {}
+
+        @contextlib.contextmanager
+        def lease(self, timeout=10.0):
+            yield _FakeConn(self)
+
+    class _FakeCore:
+        def __init__(self):
+            self.invalidations = 0
+
+        def _notify_topic_recall_invalidation(self):
+            self.invalidations += 1
+
+    # runtime_context without pool must still fail closed.
+    err_out = json.loads(handle_v3_topic_maintain({"dry_run": True}, runtime_context=True))
+    assert err_out["success"] is False
+    assert "PgPool" in err_out["error"]
+
+    pg = _FakePg(
+        [
+            {
+                "id": 15,
+                "timestamp": _utc(2),
+                "question": "日志采集现在怎么部署？",
+                "answer": "正式放弃 Fluentd-Legacy，改为 Vector-Agent-V2。",
+            }
+        ]
+    )
+    core = _FakeCore()
+    cfg = {"basePath": str(tmp_path)}
+
+    dry = json.loads(
+        handle_v3_topic_maintain(
+            {"dry_run": True},
+            pool=pg,
+            core=core,
+            effective_config=cfg,
+            embed_fn=embed_text,
+            llm_fn=None,
+        )
+    )
+    assert dry["engine"] == "topic_v2"
+    assert dry["dry_run"] is True
+    assert pg.topics == {}
+    assert core.invalidations == 0
+
+    applied = json.loads(
+        handle_v3_topic_maintain(
+            {"dry_run": False},
+            pool=pg,
+            core=core,
+            effective_config=cfg,
+            embed_fn=embed_text,
+            llm_fn=None,
+        )
+    )
+    assert applied["engine"] == "topic_v2"
+    assert applied["upserted_topics"] == 1
+    assert any("Vector-Agent-V2" in b for b in pg.topics.values())
+    assert core.invalidations == 1
+
+
+def test_legacy_hdbscan_topic_modules_removed():
+    import importlib.util
+
+    for mod_name in ("topic_cluster", "topic_fusion", "topic_maintain", "topic_refine"):
+        assert importlib.util.find_spec(f"v3core.{mod_name}") is None

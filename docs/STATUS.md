@@ -78,7 +78,7 @@ Current evidence-backed core behavior includes:
 
 The repository contains additional observer/topic/yin/E1/journal and research paths. Their presence does **not** automatically make them part of the supported product surface.
 
-An opt-in structured Topic V2 path (`prefetch.topic_v2_mode`, default `false`) is available for evaluation — see [TOPIC-V2-ARCHITECTURE.md](TOPIC-V2-ARCHITECTURE.md).
+Structured Topic V2 (`prefetch.topic_v2_mode`, **enabled by default**) replaces legacy HDBSCAN/cosine-threshold clustering (`topic_cluster.py`, `topic_fusion.py`, `topic_maintain.py`, `topic_refine.py`, now removed) with two-phase structured dossiers, a read-side freshness guard, and an isolated PostgreSQL + pgvector CI acceptance gate — see [TOPIC-V2-ARCHITECTURE.md](TOPIC-V2-ARCHITECTURE.md).
 
 ## Reliability rules that are now part of the product contract
 

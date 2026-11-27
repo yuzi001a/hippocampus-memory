@@ -40,7 +40,6 @@ REALTIME_BY_DESIGN: dict[str, str] = {
     "__init__.py": "recall / prefetch / search_cards query embedding (8s budget)",
     "recall_pool.py": "yin/QA recall query embedding (8s budget)",
     "topic_recall.py": "topic match / chain_recall query embedding (8s budget)",
-    "topic_refine.py": "TopicRefiner.match query embedding (8s budget)",
     "observer.py": "_recall_candidates query embedding (2.5s, 8s budget)",
     "embed_failures.py": "the policy-aware wrapper itself — it passes policy through",
     "embedding.py": "the definitions themselves",
@@ -95,7 +94,7 @@ def test_durable_writes_do_not_use_the_realtime_policy():
     """
     durable_files = {
         "ingest.py", "card_store.py", "yin_pool.py", "session_summary.py",
-        "topic_store.py", "topic_create.py", "topic_edit.py", "topic_refine.py",
+        "topic_store.py", "topic_create.py", "topic_edit.py", "topic_v2.py",
         "embed_topics.py", "import_.py", "active_memory_store.py",
     }
     offenders = []

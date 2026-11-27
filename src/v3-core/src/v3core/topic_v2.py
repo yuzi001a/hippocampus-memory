@@ -1500,7 +1500,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if cfg is None:
         cfg = resolve_config()
 
-    from .embedding import call_embedding, safe_embed_cfg
+    from .embedding import DURABLE_WRITE_EMBED_POLICY, call_embedding, safe_embed_cfg
     from .pg_store import PgEmbedStore
 
     embed_cfg = safe_embed_cfg(cfg)
@@ -1515,7 +1515,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     pg = PgEmbedStore(cfg)
     llm_fn = None if args.deterministic else make_gateway_llm_fn(cfg)
-    embed_fn = lambda text: call_embedding(str(text or ""), embed_cfg) or []
+    embed_fn = (
+        lambda text: call_embedding(
+            str(text or ""), embed_cfg, policy=DURABLE_WRITE_EMBED_POLICY
+        )
+        or []
+    )
 
     result = consolidate_pg_incremental(
         pg,

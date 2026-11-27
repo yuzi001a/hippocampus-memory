@@ -823,7 +823,7 @@ def build_isolated_lab_config(
     include_topic: bool = True,
     include_notes: bool = True,
     include_yin: bool = True,
-    topic_v2_mode: bool = False,
+    topic_v2_mode: bool = True,
 ) -> dict[str, Any]:
     """Build a plain-dict isolated lab config — never a ``V3Config``.
 
@@ -895,14 +895,14 @@ def build_isolated_lab_config(
         "output_dir": str(output_dir),
         "cache_dir": str(cache_dir),
     }
-    if not (bool(include_topic) and bool(include_notes) and bool(include_yin)) or bool(topic_v2_mode):
+    if not (bool(include_topic) and bool(include_notes) and bool(include_yin)) or not bool(topic_v2_mode):
         pf_block: dict[str, Any] = {
             "include_topic": bool(include_topic),
             "include_notes": bool(include_notes),
             "include_yin": bool(include_yin),
         }
-        if bool(topic_v2_mode):
-            pf_block["topic_v2_mode"] = True
+        if not bool(topic_v2_mode):
+            pf_block["topic_v2_mode"] = False
         cfg_out["prefetch"] = pf_block
     return cfg_out
 
@@ -1334,7 +1334,7 @@ def run_dry_run(
         include_topic=not bool(getattr(args, "disable_topic", False)),
         include_notes=not bool(getattr(args, "disable_notes", False)),
         include_yin=not bool(getattr(args, "disable_yin", False)),
-        topic_v2_mode=bool(getattr(args, "topic_v2_mode", False)),
+        topic_v2_mode=bool(getattr(args, "topic_v2_mode", True)),
     )
 
     _ensure_dir(output_dir)
@@ -2271,7 +2271,7 @@ def run_semantic(
         include_topic=not bool(getattr(args, "disable_topic", False)),
         include_notes=not bool(getattr(args, "disable_notes", False)),
         include_yin=not bool(getattr(args, "disable_yin", False)),
-        topic_v2_mode=bool(getattr(args, "topic_v2_mode", False)),
+        topic_v2_mode=bool(getattr(args, "topic_v2_mode", True)),
     )
     embed_cfg_input: dict[str, Any] = {"embed": dict(embed_section)}
     dataset_sha = str(getattr(data, "source_sha256", "") or sha)
@@ -3928,8 +3928,10 @@ def make_argument_parser() -> argparse.ArgumentParser:
                      default=False,
                      help="Ablation switch: disable yin_paragraphs recall.")
     run.add_argument("--topic-v2-mode", dest="topic_v2_mode", action="store_true",
-                     default=False,
-                     help="Enable G2 Topic V2 freshness/supersession recall guard.")
+                     default=True,
+                     help="Enable Topic V2 freshness/supersession recall guard (default: true).")
+    run.add_argument("--no-topic-v2-mode", dest="topic_v2_mode", action="store_false",
+                     help="Ablation switch: disable the Topic V2 freshness/supersession recall guard.")
 
     return p
 

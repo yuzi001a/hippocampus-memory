@@ -37,8 +37,7 @@ import logging
 
 logger = logging.getLogger("v3core.topic_radar")
 
-# Cosine thresholds — dup_threshold aligns with topic_cluster._simple_cluster
-# (0.75 in the public tree). Below dup_threshold but above rel_threshold is
+# Cosine thresholds — below dup_threshold and above rel_threshold is
 # the "related" band. Pairs below rel_threshold are silently dropped.
 DUP_THRESHOLD = 0.75
 REL_THRESHOLD = 0.60

@@ -4188,7 +4188,7 @@ def recall_pool(
         except Exception:
             _pre_fusion_positions = {}
 
-    # Opt-in G2 topic_v2 freshness / supersession guard (disabled by default).
+    # Topic V2 freshness / supersession guard (enabled by default; set false to disable).
     if _resolve_topic_v2_mode(config):
         try:
             from .topic_v2 import apply_topic_v2_ranking_guard
@@ -4392,15 +4392,15 @@ _CHAIN_TRACES_PER_CARD = 2
 
 
 def _resolve_topic_v2_mode(config) -> bool:
-    """Resolve opt-in ``prefetch.topic_v2_mode`` flag (defaults to False)."""
+    """Resolve ``prefetch.topic_v2_mode`` flag (defaults to True)."""
     if config is None:
-        return False
+        return True
     if isinstance(config, dict):
-        return bool((config.get("prefetch") or {}).get("topic_v2_mode", False))
+        return bool((config.get("prefetch") or {}).get("topic_v2_mode", True))
     pf = getattr(config, "prefetch", None)
     if pf is not None:
-        return bool(getattr(pf, "topic_v2_mode", False))
-    return False
+        return bool(getattr(pf, "topic_v2_mode", True))
+    return True
 
 
 def _resolve_half_life(config, default: int = 30) -> int:

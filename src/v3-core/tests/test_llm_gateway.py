@@ -11,7 +11,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from v3core import llm_gateway, providers, topic_cluster, topic_fusion, topic_maintain
+from v3core import llm_gateway, providers, topic_v2
 from v3core.llm_gateway import (
     AnthropicMessagesTransport,
     ModelRequest,
@@ -148,7 +148,7 @@ def test_gateway_invoke_retries_503_and_handles_adaptive_400():
     assert "thinking" not in adaptive_calls[1] and adaptive_calls[1]["reasoning_effort"] == "low"
 
 
-def test_invoke_simple_supports_opencode_responses_and_topic_helpers(monkeypatch):
+def test_invoke_simple_supports_opencode_responses_and_topic_v2_gateway(monkeypatch):
     seen = []
 
     def fake_post(url, json=None, headers=None, timeout=None, proxies=None):
@@ -171,20 +171,13 @@ def test_invoke_simple_supports_opencode_responses_and_topic_helpers(monkeypatch
     assert seen[-1]["url"].endswith("/responses")
     assert seen[-1]["headers"]["x-opencode-session"]
 
-    fused = topic_fusion._call_llm(
-        [{"role": "user", "content": "总结"}],
-        {"endpoint": "https://example.test/v1", "model": "m", "api_key": "sk"},
+    adapter = topic_v2.GatewayLLMAdapter(
+        {"endpoint": "https://example.test/v1", "model": "m", "api_key": "sk"}
     )
-    assert fused == "融合摘要"
-
-    name = topic_maintain._name_cluster(
-        "一段内容",
-        {"endpoint": "https://example.test/v1", "model": "m", "api_key": "sk"},
-    )
-    assert name == "融合摘要"
+    assert adapter([{"role": "user", "content": "总结"}]) == "融合摘要"
 
 
-def test_topic_modules_preserve_siliconflow_and_custom_provider_configs(monkeypatch, tmp_path):
+def test_topic_v2_gateway_preserves_siliconflow_and_custom_provider_configs(monkeypatch, tmp_path):
     sent = []
 
     def fake_post(url, json=None, headers=None, timeout=None, proxies=None):
@@ -210,22 +203,18 @@ def test_topic_modules_preserve_siliconflow_and_custom_provider_configs(monkeypa
         "model": "Qwen/Qwen3-32B",
         "api_key": "sk-sf",
     }
-    res_cluster = topic_cluster.name_cluster(
-        [{"qa_pairs": [{"user": "问", "assistant": "答"}], "turn_count": 1, "file": "/a/b"}],
-        0,
-        sf_cfg,
-    )
-    assert res_cluster["topic_name"] == "主题A"
-    topic_fusion._call_llm([{"role": "user", "content": "汇总"}], sf_cfg)
-    assert topic_maintain._name_cluster("片段", sf_cfg).startswith("{")
-    assert len(sent) == 3
+    res_sf = invoke_simple(sf_cfg, [{"role": "user", "content": "汇总"}])
+    assert json.loads(res_sf.text)["topic_name"] == "主题A"
+    gw_sf = topic_v2.GatewayLLMAdapter(sf_cfg)
+    assert gw_sf([{"role": "user", "content": "归类"}]).startswith("{")
+    assert len(sent) == 2
     for call in sent:
         body = call["body"]
         assert "max_tokens" in body
         assert "max_completion_tokens" not in body
         assert "thinking" not in body
 
-    # 2) resolve_simple_llm_cfg 保留完整 cfg (providers/models)，主题模块按自定义通道配置发包
+    # 2) resolve_simple_llm_cfg + GatewayLLMAdapter 保留完整 cfg (providers/models)，按自定义通道配置发包
     sent.clear()
     custom_cfg = {
         "llm": {
@@ -249,14 +238,11 @@ def test_topic_modules_preserve_siliconflow_and_custom_provider_configs(monkeypa
     assert resolved is not None and resolved["config"] is custom_cfg
     assert resolved["provider"] == "custom-gw"
 
-    topic_cluster.name_cluster(
-        [{"qa_pairs": [{"user": "问", "assistant": "答"}], "turn_count": 1, "file": "/a/b"}],
-        1,
-        resolved,
-    )
-    topic_fusion._call_llm([{"role": "user", "content": "汇总"}], resolved)
-    topic_maintain._name_cluster("片段", resolved)
-    assert len(sent) == 3
+    res_custom = invoke_simple(resolved, [{"role": "user", "content": "汇总"}])
+    assert json.loads(res_custom.text)["topic_name"] == "主题A"
+    gw_custom = topic_v2.GatewayLLMAdapter(resolved, cfg=custom_cfg)
+    assert gw_custom([{"role": "user", "content": "归类"}]).startswith("{")
+    assert len(sent) == 2
     for call in sent:
         assert call["url"] == "https://gw.example.internal/v1/chat/completions"
         assert call["headers"]["X-Custom-Tenant"] == "tenant-42"
