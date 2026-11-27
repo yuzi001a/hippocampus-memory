@@ -78,6 +78,8 @@ Current evidence-backed core behavior includes:
 
 The repository contains additional observer/topic/yin/E1/journal and research paths. Their presence does **not** automatically make them part of the supported product surface.
 
+An opt-in structured Topic V2 path (`prefetch.topic_v2_mode`, default `false`) is available for evaluation — see [TOPIC-V2-ARCHITECTURE.md](TOPIC-V2-ARCHITECTURE.md).
+
 ## Reliability rules that are now part of the product contract
 
 1. **Raw/source memory is authoritative.** Derived indexes may be rebuilt; the source should not be truncated to satisfy an embedding limit.
