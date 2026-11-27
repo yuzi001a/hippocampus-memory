@@ -94,7 +94,7 @@ import v3core.config as v3_config  # noqa: E402
 from v3core.config_model import PrefetchConfig, from_legacy_dict  # noqa: E402
 from v3core.pg_pool import PgPool  # noqa: E402
 from v3core.pg_store import PgEmbedStore  # noqa: E402
-from v3core.prefetch import prefetch_to_context_block  # noqa: E402
+from v3core.prefetch import prefetch, prefetch_to_context_block  # noqa: E402
 from v3core.tools.topic_maintain_tool import handle_v3_topic_maintain  # noqa: E402
 from v3core.topic_v2 import (  # noqa: E402
     consolidate_pg_incremental,
@@ -454,6 +454,27 @@ def test_pg_a_to_b_evolution_and_default_prefetch_freshness_guard(
     # Real PG recall via default config (no explicit topic_v2_mode flag!)
     cfg = _default_pg_dict_config(tmp_path)
     cur_query = "现在定时任务是用什么方案？"
+    hits_cur = prefetch(
+        cur_query,
+        limit=6,
+        config=cfg,
+        pg=pg_store,
+        q_emb=_EMBED_FN(cur_query),
+        max_chars=4000,
+    )
+    ranked_ids = [h["source_id"] for h in hits_cur]
+    fresh_topic_sid = f"topic_{dossier['topic_id']}"
+    legacy_topic_sid = f"topic_{_LEGACY_TOPIC_ID}"
+    superseded_qa_sid = f"qa_{qa1}"
+    current_qa_sid = f"qa_{qa2}"
+    assert current_qa_sid in ranked_ids and fresh_topic_sid in ranked_ids
+    for active_sid in (current_qa_sid, fresh_topic_sid):
+        for stale_sid in (superseded_qa_sid, legacy_topic_sid, f"note:{_NOTE_PREFIX}1"):
+            if stale_sid in ranked_ids:
+                assert ranked_ids.index(active_sid) < ranked_ids.index(stale_sid), (
+                    f"{active_sid} must outrank {stale_sid}: {ranked_ids}"
+                )
+
     ctx_cur = prefetch_to_context_block(
         cur_query,
         limit=6,
@@ -464,10 +485,9 @@ def test_pg_a_to_b_evolution_and_default_prefetch_freshness_guard(
     )
     assert "<!-- topic_v2:" not in ctx_cur
     assert "Event-Scheduler-V2" in ctx_cur
-    pos_b = ctx_cur.find("Event-Scheduler-V2")
-    pos_a = ctx_cur.find("Cron-Worker-V1")
-    if pos_a != -1:
-        assert pos_b < pos_a, f"Current choice Event-Scheduler-V2 must rank ahead of stale Cron-Worker-V1:\n{ctx_cur}"
+    assert ctx_cur.index(current_qa_sid) < ctx_cur.index(fresh_topic_sid)
+    if legacy_topic_sid in ctx_cur:
+        assert ctx_cur.index(fresh_topic_sid) < ctx_cur.index(legacy_topic_sid)
 
     # Historical query must preserve superseded raw QA evidence.
     hist_query = "以前为什么放弃 Cron-Worker-V1？"
