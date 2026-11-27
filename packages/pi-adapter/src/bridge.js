@@ -148,21 +148,24 @@ export class OwnedBackend {
   async start() {
     if (this.child) return this.baseUrl;
     this.closePromise = null;     // a restart begins a fresh lifecycle
+    this.exited = false;
     const args = ["-u", "-m", "v3core", "serve", "--host", "127.0.0.1", "--port", "0",
       "--profile", this.spec.profile, "--ready-json"];
+    let child;
     try {
-      this.child = this.spawnImpl(this.spec.pythonExecutable, args, {
+      child = this.spawnImpl(this.spec.pythonExecutable, args, {
         env: { ...this.env, V3CORE_CONFIG: this.spec.coreConfig },
         stdio: ["ignore", "pipe", "pipe"],
       });
+      this.child = child;
     } catch {
       await this.close();
       return null;
     }
-    this.child.on("error", () => { this.exited = true; });
-    this.child.on("exit", () => { this.exited = true; });
-    try { this.child.stdin?.end?.(); } catch { /* the serve surface never reads stdin */ }
-    try { this.child.stderr?.resume?.(); } catch { /* consumed, never echoed */ }
+    child.on("error", () => { this.exited = true; child._exited = true; });
+    child.on("exit", () => { this.exited = true; child._exited = true; });
+    try { child.stdin?.end?.(); } catch { /* the serve surface never reads stdin */ }
+    try { child.stderr?.resume?.(); } catch { /* consumed, never echoed */ }
     const ready = await this.#awaitReady();
     if (!ready) { await this.close(); return null; }
     this.baseUrl = `http://${ready.host || "127.0.0.1"}:${ready.port}`;
@@ -183,6 +186,9 @@ export class OwnedBackend {
         child.stdout.off("end", onEnd);
         child.off("exit", onExit);
         child.off("error", onError);
+        if (value) {
+          try { child.stdout.resume?.(); } catch { /* drained post-ready so pipe buffer cannot stall child */ }
+        }
         resolve(value);
       };
       const onData = (chunk) => {
@@ -228,7 +234,7 @@ export class OwnedBackend {
   }
 
   #awaitExit(child) {
-    if (child.exitCode !== null || child.exited) return Promise.resolve(true);
+    if (child.exitCode !== null || child._exited) return Promise.resolve(true);
     return new Promise((resolve) => {
       let settled = false;
       const finish = (value) => {

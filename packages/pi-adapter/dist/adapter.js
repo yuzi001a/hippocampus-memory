@@ -8,6 +8,8 @@ import { BridgeClient, OwnedBackend, HOST_ID } from "./bridge.js";
 
 export const MEMORY_CUSTOM_TYPE = "hippocampus-memory";
 const TEXT_ONLY_NOTE = "[hippocampus memory — recalled context, not a new user fact]";
+const MAX_SEEN = 10000;
+const MAX_SESSIONS = 256;
 
 // Only these two roles are recordable; custom/system/toolResult entries and
 // compaction/branch summaries are structurally not messages we own.
@@ -64,9 +66,11 @@ export class MemoryAdapter {
     this.warn = warn;
     this.sessionEnabled = Boolean(config);
     this.client = null;
+    this._clientPromise = null;
     this.owned = null;
     this.handshake = null;
     this.seen = new Set();          // `${sessionId}::${entryId}` — native identity only
+    this.cursors = new Map();       // sessionId -> { index, lastId } incremental anchor
     this.recallArmed = false;        // per-input latch; local control, not an event
     this.chain = Promise.resolve();  // serial drain
     this.closed = false;
@@ -78,29 +82,58 @@ export class MemoryAdapter {
   }
 
   // Lazy on purpose: no process, socket or timer at import or factory time.
+  // Deduplicated via `_clientPromise` so concurrent callers (e.g. readSource +
+  // drain in owned mode) can never spawn two child processes.
   async #ensureClient() {
     if (this.client) return this.client;
+    if (this._clientPromise) return await this._clientPromise;
     if (!this.config || !this.sessionEnabled || this.closed) return null;
-    // External mode always talks to the configured URL. Owned mode binds an
-    // ephemeral port the child reports at readiness, so THAT url is the only
-    // correct base: user config is never rewritten to hide the difference.
-    let baseUrl = this.config.bridgeUrl;
-    if (this.config.mode === "owned") {
-      this.owned = new OwnedBackend({ ...this.config, spawnImpl: this.spawnImpl,
-        readyTimeoutMs: this.readyTimeoutMs });
-      baseUrl = await this.owned.start();
-      if (!baseUrl) { this.owned = null; this.warn("hippocampus: backend did not become ready"); return null; }
+    this._clientPromise = (async () => {
+      // External mode always talks to the configured URL. Owned mode binds an
+      // ephemeral port the child reports at readiness, so THAT url is the only
+      // correct base: user config is never rewritten to hide the difference.
+      let baseUrl = this.config.bridgeUrl;
+      if (this.config.mode === "owned") {
+        this.owned = new OwnedBackend({ ...this.config, spawnImpl: this.spawnImpl,
+          readyTimeoutMs: this.readyTimeoutMs });
+        baseUrl = await this.owned.start();
+        if (!baseUrl) { this.owned = null; this.warn("hippocampus: backend did not become ready"); return null; }
+      }
+      const client = new BridgeClient({ baseUrl, timeoutMs: this.config.timeoutMs,
+        fetchImpl: this.fetchImpl });
+      this.handshake = await client.handshake();
+      if (!this.handshake.ok) {
+        this.warn("hippocampus: memory backend unavailable (handshake failed)");
+        if (this.owned) { await this.owned.close(); this.owned = null; }
+        return null;
+      }
+      this.client = client;
+      return this.client;
+    })();
+    try {
+      return await this._clientPromise;
+    } finally {
+      this._clientPromise = null;
     }
-    this.client = new BridgeClient({ baseUrl, timeoutMs: this.config.timeoutMs,
-      fetchImpl: this.fetchImpl });
-    this.handshake = await this.client.handshake();
-    if (!this.handshake.ok) {
-      this.warn("hippocampus: memory backend unavailable (handshake failed)");
-      this.client = null;
-      if (this.owned) { await this.owned.close(); this.owned = null; }
-      return null;
+  }
+
+  #rememberSeen(key) {
+    if (this.seen.has(key)) return;
+    if (this.seen.size >= MAX_SEEN) {
+      const oldest = this.seen.values().next().value;
+      if (oldest !== undefined) this.seen.delete(oldest);
     }
-    return this.client;
+    this.seen.add(key);
+  }
+
+  #rememberCursor(sessionId, index, lastId) {
+    if (this.cursors.has(sessionId)) {
+      this.cursors.delete(sessionId);
+    } else if (this.cursors.size >= MAX_SESSIONS) {
+      const oldestSession = this.cursors.keys().next().value;
+      if (oldestSession !== undefined) this.cursors.delete(oldestSession);
+    }
+    this.cursors.set(sessionId, { index, lastId });
   }
 
   // Serialized: one drain at a time, so ordering is never raced.
@@ -140,12 +173,25 @@ export class MemoryAdapter {
       const client = await this.#ensureClient();
       if (!client) return;
       const { sessionId, events } = snapshot;
-      for (const event of events) {
+      const cursor = this.cursors.get(sessionId);
+      let startIndex = 0;
+      if (
+        cursor &&
+        cursor.index > 0 &&
+        cursor.index <= events.length &&
+        events[cursor.index - 1].event_id === cursor.lastId
+      ) {
+        startIndex = cursor.index;
+      }
+      for (let i = startIndex; i < events.length; i += 1) {
+        const event = events[i];
         const key = `${sessionId}::${event.event_id}`;
-        if (this.seen.has(key)) continue;
-        const ack = await client.sendEvent(event);
-        if (!ack.ok) { this.warn("hippocampus: event not acknowledged; will retry"); return; }
-        this.seen.add(key);
+        if (!this.seen.has(key)) {
+          const ack = await client.sendEvent(event);
+          if (!ack.ok) { this.warn("hippocampus: event not acknowledged; will retry"); return; }
+          this.#rememberSeen(key);
+        }
+        this.#rememberCursor(sessionId, i + 1, event.event_id);
       }
     });
   }

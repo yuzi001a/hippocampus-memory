@@ -533,3 +533,94 @@ def test_source_enqueue_no_duplicate_identity(ctx):
     assert pending_jobs is None or len(pending_jobs) == 1, (
         f"expected one in-process pending job slot; "
         f"pending_jobs={pending_jobs!r} (returns: first={r1!r} second={r2!r})")
+
+
+def test_cross_host_pending_qa_isolated_on_shared_session(ctx):
+    """Interleaved dsh/pi events on one session_id keep isolated pending QA slots."""
+    shared = "sess-cross-host-pending"
+    r1 = ctx.core.sync_turn(
+        shared, [msg("u1", "user", "dsh-Q", TS[0], turn="T1", host="dsh")], host="dsh"
+    )
+    r2 = ctx.core.sync_turn(
+        shared, [msg("u1", "user", "pi-Q", TS[1], turn="T1", host="pi")], host="pi"
+    )
+    assert r1["accepted"] == ["u1"]
+    assert r2["accepted"] == ["u1"]
+    assert r2.get("incomplete") == [], f"pi user must not flush open dsh pending QA: {r2}"
+
+    r3 = ctx.core.sync_turn(
+        shared, [msg("a1", "assistant", "dsh-A", TS[2], turn="T1", host="dsh")], host="dsh"
+    )
+    r4 = ctx.core.sync_turn(
+        shared, [msg("a1", "assistant", "pi-A", TS[3], turn="T1", host="pi")], host="pi"
+    )
+    assert r3.get("derivation", {}).get("a1") == "applied"
+    assert r4.get("derivation", {}).get("a1") == "applied"
+
+    ctx.core._flush_all_pending_qa()
+    drain(ctx)
+
+    dsh_row = qa_by_question(ctx.db, "dsh-Q")
+    pi_row = qa_by_question(ctx.db, "pi-Q")
+    assert dsh_row is not None and dsh_row["answer"] == "dsh-A"
+    assert pi_row is not None and pi_row["answer"] == "pi-A"
+
+
+def test_cross_host_late_derivation_memo_isolated_on_shared_session_and_identical_payload(ctx):
+    """Late derivation memo key must be host-scoped when session/event/content collide."""
+    shared = "sess-cross-host-late"
+    seed_source(ctx, shared, "u1", "shared-Q-dsh", TS[0], turn="T1", host="dsh")
+    seed_source(ctx, shared, "u1", "shared-Q-pi", TS[0], turn="T1", host="pi")
+
+    ctx.core.sync_turn(
+        shared,
+        [
+            msg("u1", "user", "shared-Q-dsh", TS[0], turn="T1", host="dsh"),
+            msg("a1", "assistant", "dsh-A1", TS[1], turn="T1", host="dsh"),
+        ],
+        host="dsh",
+    )
+    ctx.core.sync_turn(
+        shared,
+        [
+            msg("u1", "user", "shared-Q-pi", TS[0], turn="T1", host="pi"),
+            msg("a1", "assistant", "pi-A1", TS[1], turn="T1", host="pi"),
+        ],
+        host="pi",
+    )
+    ctx.core._flush_all_pending_qa()
+    drain(ctx)
+
+    rd = ctx.core.sync_turn(
+        shared,
+        [msg("a-late", "assistant", "LATE-SAME-BODY", TS[2], turn="T1", host="dsh")],
+        host="dsh",
+    )
+    assert rd.get("derivation", {}).get("a-late") == "completed_late"
+
+    rp = ctx.core.sync_turn(
+        shared,
+        [msg("a-late", "assistant", "LATE-SAME-BODY", TS[2], turn="T1", host="pi")],
+        host="pi",
+    )
+    assert rp.get("derivation", {}).get("a-late") == "completed_late"
+
+    rp_replay = ctx.core._resolve_late_assistant_derivation(
+        session_id=shared,
+        host="pi",
+        msg_id="a-late",
+        content="LATE-SAME-BODY",
+        event_turn="T1",
+    )
+    assert rp_replay == "already_merged"
+
+    session_ctx = ctx.core.get_session_context(shared, create=False)
+    assert session_ctx is not None
+    memo_keys = list(session_ctx.late_derivation_memo.keys())
+    assert any(k.startswith("dsh|a-late|") for k in memo_keys), memo_keys
+    assert any(k.startswith("pi|a-late|") for k in memo_keys), memo_keys
+
+    dsh_row = qa_by_question(ctx.db, "shared-Q-dsh")
+    pi_row = qa_by_question(ctx.db, "shared-Q-pi")
+    assert dsh_row is not None and dsh_row["answer"].count("LATE-SAME-BODY") == 1
+    assert pi_row is not None and pi_row["answer"].count("LATE-SAME-BODY") == 1

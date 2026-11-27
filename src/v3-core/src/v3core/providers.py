@@ -119,6 +119,15 @@ def _legacy_profile(base_url: str) -> ProviderProfile:
             # reasoning_effort 也在: M3.1 族不下发 thinking, 改发 effort 压思考
             supports=frozenset({"temperature", "thinking", "reasoning_split", "reasoning_effort"}),
         )
+    if "siliconflow.cn" in host or "siliconflow.com" in host:
+        # SiliconFlow: OpenAI Chat 兼容端点，只认 max_tokens
+        return ProviderProfile(
+            name="siliconflow(legacy-inferred)",
+            api_mode=API_CHAT,
+            base_url=base_url,
+            max_tokens_field="max_tokens",
+            supports=frozenset({"temperature", "response_format"}),
+        )
     # 未声明的端点: 保持历史形状 + 一次 WARNING。
     # 选警告而不是抛错, 是因为老配置在升级后就崩会直接打断生产; 而形状不对时
     # 服务端 400 一样看得见。新配置请显式写 providers: 段。
@@ -202,10 +211,30 @@ def _model_binding(model: str, cfg: Any) -> tuple[str, dict[str, Any]]:
     return str(table[best].get("provider") or "").strip(), dict(table[best])
 
 
-def resolve_profile(model: str, cfg: Any, *, api_key: str = "", base_url: str = "") -> ProviderProfile:
-    """按模型绑定解析通道画像；未绑定则回落到历史推断。"""
+def resolve_profile(
+    model: str,
+    cfg: Any,
+    *,
+    api_key: str = "",
+    base_url: str = "",
+    provider: str = "",
+) -> ProviderProfile:
+    """按模型绑定解析通道画像；未绑定则按显式/llm.provider 或回落历史推断。"""
     providers = _cfg_section(cfg, "providers")
     provider_name, _spec = _model_binding(model, cfg)
+    if not provider_name:
+        hint = str(provider or "").strip()
+        if not hint and cfg is not None:
+            llm_obj = cfg.get("llm") if isinstance(cfg, Mapping) else getattr(cfg, "llm", None)
+            if isinstance(llm_obj, Mapping):
+                hint = str(llm_obj.get("provider") or "").strip()
+            elif llm_obj is not None:
+                hint = str(getattr(llm_obj, "provider", "") or "").strip()
+        if hint:
+            from . import providers_opencode as _oc
+
+            if hint in providers or _oc.family_of(hint) is not None:
+                provider_name = hint
     if provider_name:
         raw = _as_mapping(providers.get(provider_name))
         if not raw:
@@ -228,7 +257,16 @@ def resolve_profile(model: str, cfg: Any, *, api_key: str = "", base_url: str = 
         profile = build_profile(provider_name, raw, api_key=api_key)
         # 端点允许调用点覆盖（同一通道挂不同入口时用），其余形状仍以画像为准
         if base_url:
-            profile = ProviderProfile(**{**profile.__dict__, "base_url": base_url})
+            normalized_override = base_url
+            try:
+                from . import providers_opencode
+
+                normalized_override = providers_opencode.normalize_base_url(
+                    provider_name, profile.api_mode, base_url
+                )
+            except Exception:
+                pass
+            profile = ProviderProfile(**{**profile.__dict__, "base_url": normalized_override})
         return profile
     if base_url:
         return _legacy_profile(base_url)
@@ -327,6 +365,7 @@ def build_payload(
     prompt: str,
     *,
     system: str | None = None,
+    messages: list[dict[str, Any]] | None = None,
     max_tokens: int,
     temperature: float | None = 0.3,
     schema: Mapping[str, Any] | None = None,
@@ -335,86 +374,31 @@ def build_payload(
     thinking: Mapping[str, Any] | None = None,
     reasoning_split: bool = False,
 ) -> dict[str, Any]:
-    """按画像拼请求体；画像说不支持的字段一律不发。"""
-    try:
-        from . import providers_opencode
+    """按画像拼请求体；统一委托给 ``v3core.llm_gateway.transports``。"""
+    from .llm_gateway.transports import get_transport
 
-        model = providers_opencode.normalize_model_id(profile.name, model, profile.base_url)
-    except Exception:
-        pass
-    payload: dict[str, Any] = {"model": model}
-    if profile.api_mode == API_RESPONSES:
-        payload["input"] = prompt
-        if system:
-            payload["instructions"] = system
-        payload[profile.max_tokens_field] = max_tokens
-        if schema is not None:
-            payload["text"] = {
-                "format": {"type": "json_schema", "name": schema_name, "strict": True, "schema": dict(schema)}
-            }
-        if reasoning_effort and profile.supports_cap("reasoning_effort"):
-            payload["reasoning"] = {"effort": reasoning_effort}
-        return payload
-
-    payload["messages"] = _messages_from_prompt(prompt, system)
-    payload[profile.max_tokens_field] = max_tokens
-    if temperature is not None and profile.supports_cap("temperature"):
-        payload["temperature"] = temperature
-    if schema is not None and profile.supports_cap("response_format"):
-        payload["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {"name": schema_name, "strict": True, "schema": dict(schema)},
-        }
-    if thinking is not None and profile.supports_cap("thinking"):
-        payload["thinking"] = dict(thinking)
-    if reasoning_effort and profile.supports_cap("reasoning_effort"):
-        payload["reasoning_effort"] = reasoning_effort
-    if reasoning_split and profile.supports_cap("reasoning_split"):
-        payload["reasoning_split"] = True
-    return payload
+    return get_transport(profile.api_mode).build_payload(
+        profile,
+        model,
+        prompt=prompt,
+        system=system,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        schema=schema,
+        schema_name=schema_name,
+        reasoning_effort=reasoning_effort,
+        thinking=thinking,
+        reasoning_split=reasoning_split,
+    )
 
 
 # ── 响应解析 ────────────────────────────────────────────────────────────────
 def parse_response(profile: ProviderProfile, data: Mapping[str, Any]) -> dict[str, Any]:
     """把三家响应折成 ``{text, reasoning, usage, finish_reason}``。"""
-    text = ""
-    reasoning = ""
-    usage: dict[str, Any] = {}
-    finish = ""
-    mode = profile.api_mode
-    if mode == API_RESPONSES:
-        for item in data.get("output") or []:
-            itype = (item or {}).get("type")
-            if itype == "reasoning":
-                for part in (item or {}).get("summary") or []:
-                    reasoning += str((part or {}).get("text") or "")
-                continue
-            for part in (item or {}).get("content") or []:
-                ptype = (part or {}).get("type")
-                if ptype in ("output_text", "text"):
-                    text += str((part or {}).get("text") or "")
-        usage = dict(data.get("usage") or {})
-        finish = str(data.get("status") or "")
-        if data.get("incomplete_details"):
-            finish = "incomplete"
-    elif mode == API_ANTHROPIC:
-        for block in data.get("content") or []:
-            btype = (block or {}).get("type")
-            if btype == "text":
-                text += str((block or {}).get("text") or "")
-            elif btype == "thinking":
-                reasoning += str((block or {}).get("thinking") or "")
-        usage = dict(data.get("usage") or {})
-        finish = str(data.get("stop_reason") or "")
-    else:
-        choices = data.get("choices") or []
-        first = (choices[0] if choices else {}) or {}
-        msg = first.get("message") or {}
-        text = str(msg.get("content") or "")
-        reasoning = str(msg.get("reasoning_content") or msg.get("reasoning") or "")
-        usage = dict(data.get("usage") or {})
-        finish = str(first.get("finish_reason") or "")
-    return {"text": text, "reasoning": reasoning, "usage": usage, "finish_reason": finish}
+    from .llm_gateway.transports import get_transport
+
+    return get_transport(profile.api_mode).parse_response(data)
 
 
 def supports_schema(profile: ProviderProfile) -> bool:

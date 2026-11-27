@@ -238,7 +238,7 @@ def _chain_premise_lookup(pg, premise_ids: list[str], limit: int, *, deadline=No
     if hasattr(pg, "is_connected") and not _pg_is_connected(pg, deadline):
         return []
     try:
-        with _lease_pg_connection(pg) as conn:
+        with _lease_pg_connection(pg, deadline=deadline) as conn:
             if not conn:
                 return []
             with conn.cursor() as cur:

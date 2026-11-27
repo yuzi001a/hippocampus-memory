@@ -144,6 +144,29 @@ test("a replayed entry that the backend answers as duplicate counts as seen", as
   assert.equal(fetchImpl.calls.filter((c) => c.path === "/events").length, 1);
 });
 
+test("long session beyond 10000 messages uses incremental cursor and does not replay history", async () => {
+  const { adapter, fetchImpl } = makeAdapter({
+    "/health": { payload: { ok: true, bridge_protocol_version: REQUIRED_PROTOCOL } },
+    "/events": OK,
+  });
+  const entries = [];
+  for (let i = 0; i < 10001; i += 1) {
+    entries.push(userEntry(`u-${i}`, i === 0 ? null : `u-${i - 1}`, `msg-${i}`));
+  }
+  await adapter.drain(ctxFor(entries));
+  assert.equal(fetchImpl.calls.filter((c) => c.path === "/events").length, 10001);
+  assert.equal(adapter.seen.size, 10000);
+
+  await adapter.drain(ctxFor(entries));
+  assert.equal(fetchImpl.calls.filter((c) => c.path === "/events").length, 10001);
+
+  entries.push(userEntry("u-10001", "u-10000", "msg-10001"));
+  await adapter.drain(ctxFor(entries));
+  const sent = fetchImpl.calls.filter((c) => c.path === "/events");
+  assert.equal(sent.length, 10002);
+  assert.equal(sent[sent.length - 1].body.event_id, "u-10001");
+});
+
 // ── 4. failure: retry + order ───────────────────────────────────────────
 test("a failed event stays retryable and stops the drain so the answer cannot pass it", async () => {
   let userAttempts = 0;
@@ -747,4 +770,53 @@ test("BLOCKER5b a child that ignores the signal times out instead of hanging for
   assert.ok(elapsed < 3000, `close is bounded (took ${elapsed}ms)`);
   assert.equal(result.ok, false, "a still-alive child is reported as NOT released");
   assert.equal(child.exitCode, null);
+});
+
+test("owned backend resumes stdout after ready so post-ready output never stalls the child", async () => {
+  const child = fakeChild({ ready: { event: "ready", host: "127.0.0.1", port: 51791 } });
+  let stdoutResumed = false;
+  child.stdout.resume = () => { stdoutResumed = true; };
+  const owned = new OwnedBackend({ pythonExecutable: "/abs/python", coreConfig: "/abs/cfg.yaml",
+    profile: "test", spawnImpl: () => child });
+  assert.equal(await owned.start(), "http://127.0.0.1:51791");
+  assert.equal(stdoutResumed, true);
+  await owned.close();
+});
+
+test("concurrent readSource and drain in owned mode spawn only one child process", async () => {
+  let spawnCount = 0;
+  let releaseReady;
+  const readyGate = new Promise((resolve) => { releaseReady = resolve; });
+  const spawnImpl = () => {
+    spawnCount += 1;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stdout.resume = () => {};
+    child.stderr = new EventEmitter();
+    child.stderr.resume = () => {};
+    child.killed = false;
+    child.exitCode = null;
+    child.kill = () => { child.killed = true; child.exitCode = 0; child.emit("exit", 0, null); return true; };
+    readyGate.then(() => child.stdout.emit("data", `${JSON.stringify({ event: "ready", host: "127.0.0.1", port: 51792 })}\n`));
+    return child;
+  };
+  const fetchImpl = fakeFetch({
+    "/health": { payload: { ok: true, bridge_protocol_version: REQUIRED_PROTOCOL } },
+    "/events": OK,
+    "/tool": { payload: { ok: true, result: "source text" } },
+  });
+  const adapter = new MemoryAdapter({
+    config: { mode: "owned", pythonExecutable: "/abs/python", coreConfig: "/abs/cfg.yaml",
+      profile: "test", timeoutMs: 5000, memoryBudgetChars: 8000 },
+    spawnImpl,
+    fetchImpl,
+    warn: () => {},
+  });
+  const pDrain = adapter.drain(ctxFor([userEntry("u1", null, "hello")]));
+  const pRead = adapter.readSource("qa_1");
+  releaseReady();
+  const [, readRes] = await Promise.all([pDrain, pRead]);
+  assert.equal(spawnCount, 1);
+  assert.equal(readRes.ok, true);
+  await adapter.shutdown();
 });

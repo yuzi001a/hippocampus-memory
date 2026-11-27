@@ -48,52 +48,29 @@ DB_PATH = lambda: str(_resolve_data_dir() / 'v3_topic_full.db')
 MIN_ENTRIES = 1  # 至少几条条目才融合
 
 
-def _load_llm_cfg():
-    """从 .env 加载 LLM 配置 — 不隐式指向任何厂商，要求显式配置"""
-    env_path = os.path.expanduser('~/AppData/Local/hermes/.env')
-    if not os.path.exists(env_path):
-        return None
-    api_key = ""
-    for line in open(env_path, encoding='utf-8'):
-        stripped = line.strip()
-        if stripped.startswith('LLM_API_KEY='):
-            api_key = stripped.split('=', 1)[1]
-            break
-        if stripped.startswith('MINIMAX_CN_API_KEY='):
-            api_key = stripped.split('=', 1)[1]
-            break
-    if not api_key:
-        return None
-    # endpoint/model 从环境变量读，留空则由调用方决定（调用方会通过 base_url 兜底）
-    return {
-        'endpoint': os.environ.get('LLM_BASE_URL', ''),
-        'model': os.environ.get('LLM_MODEL', ''),
-        'api_key': api_key,
-        'proxy': os.environ.get('V3CORE_LLM_PROXY', ''),
-    }
+def _load_llm_cfg(cfg=None):
+    """加载完整 LLM 配置（保留 providers/models 上下文）"""
+    from .llm_gateway import resolve_simple_llm_cfg
+
+    return resolve_simple_llm_cfg(cfg)
 
 
-def _call_llm(messages: list, llm_cfg: dict) -> str:
-    """调 LLM 生成文本（OpenAI 兼容协议）"""
-    import requests
-    headers = {
-        'Authorization': f'Bearer {llm_cfg["api_key"]}',
-        'Content-Type': 'application/json',
-    }
-    payload = {
-        'model': llm_cfg['model'],
-        'messages': messages,
-        'max_tokens': 800,
-        'temperature': 0.3,
-    }
-    resp = requests.post(
-        f'{llm_cfg["endpoint"]}/chat/completions',
-        headers=headers,
-        json=payload,
+def _call_llm(messages: list, llm_cfg: dict, cfg=None) -> str:
+    """调 LLM 生成文本（统一走 llm_gateway 通道适配）"""
+    from .llm_gateway import invoke_simple
+
+    effective_cfg = cfg if cfg is not None else (llm_cfg.get("config") if isinstance(llm_cfg, dict) else None)
+    res = invoke_simple(
+        llm_cfg,
+        messages,
+        max_tokens=800,
+        temperature=0.3,
         timeout=120,  # 大 topic 需要更长时间
+        cfg=effective_cfg,
     )
-    data = resp.json()
-    return data['choices'][0]['message']['content']
+    if not res.ok:
+        raise RuntimeError(res.error or "topic_fusion llm call failed")
+    return res.text
 
 
 FUSION_PROMPT = """你是一个主题总结专家。给你一个主题的名称、摘要，和一组来自对话的相关条目（每条有时间标签），请你把它们融合成一段连贯、简洁的短文。
@@ -151,7 +128,7 @@ def fuse_topic(store: TopicStore, topic_id: int, title: str, summary: str,
     try:
         result = _call_llm([
             {'role': 'user', 'content': prompt}
-        ], llm_cfg)
+        ], llm_cfg, cfg=cfg)
         # 清洗：去除 LLM 内部推理过程
         result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
         # 也清理 <｜end▁of▁thinking｜>_json 等可能的溢出
@@ -176,9 +153,15 @@ def fuse_all_topics(dry_run: bool = False, max_topics: int = 51, config: dict | 
 
     返回 {topic_id: 是否成功}
     """
-    # 尝试拿 cfg 用于 prompt 覆盖；拿不到也不影响主流程 (fallback 到默认 prompt)
-    cfg = config if config is not None else None
-    llm_cfg = _load_llm_cfg()
+    # 尝试拿 cfg 用于 prompt 覆盖与 provider 画像解析；拿不到也不影响主流程
+    if config is not None:
+        cfg = config
+    else:
+        try:
+            cfg = resolve_config()
+        except Exception:
+            cfg = None
+    llm_cfg = _load_llm_cfg(cfg)
     if not llm_cfg:
         logger.error("LLM_API_KEY (or MINIMAX_CN_API_KEY fallback) not found in .env")
         return {}

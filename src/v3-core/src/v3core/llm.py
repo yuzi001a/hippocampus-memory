@@ -299,7 +299,7 @@ class LLMClient:
                 result = self._chat_minimax(system, messages, temperature, _output_override)
             elif self.provider == "openai":
                 result = self._chat_openai(system, messages, temperature, _output_override)
-            elif self._opencode_family():
+            elif self._profile_routed():
                 result = self._chat_via_profile(system, messages, temperature, _output_override)
             else:
                 raise ValueError(f"不支持的 LLM provider: {self.provider}")
@@ -317,6 +317,18 @@ class LLMClient:
                     pass
             raise
     
+    def _profile_routed(self) -> bool:
+        """是否走通道画像路由（OpenCode 家族，或在 providers: 段显式声明的通道）。"""
+        if self._opencode_family():
+            return True
+        raw_cfg = self._raw_config
+        prov = str(self.provider or "").strip()
+        if not prov or raw_cfg is None:
+            return False
+        from collections.abc import Mapping as _Mapping
+        provs = raw_cfg.get("providers") if isinstance(raw_cfg, _Mapping) else getattr(raw_cfg, "providers", None)
+        return isinstance(provs, _Mapping) and prov in provs
+
     def _opencode_family(self) -> bool:
         """这个 provider 是不是 OpenCode Zen/Go 家族（含自定义同族名字）。"""
         try:
@@ -332,200 +344,121 @@ class LLMClient:
 
     def _chat_via_profile(self, system: str, messages: list[dict], temperature: float,
                           max_output_tokens: int | None = None) -> str:
-        """按通道画像发请求：URL / 头 / 字段名全由 providers 决定，调用点不判断模型名。
-
-        OpenCode 家族三种传输混杂（responses / chat / anthropic），而且缺
-        x-opencode-session 直接 400，所以这里统一走画像，不再各写一份。
-        """
-        from . import providers
+        """按通道画像发请求：统一委托给 ``v3core.llm_gateway.invoke``。"""
+        from .llm_gateway import ModelRequest, explain_http_error, invoke as _gw_invoke
 
         cfg = self._raw_config
         model = str(self.model or "")
-        profile = providers.resolve_profile(model, cfg, api_key=self.api_key, base_url=self.base_url)
         budget = self._max_tokens if max_output_tokens is None else max_output_tokens
-        effort = self._resolved_reasoning_effort() if hasattr(self, "_resolved_reasoning_effort") else None
-
-        if profile.api_mode == "responses":
-            # /responses 用 input + instructions：把多轮历史折成带角色标记的文本，
-            # system 单独走 instructions。
-            lines = [f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages]
-            prompt = "\n\n".join(lines)
-            body = providers.build_payload(
-                profile, model, prompt, system=system, max_tokens=budget,
-                temperature=temperature, reasoning_effort=effort,
-            )
-        else:
-            body = {"model": model}
-            msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
-            body["messages"] = msgs
-            body["temperature"] = temperature
-            body[profile.max_tokens_field] = budget
-            if effort and profile.supports_cap("reasoning_effort"):
-                body["reasoning_effort"] = effort
-
-        session_id = None
-        try:
-            from .agent_identity import resolve_session_id
-
-            session_id = resolve_session_id(cfg)
-        except Exception:
-            pass
-        headers = providers.build_headers(profile, self.api_key, session_id=session_id)
-        proxies = {"http": self._proxy, "https": self._proxy} if getattr(self, "_proxy", "") else None
-        resp = requests.post(profile.url(), json=body, headers=headers,
-                            timeout=self._timeout, proxies=proxies)
-        if resp.status_code != 200:
-            from . import providers_opencode
-
-            raise RuntimeError(
-                f"OpenCode 调用失败 HTTP {resp.status_code}: "
-                f"{providers_opencode.explain_error(resp.status_code, resp.text)}"
-            )
-        parsed = providers.parse_response(profile, resp.json())
-        return str(parsed.get("text") or "")
+        effort = (
+            self._resolved_reasoning_effort()
+            if hasattr(self, "_resolved_reasoning_effort")
+            else self._reasoning_effort_cfg
+        )
+        thinking_intent = (
+            "disabled"
+            if (not getattr(self, "_thinking", True) and self._thinking_mode == "auto")
+            else self._thinking_mode
+        )
+        res = _gw_invoke(
+            ModelRequest(
+                model=model,
+                messages=messages,
+                system=system,
+                max_tokens=budget,
+                temperature=temperature,
+                thinking_intent=thinking_intent,
+                effort_source="explicit",
+                explicit_effort=effort,
+                force_none_when_disabled=True,
+                api_key=self.api_key,
+                base_url=self.base_url,
+                proxy=getattr(self, "_proxy", None) or None,
+                timeout=self._timeout,
+                retry_attempts=_MAX_RETRIES,
+                retry_backoff_schedule=tuple(_RETRY_BACKOFF),
+                allow_reasoning_fallback_text=True,
+                cfg=cfg,
+            ),
+            sleep_fn=time.sleep,
+        )
+        if not res.ok:
+            if res.status_code is not None:
+                body_text = getattr(res.raw_response, "text", "") or ""
+                prefix = "OpenCode 调用失败" if self._opencode_family() else f"LLM({self.provider}) 调用失败"
+                raise RuntimeError(
+                    f"{prefix} HTTP {res.status_code}: {explain_http_error(res.status_code, body_text)}"
+                )
+            raise RuntimeError(res.error or f"LLM({self.provider}) 调用失败")
+        return res.text
 
     def _chat_minimax(self, system: str, messages: list[dict], temperature: float,
                       max_output_tokens: int | None = None) -> str:
-        # OpenAI 兼容端点 — 优先用 self.base_url（来自 config.yaml llm.base_url），
-        # 空则回退到官方默认 https://platform.minimaxi.com/docs/api-reference/text-openai-api
-        url = (
-            f"{self.base_url.rstrip('/')}/chat/completions"
-            if self.base_url
-            else _default_base_url().rstrip("/") + "/chat/completions"
-        )
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        # Per-call override wins; otherwise the historical literal 131072 is
-        # kept verbatim. Deliberately NOT self._max_tokens — that would change
-        # what every existing caller sends (llm.max_tokens is honoured on the
-        # openai path only, see _chat_openai).
+        from . import providers
+        from .llm_gateway import ModelRequest, invoke as _gw_invoke
+
+        base_url = self.base_url.rstrip("/") if self.base_url else _default_base_url().rstrip("/")
         _output_budget = 131072 if max_output_tokens is None else max_output_tokens
-        body = {
-            "model": self.model,
-            "messages": [{"role": "system", "content": system}] + messages,
-            "temperature": temperature,
-            "max_completion_tokens": _output_budget,  # M3 铁律: max_tokens 已弃用被忽略, 必须用 max_completion_tokens
-        }
         _raw_cfg = getattr(self, "_raw_config", None)
-        # llm.py 只认**显式配置**的 effort。E1 / 抽取 / session_summary 走 131k 输出
-        # 预算, 没有质量对照就不该被 models: 表里的默认档静默统一降档; 需要压思考的
-        # 观察者路径有自己的解析 (表 + 默认 low)。
-        _effort = model_params.explicit_reasoning_effort(
-            {"reasoning_effort": getattr(self, "_reasoning_effort_cfg", None)}
-        )
-        thinking_payload = _thinking_payload(self.model, self._thinking_mode, _raw_cfg)
-        if thinking_payload is not None:
-            body["thinking"] = thinking_payload
-        elif _effort:
-            # 省略 thinking 的族 (adaptive) 必须显式压 effort, 否则思考吃满输出预算。
-            body["reasoning_effort"] = _effort
         proxies = {"https": self._proxy} if self._proxy else None
-        prompt_len = len(json.dumps(body, ensure_ascii=False))
-        logger.info("LLM call: provider=minimax model=%s prompt_len=%d temperature=%.2f "
-                    "max_completion_tokens=%d%s",
-                    self.model, prompt_len, temperature, _output_budget,
-                    "" if max_output_tokens is None else " (per-call override)")
-
-        last_err = None
-        adaptive_fallback_attempted = False
-        for attempt in range(_MAX_RETRIES):
-            try:
-                t0 = time.time()
-                resp = requests.post(url, json=body, headers=headers, timeout=600, proxies=proxies)
-                if (resp.status_code == 400
-                        and "requires adaptive thinking" in (resp.text or "").lower()
-                        and "thinking" in body
-                        and not adaptive_fallback_attempted):
-                    adaptive_fallback_attempted = True
-                    retry_body = dict(body)
-                    retry_body.pop("thinking", None)
-                    # 服务端要 adaptive = 表判断被推翻, 这一发按 adaptive 补齐 effort。
-                    # reasoning_effort 是 MiniMax 专属字段: 只对 minimax 家族/官方端点补,
-                    # 免得把第三方网关原样回显的同一句话变成另一个 400。
-                    _retry_effort = str(getattr(self, "_reasoning_effort_cfg", "") or "low")
-                    if "minimax" in (self.provider or "").lower() or "minimaxi" in (url or "").lower():
-                        retry_body.setdefault("reasoning_effort", _retry_effort)
-                    logger.warning(
-                        "MiniMax rejected thinking with requires adaptive thinking; retrying once without it (model=%s)",
-                        self.model,
-                    )
-                    resp = requests.post(url, json=retry_body, headers=headers, timeout=600, proxies=proxies)
-                latency = time.time() - t0
-
-                if adaptive_fallback_attempted and resp.status_code >= 400:
-                    resp.raise_for_status()
-
-                if resp.status_code == 429:
-                    wait = _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 10
-                    retry_after = resp.headers.get("Retry-After")
-                    if retry_after:
-                        try:
-                            wait = int(retry_after)
-                        except ValueError:
-                            pass
-                    logger.warning("LLM 429 (attempt %d/%d): waiting %ds", attempt + 1, _MAX_RETRIES, wait)
-                    time.sleep(wait)
-                    continue
-
-                resp.raise_for_status()
-                data = resp.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if not content.strip():
-                    # deepseek 思考模式把输出放 reasoning_content — 兜底提取
-                    rc = data.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "") or ""
-                    if rc.strip():
-                        content = rc
-                logger.info("LLM success: tokens_in=%s tokens_out=%s latency=%.1fs",
-                            data.get("usage", {}).get("prompt_tokens", "?"),
-                            data.get("usage", {}).get("completion_tokens", "?"),
-                            latency)
-                return content
-
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as _net_err:
-                last_err = _net_err
-                if adaptive_fallback_attempted:
-                    logger.error("MiniMax thinking fallback failed; not retrying to avoid a retry storm")
-                    raise
-                if attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_BACKOFF[attempt]
-                    logger.warning("LLM net error (attempt %d/%d): %s — retry in %ds",
-                                   attempt + 1, _MAX_RETRIES, str(_net_err)[:100], wait)
-                    time.sleep(wait)
-
-            except requests.exceptions.HTTPError as _http_err:
-                last_err = _http_err
-                # BUGFIX (truthiness trap): requests.Response.__bool__ returns
-                # False for any 4xx/5xx, so `if _http_err.response:` masks
-                # a real 401/500 as status=0 and silently breaks the 5xx
-                # retry branch. Use an explicit `is not None` test instead.
-                _resp = _http_err.response
-                if _resp is not None:
-                    status = _resp.status_code
-                    body_text = (_resp.text or "")[:300]
-                else:
-                    status = 0
-                    body_text = ""
-                status_class = classify_status(status if status else None)
-                # An adaptive-thinking fallback is a single bounded request; do
-                # not combine its failure with the normal 5xx retry loop.
-                if adaptive_fallback_attempted:
-                    logger.error("MiniMax thinking fallback failed: status=%d class=%s", status, status_class)
-                    raise
-                # 5xx 重试, 4xx 不重试（429 已在上面处理）
-                if 500 <= status < 600 and attempt < _MAX_RETRIES - 1:
-                    wait = _RETRY_BACKOFF[attempt]
-                    logger.warning("LLM 5xx (attempt %d/%d): status=%d class=%s — retry in %ds",
-                                   attempt + 1, _MAX_RETRIES, status, status_class, wait)
-                    time.sleep(wait)
-                else:
-                    logger.error("LLM HTTP failed: status=%d class=%s body=%s",
-                                 status, status_class, body_text[:2000])
-                    raise
-
-        logger.error("LLM failed after %d attempts: %s", _MAX_RETRIES, str(last_err)[:200])
-        raise RuntimeError(f"LLM failed after {_MAX_RETRIES} attempts: {last_err}") from last_err
+        logger.info(
+            "LLM call: provider=minimax model=%s temperature=%.2f max_completion_tokens=%d%s",
+            self.model, temperature, _output_budget,
+            "" if max_output_tokens is None else " (per-call override)",
+        )
+        profile = providers.resolve_profile(self.model, _raw_cfg, api_key=self.api_key, base_url=base_url)
+        _retry_effort = str(getattr(self, "_reasoning_effort_cfg", "") or "low")
+        res = _gw_invoke(
+            ModelRequest(
+                model=self.model,
+                messages=messages,
+                system=system,
+                max_tokens=_output_budget,
+                temperature=temperature,
+                thinking_intent=self._thinking_mode,
+                effort_source="explicit",
+                explicit_effort=getattr(self, "_reasoning_effort_cfg", None),
+                enabled_budget_tokens=32768,
+                force_none_when_disabled=False,
+                reasoning_split=True,
+                api_key=self.api_key,
+                base_url=base_url,
+                proxies=proxies,
+                timeout=600,
+                retry_attempts=_MAX_RETRIES,
+                retry_backoff_schedule=tuple(_RETRY_BACKOFF),
+                allow_reasoning_fallback_text=True,
+                adaptive_retry_effort_fallback=_retry_effort,
+                adaptive_retry_effort_only_minimax=True,
+                cfg=_raw_cfg,
+                profile=profile,
+                require_model=False,
+            ),
+            post_fn=requests.post,
+            sleep_fn=time.sleep,
+        )
+        if res.ok:
+            logger.info(
+                "LLM success: tokens_in=%s tokens_out=%s latency=%.1fs",
+                res.usage.get("prompt_tokens", "?"),
+                res.usage.get("completion_tokens", "?"),
+                res.latency,
+            )
+            return res.text
+        if res.status_code == 429:
+            # 429 耗尽重试后与历史契约一致：抛 RuntimeError("LLM failed after ...")
+            # （需额外补齐最后一次等待，保持历史行为）。
+            sleeper_wait = _RETRY_BACKOFF[-1] if _RETRY_BACKOFF else 10
+            time.sleep(sleeper_wait)
+            raise RuntimeError(f"LLM failed after {_MAX_RETRIES} attempts: HTTP 429")
+        if res.raw_response is not None and res.status_code is not None and res.status_code >= 400:
+            status_class = classify_status(res.status_code)
+            body_text = (getattr(res.raw_response, "text", "") or "")[:300]
+            logger.error("LLM HTTP failed: status=%d class=%s body=%s", res.status_code, status_class, body_text[:2000])
+            res.raw_response.raise_for_status()
+        if res.exception is not None:
+            raise res.exception
+        raise RuntimeError(f"LLM failed after {_MAX_RETRIES} attempts: {res.error}")
     
     def _chat_openai(self, system: str, messages: list[dict], temperature: float,
                      max_output_tokens: int | None = None) -> str:

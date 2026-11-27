@@ -7,7 +7,7 @@
 **让 AI Agent 拥有跨 Session 的长期记忆。Local-first、可追溯，并且尽量不把“记忆”伪装成“事实”。**
 
 [![Status](https://img.shields.io/badge/status-public%20alpha-orange)](docs/STATUS.md)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20MIT-blue)](LICENSE)
 [![DSH](https://img.shields.io/badge/DeepSeek%20Harness-auto%20memory-success)](packages/dsh-adapter/README.md)
 [![pi](https://img.shields.io/badge/pi-auto%20memory-success)](packages/pi-adapter/README.md)
 
@@ -253,7 +253,10 @@ Hippocampus 仍在快速开发。当前一手验收明显偏 Windows，安装/�
 
 欢迎 Issue 和 Pull Request。开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)。
 
-MIT License — 见 [LICENSE](LICENSE)。
+## 开源协议
+
+- 核心引擎（`src/v3-core`）、Hermes 插件（`src/v3-hermes-plugin`）及本仓库默认协议：**AGPL-3.0-or-later** — 见 [LICENSE](LICENSE)。
+- 薄宿主适配器（`packages/dsh-adapter`、`packages/pi-adapter`）：**MIT** — 见 [packages/dsh-adapter/LICENSE](packages/dsh-adapter/LICENSE) 与 [packages/pi-adapter/LICENSE](packages/pi-adapter/LICENSE)。
 
 <div align="center">
 

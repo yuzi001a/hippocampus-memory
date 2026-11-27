@@ -219,4 +219,4 @@ file, no database, no model provider.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

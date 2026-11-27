@@ -21,6 +21,7 @@ class V3SessionContext:
 
     session_id: str
     pending_qa: dict[str, Any] | None = None
+    pending_qa_by_host: dict[str, dict[str, Any]] = field(default_factory=dict)
     injection_dedupe: dict[str, Any] = field(
         default_factory=lambda: {
             "identity": "",
@@ -74,8 +75,9 @@ class V3SessionContext:
     # pending was flushed, replaced by a newer user turn, or lost to a process
     # restart — sync_turn re-derives it durably.  This dict only short-circuits
     # the repeated DB lookup for a replay of the same (msg_id, content) within
-    # one Core lifetime; it carries NO correctness.  A restart dropping the
-    # memo merely costs one extra durable query.  Keys written ("done"):
+    # one Core lifetime; it carries NO correctness.  Keys are namespaced by
+    # ``(host, msg_id, content_hash)`` so shared session/event ids across hosts
+    # cannot collide.  A restart dropping the memo merely costs one extra durable query.
     # completed_late / recovered_late / already_merged.  Unresolved (held)
     # events are deliberately NOT memoized so a later replay can still heal
     # them once their host turn becomes visible.

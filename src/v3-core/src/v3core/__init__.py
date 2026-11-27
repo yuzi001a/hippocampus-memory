@@ -513,6 +513,57 @@ class V3Core:
         contexts = getattr(self, "_session_contexts", None)
         return contexts if isinstance(contexts, dict) else {}
 
+    @staticmethod
+    def _normalize_pending_host(host: str | None) -> str:
+        h = str(host or "").strip()
+        return "" if (not h or h == "legacy") else h
+
+    def _get_context_pending(self, context: V3SessionContext, host: str | None) -> dict | None:
+        slot = self._normalize_pending_host(host)
+        by_host = getattr(context, "pending_qa_by_host", None)
+        if isinstance(by_host, dict) and slot in by_host:
+            return by_host[slot]
+        if context.pending_qa is not None:
+            if self._normalize_pending_host(context.pending_qa.get("host")) == slot:
+                return context.pending_qa
+        return None
+
+    def _set_context_pending(
+        self,
+        context: V3SessionContext,
+        host: str | None,
+        pending: dict | None,
+    ) -> None:
+        slot = self._normalize_pending_host(host)
+        by_host = getattr(context, "pending_qa_by_host", None)
+        if not isinstance(by_host, dict):
+            by_host = {}
+            context.pending_qa_by_host = by_host
+        if pending is None:
+            removed = by_host.pop(slot, None)
+            if context.pending_qa is removed or (
+                context.pending_qa is not None
+                and self._normalize_pending_host(context.pending_qa.get("host")) == slot
+            ):
+                context.pending_qa = next(iter(by_host.values()), None)
+        else:
+            by_host[slot] = pending
+            context.pending_qa = pending
+
+    def _iter_context_pendings(self, context: V3SessionContext) -> list[tuple[str, dict]]:
+        result: list[tuple[str, dict]] = []
+        seen_ids: set[int] = set()
+        by_host = getattr(context, "pending_qa_by_host", None)
+        if isinstance(by_host, dict):
+            for slot, pend in list(by_host.items()):
+                if pend is not None and id(pend) not in seen_ids:
+                    seen_ids.add(id(pend))
+                    result.append((slot, pend))
+        if context.pending_qa is not None and id(context.pending_qa) not in seen_ids:
+            slot = self._normalize_pending_host(context.pending_qa.get("host"))
+            result.append((slot, context.pending_qa))
+        return result
+
     @property
     def store(self) -> DeepStore:
         if self._store is None:
@@ -1111,7 +1162,10 @@ class V3Core:
             contexts = getattr(self, "_session_contexts", None)
             if isinstance(contexts, dict):
                 with self._qa_lock:
-                    items = [(sid, ctx, ctx.pending_qa) for sid, ctx in list(contexts.items()) if ctx.pending_qa and ctx.pending_qa.get("q")]
+                    for sid, ctx in list(contexts.items()):
+                        for _slot, pend in self._iter_context_pendings(ctx):
+                            if pend and pend.get("q"):
+                                items.append((sid, ctx, pend))
             else:
                 pending_dict = getattr(self, "_pending_qa", {})
                 items = [(sid, None, pending) for sid, pending in list(pending_dict.items()) if pending and pending.get("q")]
@@ -1300,39 +1354,47 @@ class V3Core:
         if not getattr(self, '_core_accepting', True) and not getattr(self, '_core_shutdown_handoff', False):
             return
         context = self.get_session_context(session_id, create=False)
-        if context is None or not context.pending_qa:
+        if context is None:
             return
-        pending = context.pending_qa
-        if not pending.get("q") or not pending.get("a"):
+        with self._qa_lock:
+            candidates = [
+                (slot, pend)
+                for slot, pend in self._iter_context_pendings(context)
+                if pend and pend.get("q") and pend.get("a")
+            ]
+        if not candidates:
             return
-        success = False
-        try:
-            # durable submit, not synchronous remote LLM -- bool-gated, failure not clear pending
-            success = bool(self._submit_flush(session_id, pending))
-            if not success:
-                # truthful handoff failed without exception -- try exact per-job fallback
+        for slot, pending in candidates:
+            success = False
+            try:
+                # durable submit, not synchronous remote LLM -- bool-gated, failure not clear pending
+                success = bool(self._submit_flush(session_id, pending))
+                if not success:
+                    # truthful handoff failed without exception -- try exact per-job fallback
+                    try:
+                        fb = self._persist_qa_pending(session_id, pending)
+                        if fb is not None and Path(fb).exists():
+                            success = True
+                    except Exception:
+                        success = False
+            except Exception as e:
+                logger.warning("_flush_completed_pending_qa submit failed: %s", _safe_err(e))
+                # try exact per-job fallback before deciding to preserve
                 try:
                     fb = self._persist_qa_pending(session_id, pending)
                     if fb is not None and Path(fb).exists():
                         success = True
+                    else:
+                        # keep marker visible via spill fallback — do not clear context
+                        success = False
                 except Exception:
                     success = False
-        except Exception as e:
-            logger.warning("_flush_completed_pending_qa submit failed: %s", _safe_err(e))
-            # try exact per-job fallback before deciding to preserve
-            try:
-                fb = self._persist_qa_pending(session_id, pending)
-                if fb is not None and Path(fb).exists():
-                    success = True
-                else:
-                    # keep marker visible via spill fallback — do not clear context
-                    success = False
-            except Exception:
-                success = False
-        finally:
-            if success and context is not None and context.pending_qa is pending:
-                context.pending_qa = None
-            # if not success, preserve context.pending_qa for next spill/retry (no silent loss)
+            finally:
+                if success and context is not None:
+                    with self._qa_lock:
+                        if self._get_context_pending(context, slot) is pending:
+                            self._set_context_pending(context, slot, None)
+                # if not success, preserve pending for next spill/retry (no silent loss)
 
     def switch_session(self, session_id: str, *,
                        parent_session_id: str = "",
@@ -3763,7 +3825,8 @@ class V3Core:
         with self._qa_lock:
             context.turn += 1
             session_turn = str(context.turn)
-            pending = context.pending_qa
+            pending = self._get_context_pending(context, _call_host)
+            prior_seen = set(context.synced_message_ids)
         # 2026-09-07 compression-aware source-ingest durability:
         # walk the FULL snapshot in order; the per-session identity set
         # ``context.synced_message_ids`` is the AUTHORITATIVE delta cursor.
@@ -3784,7 +3847,6 @@ class V3Core:
         #      branch (tool/injection/empty/oversize/todo-snapshot-synthetic)
         #      so re-sync of the same snapshot is a clean no-op.
         #   4. At end of snapshot: ``synced_message_ids |= processed_this_call``.
-        prior_seen = set(context.synced_message_ids)
         processed_this_call: set[str] = set()
         source_ingest_failed = False
         # P0-C1 (2026-10-04) §4: snapshot-local task structure.
@@ -3895,13 +3957,16 @@ class V3Core:
             # 跳过 tool 消息，只写 user/assistant
             if _kind == HOST_EVENT_NORMAL_TOOL or role in ("tool", "tool_call", "tool_result", "function"):
                 # 收集 tool 上下文到 pending (下个 user 配对时一起入 qa_pairs)
-                if pending is not None:
-                    tc = msg.get("tool_calls") or []
-                    tr = msg.get("tool_result") or msg.get("tool_results") or []
-                    if isinstance(tc, list) and tc:
-                        pending["tool_calls"].extend(tc)
-                    if isinstance(tr, list) and tr:
-                        pending["tool_results"].extend(tr)
+                _t_host = str(msg.get("host") or _call_host or "").strip()
+                with self._qa_lock:
+                    _t_pending = self._get_context_pending(context, _t_host)
+                    if _t_pending is not None:
+                        tc = msg.get("tool_calls") or []
+                        tr = msg.get("tool_result") or msg.get("tool_results") or []
+                        if isinstance(tc, list) and tc:
+                            _t_pending["tool_calls"].extend(tc)
+                        if isinstance(tr, list) and tr:
+                            _t_pending["tool_results"].extend(tr)
                 # tool branches are NON-LIVE-SYNC-BY-DESIGN for the live
                 # buffer (tool context only feeds pending); still mark
                 # processed so re-sync is idempotent.
@@ -3933,20 +3998,23 @@ class V3Core:
                 # Cut the boundary: close the previous human QA (flush it when it
                 # has an answer) and clear pending, so the autonomous output that
                 # follows can never be folded into it.
-                if pending is not None and pending.get("q"):
-                    if not pending.get("a"):
-                        _receipt["incomplete"].append(pending.get("q_msg_id") or "")
+                _b_host = str(msg.get("host") or _call_host or "").strip()
+                with self._qa_lock:
+                    _b_pending = self._get_context_pending(context, _b_host)
+                if _b_pending is not None and _b_pending.get("q"):
+                    if not _b_pending.get("a"):
+                        _receipt["incomplete"].append(_b_pending.get("q_msg_id") or "")
                     else:
                         try:
-                            self._submit_flush(session_id, pending)
+                            self._submit_flush(session_id, _b_pending)
                         except Exception as _e_boundary:
                             logger.warning(
                                 "sync_turn autonomous-boundary flush 失败 (不阻塞): %s",
                                 _safe_err(_e_boundary),
                             )
+                with self._qa_lock:
+                    self._set_context_pending(context, _b_host, None)
                     pending = None
-                    with self._qa_lock:
-                        context.pending_qa = None
                 # ── P0-C2: the boundary row is durable source truth ──
                 # The delivery trigger must be traceable to a conversation_stream
                 # row, so the boundary is enqueued with a distinct host_event
@@ -4021,7 +4089,10 @@ class V3Core:
                     processed_this_call.add(cursor_key)
                     continue
                 _receipt["accepted"].append(msg_id)
-                # 新 user 来了 → 上一回合结束, flush pending (若有)
+                # 新 user 来了 → 上一回合结束, flush 该 host 的 pending (若有)
+                _p_host = _msg_host or _call_host
+                with self._qa_lock:
+                    pending = self._get_context_pending(context, _p_host)
                 if pending is not None and pending.get("q"):
                     if not pending.get("a"):
                         # 答案从未到达 → 记 incomplete(允许), 绝不配到别的 turn
@@ -4071,7 +4142,7 @@ class V3Core:
                 except Exception:
                     pass
                 with self._qa_lock:
-                    context.pending_qa = pending
+                    self._set_context_pending(context, _p_host, pending)
                 processed_this_call.add(cursor_key)
                 continue
             elif role == "assistant":
@@ -4102,30 +4173,40 @@ class V3Core:
                         processed_this_call.add(cursor_key)
                         continue
                     _receipt["accepted"].append(msg_id)
-                    _pairing = _qa_pairing_decision(
-                        role="assistant",
-                        event_turn_id=msg.get("turn_id"),
-                        pending_turn_id=(pending or {}).get("q_event_turn") if isinstance(pending, dict) else None,
-                        pending_has_answer=bool((pending or {}).get("a")) if isinstance(pending, dict) else False,
-                    )
-                    if _pairing == "hold_orphan":
+                    _p_host = _msg_host or _call_host
+                    _hold_orphan = False
+                    _no_pending = False
+                    with self._qa_lock:
+                        pending = self._get_context_pending(context, _p_host)
+                        _pairing = _qa_pairing_decision(
+                            role="assistant",
+                            event_turn_id=msg.get("turn_id"),
+                            pending_turn_id=(pending or {}).get("q_event_turn") if isinstance(pending, dict) else None,
+                            pending_has_answer=bool((pending or {}).get("a")) if isinstance(pending, dict) else False,
+                        )
+                        if _pairing == "hold_orphan":
+                            _hold_orphan = True
+                        elif pending is None:
+                            _no_pending = True
+                        else:
+                            # 累加 a (可能有多个 assistant 段落, 用换行合并)
+                            if pending["a"]:
+                                pending["a"] += "\n" + content
+                            else:
+                                pending["a"] = content
+                            # 收集 assistant 自己的 tool_calls
+                            tc = msg.get("tool_calls") or []
+                            if isinstance(tc, list) and tc:
+                                pending["tool_calls"].extend(tc)
+                    if _hold_orphan:
                         # 乱序/跨 turn: 源层已收下, 但不猜配对 (宁可不派生)
                         _receipt["held"].append(msg_id)
                         processed_this_call.add(cursor_key)
                         continue
-                    if pending is None:
+                    if _no_pending:
                         # 没有 pending q → 跳过 (避免孤儿 answer)
                         processed_this_call.add(cursor_key)
                         continue
-                    # 累加 a (可能有多个 assistant 段落, 用换行合并)
-                    if pending["a"]:
-                        pending["a"] += "\n" + content
-                    else:
-                        pending["a"] = content
-                    # 收集 assistant 自己的 tool_calls
-                    tc = msg.get("tool_calls") or []
-                    if isinstance(tc, list) and tc:
-                        pending["tool_calls"].extend(tc)
                     processed_this_call.add(cursor_key)
                     continue
                 # ── P0-A new path (real host) ──
@@ -4136,33 +4217,39 @@ class V3Core:
                     _receipt["duplicate"].append(msg_id)
                 else:
                     _receipt["accepted"].append(msg_id)
-                _pairing = _qa_pairing_decision(
-                    role="assistant",
-                    event_turn_id=msg.get("turn_id"),
-                    pending_turn_id=(pending or {}).get("q_event_turn") if isinstance(pending, dict) else None,
-                    pending_has_answer=bool((pending or {}).get("a")) if isinstance(pending, dict) else False,
-                )
-                if _pairing == "append" and pending is not None:
-                    _members = pending.get("a_event_ids")
-                    if not isinstance(_members, list):
-                        _members = []
-                        pending["a_event_ids"] = _members
-                    if _is_dup and msg_id in _members:
-                        # This very event is already merged into this pending:
-                        # nothing to append, no double content.
-                        _receipt.setdefault("derivation", {})[msg_id] = "already_merged"
-                        processed_this_call.add(cursor_key)
-                        continue
-                    if pending.get("a"):
-                        pending["a"] += "\n" + content
-                    else:
-                        pending["a"] = content
-                    tc = msg.get("tool_calls") or []
-                    if isinstance(tc, list) and tc:
-                        pending["tool_calls"].extend(tc)
-                    if msg_id not in _members:
-                        _members.append(msg_id)
-                    _receipt.setdefault("derivation", {})[msg_id] = "applied"
+                _p_host = _msg_host or _call_host
+                _handled_append = False
+                _append_status = "applied"
+                with self._qa_lock:
+                    pending = self._get_context_pending(context, _p_host)
+                    _pairing = _qa_pairing_decision(
+                        role="assistant",
+                        event_turn_id=msg.get("turn_id"),
+                        pending_turn_id=(pending or {}).get("q_event_turn") if isinstance(pending, dict) else None,
+                        pending_has_answer=bool((pending or {}).get("a")) if isinstance(pending, dict) else False,
+                    )
+                    if _pairing == "append" and pending is not None:
+                        _members = pending.get("a_event_ids")
+                        if not isinstance(_members, list):
+                            _members = []
+                            pending["a_event_ids"] = _members
+                        if _is_dup and msg_id in _members:
+                            # This very event is already merged into this pending:
+                            # nothing to append, no double content.
+                            _append_status = "already_merged"
+                        else:
+                            if pending.get("a"):
+                                pending["a"] += "\n" + content
+                            else:
+                                pending["a"] = content
+                            tc = msg.get("tool_calls") or []
+                            if isinstance(tc, list) and tc:
+                                pending["tool_calls"].extend(tc)
+                            if msg_id not in _members:
+                                _members.append(msg_id)
+                        _handled_append = True
+                if _handled_append:
+                    _receipt.setdefault("derivation", {})[msg_id] = _append_status
                     processed_this_call.add(cursor_key)
                     continue
                 # hold_orphan / pending None / duplicate not yet merged:
@@ -4233,7 +4320,8 @@ class V3Core:
         # End-of-snapshot cursor commit (A): ONLY now do we advance the
         # authoritative delta cursor.  Until this point, ``prior_seen``
         # is what the algorithm consults for "already accepted".
-        context.synced_message_ids.update(processed_this_call)
+        with self._qa_lock:
+            context.synced_message_ids.update(processed_this_call)
         # ── P0-C2: persist derived autonomous deliveries (idempotent) ──
         # Only derive when every source enqueue in this snapshot succeeded or
         # was already durable.  Otherwise retry the whole snapshot later; a
@@ -4506,7 +4594,7 @@ class V3Core:
                 ).hexdigest()[:12]
             except Exception:
                 _content_hash = ""
-            memo_key = f"{msg_id}|{_content_hash}"
+            memo_key = f"{host_key}|{msg_id}|{_content_hash}"
 
             context = None
             try:
@@ -5184,15 +5272,16 @@ class V3Core:
         if isinstance(contexts, dict):
             with self._qa_lock:
                 items = [
-                    (sid, context, context.pending_qa)
+                    (sid, context, slot, pend)
                     for sid, context in list(contexts.items())
-                    if context.pending_qa and context.pending_qa.get("q") and context.pending_qa.get("a")
+                    for slot, pend in self._iter_context_pendings(context)
+                    if pend and pend.get("q") and pend.get("a")
                 ]
         else:
             pending_dict = getattr(self, "_pending_qa", {})
-            items = [(sid, None, pending) for sid, pending in list(pending_dict.items()) if pending and pending.get("q") and pending.get("a")]
+            items = [(sid, None, "", pending) for sid, pending in list(pending_dict.items()) if pending and pending.get("q") and pending.get("a")]
         # async submit completed qa via durable outbox, not sync _flush_pending_qa — only clear on verifiable success
-        for sid, context, pending in items:
+        for sid, context, slot, pending in items:
             success = False
             try:
                 success = bool(self._submit_flush(sid, pending))
@@ -5213,8 +5302,10 @@ class V3Core:
                 except Exception:
                     success = False
             if success:
-                if context is not None and context.pending_qa is pending:
-                    context.pending_qa = None
+                if context is not None:
+                    with self._qa_lock:
+                        if self._get_context_pending(context, slot) is pending:
+                            self._set_context_pending(context, slot, None)
                 elif context is None:
                     # legacy: per-job delete, retain failures
                     try:
