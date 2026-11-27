@@ -278,3 +278,215 @@ def test_prefetch_topic_v2_mode_opt_in_strips_header_and_respects_query_intent(t
     )
     assert "OldCache-V1" in ctx_hist
     assert "qa_1" in tr_hist["injected_ids"]
+
+
+def test_prefetch_config_topic_v2_mode_default_and_override():
+    from v3core.config_model import PrefetchConfig, from_legacy_dict
+
+    assert PrefetchConfig().topic_v2_mode is False
+    cfg_default = from_legacy_dict({})
+    assert cfg_default.prefetch.topic_v2_mode is False
+    cfg_enabled = from_legacy_dict({"prefetch": {"topic_v2_mode": True}})
+    assert cfg_enabled.prefetch.topic_v2_mode is True
+
+
+def test_consolidate_pg_incremental_dry_run_upsert_and_idempotent_cursor(tmp_path):
+    import contextlib
+    import pytest
+    from v3core.topic_v2 import consolidate_pg_incremental
+
+    class _FakeCursor:
+        def __init__(self, store):
+            self.store = store
+            self.rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            p = list(params or ())
+            if q.startswith("select topic_id, title"):
+                self.rows = [
+                    (
+                        t["topic_id"],
+                        t["title"],
+                        t["summary"],
+                        t["body"],
+                        t["keywords"],
+                        t["status"],
+                        t["embedding"],
+                    )
+                    for t in self.store.topics.values()
+                ]
+            elif "from qa_pairs" in q and "where id >" in q:
+                watermark = int(p[0])
+                lim = int(p[1])
+                matched = [
+                    (r["id"], r["timestamp"], r["question"], r["answer"])
+                    for r in self.store.qas
+                    if r["id"] > watermark
+                ]
+                self.rows = sorted(matched, key=lambda item: item[0])[:lim]
+            elif q.startswith("insert into topics"):
+                tid, title, summary, body, keywords, status, emb = p
+                self.store.topics[tid] = {
+                    "topic_id": tid,
+                    "title": title,
+                    "summary": summary,
+                    "body": body,
+                    "keywords": list(keywords or []),
+                    "status": status,
+                    "embedding": emb,
+                }
+                self.store.upserts += 1
+                self.rows = []
+
+        def fetchall(self):
+            return list(self.rows)
+
+    class _FakeConn:
+        def __init__(self, store):
+            self.store = store
+            self.commits = 0
+
+        def cursor(self):
+            return _FakeCursor(self.store)
+
+        def commit(self):
+            self.commits += 1
+
+    class _FakePg:
+        def __init__(self, qas):
+            self.qas = qas
+            self.topics = {}
+            self.upserts = 0
+            self.conn = _FakeConn(self)
+
+        @contextlib.contextmanager
+        def lease(self, timeout=10.0):
+            yield self.conn
+
+    pg = _FakePg(
+        [
+            {
+                "id": 5,
+                "timestamp": _utc(10),
+                "question": "关于任务调度器用什么方案？",
+                "answer": "一开始决定用 Cron-Loop-V1。",
+            },
+            {
+                "id": 6,
+                "timestamp": _utc(1),
+                "question": "关于任务调度器现在改用什么方案？",
+                "answer": "正式废弃 Cron-Loop-V1，改为 Event-Scheduler-V2 作为唯一当前方案。",
+            },
+        ]
+    )
+    state_dir = tmp_path / "tv2_state"
+
+    dry = consolidate_pg_incremental(
+        pg,
+        embed_fn=embed_text,
+        state_dir=state_dir,
+        dry_run=True,
+    )
+    assert dry["dry_run"] is True
+    assert dry["processed_qas"] == 2
+    assert dry["new_last_qa_id"] == 6
+    assert dry["upserted_topics"] == 0
+    assert pg.upserts == 0
+    assert not (state_dir / "topic_v2_state.json").exists()
+
+    applied = consolidate_pg_incremental(
+        pg,
+        embed_fn=embed_text,
+        state_dir=state_dir,
+        dry_run=False,
+    )
+    assert applied["dry_run"] is False
+    assert applied["processed_qas"] == 2
+    assert applied["new_last_qa_id"] == 6
+    assert applied["upserted_topics"] >= 1
+    assert pg.upserts >= 1
+    assert (state_dir / "topic_v2_state.json").is_file()
+    assert (state_dir / "topic_v2_dossiers.json").is_file()
+    assert any(
+        "Event-Scheduler-V2" in t["body"] and "<!-- topic_v2:" in t["body"]
+        for t in pg.topics.values()
+    )
+
+    again = consolidate_pg_incremental(
+        pg,
+        embed_fn=embed_text,
+        state_dir=state_dir,
+        dry_run=False,
+    )
+    assert again["processed_qas"] == 0
+    assert again["upserted_topics"] == 0
+    assert again["new_last_qa_id"] == 6
+
+
+def test_live_bench_config_parsing_and_zero_key_leakage(tmp_path, monkeypatch):
+    import pytest
+    from eval.topic_v2_live_bench import (
+        load_key_env_file,
+        resolve_live_llm_config,
+        run_live_bench,
+    )
+
+    for var in ("MINIMAX_CN_API_KEY", "MINIMAX_API_KEY", "LLM_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+    empty_file = tmp_path / "empty.env"
+    empty_file.write_text("\ufeff# comment\nMINIMAX_CN_API_KEY=\n", encoding="utf-8")
+    assert load_key_env_file(empty_file)["MINIMAX_CN_API_KEY"] == ""
+    with pytest.raises(RuntimeError):
+        resolve_live_llm_config(key_file=empty_file)
+
+    fake_secret = "sk-fake-secret-999"
+    key_file = tmp_path / "minimax.env"
+    key_file.write_text(
+        f'\ufeff# comment line\nMINIMAX_CN_API_KEY="{fake_secret}"\nMINIMAX_MODEL=MiniMax-M3.1-Flash\n',
+        encoding="utf-8",
+    )
+    cfg = resolve_live_llm_config(key_file=key_file)
+    assert cfg["llm"]["api_key"] == fake_secret
+    assert cfg["providers"]["minimax_cn"]["max_tokens_field"] == "max_completion_tokens"
+    assert cfg["models"]["MiniMax-M3.1"]["provider"] == "minimax_cn"
+
+    class _MockStats:
+        def to_dict(self):
+            return {
+                "calls": 6,
+                "succeeded": 4,
+                "failed": 2,
+                "prompt_tokens": 100,
+                "completion_tokens": 40,
+                "total_tokens": 140,
+                "total_latency_s": 0.25,
+                "adaptive_fallbacks": 0,
+                "errors": [f"simulated leak {fake_secret} in HTTP error"],
+            }
+
+    def fake_llm_fn(messages):
+        raise RuntimeError(f"upstream failed with {fake_secret}")
+
+    fake_llm_fn.stats = _MockStats()
+    out_dir = tmp_path / "live_out"
+    summary = run_live_bench(
+        llm_fn=fake_llm_fn,
+        model_label="MiniMax-M3.1-Flash",
+        out_dir=out_dir,
+        scenario_limit=2,
+        secret_to_redact=fake_secret,
+    )
+    assert summary["scenario_count"] == 2
+    report_txt = (out_dir / "live_ablation_report.md").read_text(encoding="utf-8")
+    summary_txt = (out_dir / "live_ablation_summary.json").read_text(encoding="utf-8")
+    assert fake_secret not in report_txt
+    assert fake_secret not in summary_txt
+    assert "[REDACTED]" in summary_txt

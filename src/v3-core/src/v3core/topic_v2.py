@@ -26,7 +26,9 @@ Design goals (see docs/DESIGN-PHILOSOPHY.md):
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import math
 import os
 import re
@@ -34,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+
+logger = logging.getLogger("v3core.topic_v2")
 
 
 _TOPIC_V2_HEADER_RE = re.compile(r"^\s*<!--\s*topic_v2:(\{[^\n]*?\})\s*-->\s*\n?")
@@ -456,26 +460,106 @@ def load_dossiers(path: str | Path) -> list[TopicDossier]:
     return [TopicDossier.from_dict(item) for item in items if isinstance(item, dict)]
 
 
-def make_gateway_llm_fn(cfg: Any = None) -> Callable[[list[dict[str, str]]], str]:
-    """Build a ``llm_fn(messages) -> str`` adapter backed by ``v3core.llm_gateway``."""
-    from .llm_gateway import invoke_simple, resolve_simple_llm_cfg
+@dataclass
+class GatewayLLMStats:
+    """Secret-free invocation and token telemetry for gateway-backed Topic V2."""
 
-    llm_cfg = resolve_simple_llm_cfg(cfg)
+    calls: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    total_latency_s: float = 0.0
+    adaptive_fallbacks: int = 0
+    errors: list[str] = field(default_factory=list)
 
-    def _call(messages: list[dict[str, str]]) -> str:
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calls": int(self.calls),
+            "succeeded": int(self.succeeded),
+            "failed": int(self.failed),
+            "prompt_tokens": int(self.prompt_tokens),
+            "completion_tokens": int(self.completion_tokens),
+            "total_tokens": int(self.total_tokens),
+            "total_latency_s": round(float(self.total_latency_s), 3),
+            "adaptive_fallbacks": int(self.adaptive_fallbacks),
+            "errors": list(self.errors[-10:]),
+        }
+
+
+class GatewayLLMAdapter:
+    """Callable wrapper around ``v3core.llm_gateway.invoke_simple`` with telemetry."""
+
+    def __init__(
+        self,
+        llm_cfg: Mapping[str, Any],
+        *,
+        cfg: Any = None,
+        max_tokens: int = 800,
+        temperature: float = 0.1,
+        timeout: float = 60.0,
+    ) -> None:
+        self.llm_cfg = dict(llm_cfg)
+        self.cfg = cfg if cfg is not None else self.llm_cfg.get("config")
+        self.max_tokens = int(max_tokens)
+        self.temperature = float(temperature)
+        self.timeout = float(timeout)
+        self.stats = GatewayLLMStats()
+
+    def __call__(self, messages: list[dict[str, str]]) -> str:
+        from .llm_gateway import invoke_simple
+
+        self.stats.calls += 1
         res = invoke_simple(
-            llm_cfg,
+            self.llm_cfg,
             messages,
-            max_tokens=600,
-            temperature=0.1,
-            timeout=60,
-            cfg=cfg,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            timeout=self.timeout,
+            cfg=self.cfg,
         )
+        self.stats.total_latency_s += float(getattr(res, "latency", 0.0) or 0.0)
+        if getattr(res, "adaptive_fallback_used", False):
+            self.stats.adaptive_fallbacks += 1
+        usage = getattr(res, "usage", None) or {}
+        if isinstance(usage, Mapping):
+            pt = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+            ct = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+            tt = int(usage.get("total_tokens") or (pt + ct))
+            self.stats.prompt_tokens += pt
+            self.stats.completion_tokens += ct
+            self.stats.total_tokens += tt
         if not res.ok:
-            raise RuntimeError(res.error or "topic_v2 llm call failed")
-        return res.text
+            self.stats.failed += 1
+            err_msg = str(res.error or "topic_v2 llm call failed")[:180]
+            self.stats.errors.append(err_msg)
+            raise RuntimeError(err_msg)
+        self.stats.succeeded += 1
+        return str(res.text or "")
 
-    return _call
+
+def make_gateway_llm_fn(
+    cfg: Any = None,
+    *,
+    llm_cfg: Mapping[str, Any] | None = None,
+    max_tokens: int = 800,
+    temperature: float = 0.1,
+    timeout: float = 60.0,
+) -> GatewayLLMAdapter:
+    """Build a telemetry-equipped ``llm_fn(messages) -> str`` backed by ``llm_gateway``."""
+    from .llm_gateway import resolve_simple_llm_cfg
+
+    resolved = dict(llm_cfg) if llm_cfg is not None else resolve_simple_llm_cfg(cfg)
+    if not resolved:
+        raise RuntimeError("topic_v2: LLM configuration or API key is missing")
+    return GatewayLLMAdapter(
+        resolved,
+        cfg=cfg,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=timeout,
+    )
 
 
 def _format_iso_ts(raw: Any) -> str:
@@ -667,12 +751,16 @@ class TopicConsolidatorV2:
             },
             ensure_ascii=False,
         )
-        raw = self.llm_fn(
-            [
-                {"role": "system", "content": _PHASE1_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ]
-        )
+        try:
+            raw = self.llm_fn(
+                [
+                    {"role": "system", "content": _PHASE1_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
+        except Exception as exc:
+            logger.warning("topic_v2: Phase 1 LLM call failed for qa_id=%s: %s", qa_id, str(exc)[:140])
+            return None
         data = _extract_json_object(raw)
         if not data:
             return None
@@ -1134,4 +1222,196 @@ def apply_topic_v2_ranking_guard(
         "demoted_superseded_qas": demoted_superseded_qas,
         "demoted_derived": demoted_derived,
         "qa_recency_adjusted": qa_recency_adjusted,
+    }
+
+
+@contextlib.contextmanager
+def _pg_conn_ctx(pg: Any):
+    """Yield an active DB connection from either ``pg.lease()`` or ``pg._connect()``."""
+    if pg is None:
+        yield None
+        return
+    lease_fn = getattr(pg, "lease", None)
+    if callable(lease_fn):
+        with pg.lease(timeout=10.0) as conn:
+            yield getattr(conn, "connection", conn)
+        return
+    connect_fn = getattr(pg, "_connect", None)
+    if callable(connect_fn):
+        yield connect_fn()
+        return
+    if hasattr(pg, "cursor"):
+        yield pg
+        return
+    yield None
+
+
+def _parse_pg_emb(raw: Any) -> list[float] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        return [float(x) for x in raw]
+    s = str(raw).strip()
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            return [float(x) for x in json.loads(s)]
+        except Exception:
+            return None
+    return None
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def consolidate_pg_incremental(
+    pg: Any,
+    *,
+    embed_fn: Callable[[str], list[float]],
+    llm_fn: Callable[[list[dict[str, str]]], str] | None = None,
+    state_dir: str | Path,
+    dry_run: bool = False,
+    batch_limit: int = 100,
+) -> dict[str, Any]:
+    """Incrementally consolidate new PG ``qa_pairs`` into ``TopicDossier``s and PG ``topics``.
+
+    Maintains a crash-safe watermark in ``<state_dir>/topic_v2_state.json`` and full lineage
+    dossiers in ``<state_dir>/topic_v2_dossiers.json``. Never mutates or deletes ``qa_pairs``.
+    """
+    if pg is None:
+        raise ValueError("consolidate_pg_incremental requires a non-None PG store")
+
+    root = Path(state_dir)
+    state_path = root / "topic_v2_state.json"
+    dossiers_path = root / "topic_v2_dossiers.json"
+
+    last_qa_id = 0
+    if state_path.is_file():
+        try:
+            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+            last_qa_id = int(raw_state.get("last_qa_id") or 0)
+        except Exception:
+            last_qa_id = 0
+
+    consolidator = TopicConsolidatorV2(embed_fn=embed_fn, llm_fn=llm_fn)
+    dossiers = load_dossiers(dossiers_path)
+
+    new_qas: list[dict[str, Any]] = []
+    with _pg_conn_ctx(pg) as conn:
+        if conn is None:
+            raise RuntimeError("consolidate_pg_incremental: failed to obtain PG connection")
+        with conn.cursor() as cur:
+            if not dossiers:
+                try:
+                    cur.execute(
+                        "SELECT topic_id, title, COALESCE(summary, ''), COALESCE(body, ''), "
+                        "keywords, status, embedding FROM topics WHERE status='active'"
+                    )
+                    legacy_rows = []
+                    for row in cur.fetchall() or []:
+                        legacy_rows.append(
+                            {
+                                "topic_id": row[0],
+                                "title": row[1] or "",
+                                "summary": row[2] or "",
+                                "body": row[3] or "",
+                                "keywords": list(row[4] or []) if isinstance(row[4], (list, tuple)) else [],
+                                "status": row[5] or "active",
+                                "embedding": _parse_pg_emb(row[6]),
+                            }
+                        )
+                    if legacy_rows:
+                        dossiers = consolidator.seed_from_legacy_topics(legacy_rows)
+                except Exception:
+                    dossiers = []
+
+            cur.execute(
+                "SELECT id, timestamp, question, answer FROM qa_pairs "
+                "WHERE id > %s AND answer IS NOT NULL AND session_id NOT LIKE '%%.trajectory%%' "
+                "ORDER BY id ASC LIMIT %s",
+                (last_qa_id, max(int(batch_limit), 1)),
+            )
+            for row in cur.fetchall() or []:
+                new_qas.append(
+                    {
+                        "id": int(row[0]),
+                        "timestamp": row[1],
+                        "question": str(row[2] or ""),
+                        "answer": str(row[3] or ""),
+                    }
+                )
+
+    if not new_qas:
+        return {
+            "dry_run": bool(dry_run),
+            "previous_last_qa_id": last_qa_id,
+            "new_last_qa_id": last_qa_id,
+            "processed_qas": 0,
+            "created_topics": 0,
+            "updated_topics": 0,
+            "superseded_claims": 0,
+            "skipped_qas": 0,
+            "upserted_topics": 0,
+        }
+
+    before_map = {d.topic_id: d.to_dict() for d in dossiers}
+    updated_dossiers, report = consolidator.consolidate_qa_stream(
+        new_qas,
+        existing_dossiers=dossiers,
+    )
+    changed_dossiers = [
+        d for d in updated_dossiers if before_map.get(d.topic_id) != d.to_dict()
+    ]
+    new_max_qa = max(last_qa_id, report.max_qa_id)
+
+    if not dry_run:
+        with _pg_conn_ctx(pg) as conn:
+            if conn is None:
+                raise RuntimeError("consolidate_pg_incremental: PG connection lost before upsert")
+            with conn.cursor() as cur:
+                for dossier in changed_dossiers:
+                    row = dossier.to_topic_row(embed_fn)
+                    emb = row.get("embedding")
+                    emb_str = "[" + ",".join(str(x) for x in emb) + "]" if emb is not None else None
+                    cur.execute(
+                        "INSERT INTO topics (topic_id, title, summary, body, keywords, status, embedding) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s::vector) "
+                        "ON CONFLICT (topic_id) DO UPDATE SET "
+                        "title = EXCLUDED.title, summary = EXCLUDED.summary, body = EXCLUDED.body, "
+                        "keywords = EXCLUDED.keywords, status = EXCLUDED.status, embedding = EXCLUDED.embedding",
+                        (
+                            row["topic_id"],
+                            row["title"],
+                            row["summary"],
+                            row["body"],
+                            row["keywords"],
+                            row["status"],
+                            emb_str,
+                        ),
+                    )
+            if callable(getattr(conn, "commit", None)):
+                conn.commit()
+        save_dossiers(dossiers_path, updated_dossiers)
+        _atomic_write_json(
+            state_path,
+            {
+                "last_qa_id": int(new_max_qa),
+                "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "topic_count": len(updated_dossiers),
+            },
+        )
+
+    return {
+        "dry_run": bool(dry_run),
+        "previous_last_qa_id": last_qa_id,
+        "new_last_qa_id": int(new_max_qa),
+        "processed_qas": report.processed_qas,
+        "created_topics": report.created_topics,
+        "updated_topics": report.updated_topics,
+        "superseded_claims": report.superseded_claims,
+        "skipped_qas": report.skipped_qas,
+        "upserted_topics": 0 if dry_run else len(changed_dossiers),
     }

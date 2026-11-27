@@ -168,6 +168,8 @@ class PrefetchConfig:
     # 合成 B3 sweep, 生产全库 frequency/rank 分布未标定 → 可配置/临时值. 显式 0 关闭;
     # 负数原样保留并触发校验告警, 由 recall_pool._resolve_qa_tail_quota 回落默认 3.
     qa_tail_quota: int = 3
+    # Opt-in Codex-style structured topic consolidation + freshness guard.
+    topic_v2_mode: bool = False
 
 
 @dataclass
@@ -469,6 +471,7 @@ def from_legacy_dict(src: dict | None) -> V3Config:
             if isinstance(prefetch_raw.get("qa_tail_quota"), bool)
             else _coerce_int(prefetch_raw.get("qa_tail_quota"), 3)
         ),
+        topic_v2_mode=_coerce_bool(prefetch_raw.get("topic_v2_mode"), False),
     )
 
     # -- Ingest --
