@@ -312,3 +312,7 @@ npm pack --dry-run
 
 `dist/` is generated and is the file the package manifest points pi at. It is committed, so a
 clone can be loaded without a build step — but rebuild it before trusting any evidence.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

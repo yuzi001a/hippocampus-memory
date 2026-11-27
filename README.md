@@ -7,7 +7,7 @@
 **Long-term memory for AI agents — local-first, source-traceable, and built to survive new sessions.**
 
 [![Status](https://img.shields.io/badge/status-public%20alpha-orange)](docs/STATUS.md)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0%20%2F%20MIT-blue)](LICENSE)
 [![DSH](https://img.shields.io/badge/DeepSeek%20Harness-auto%20memory-success)](packages/dsh-adapter/README.md)
 [![pi](https://img.shields.io/badge/pi-auto%20memory-success)](packages/pi-adapter/README.md)
 
@@ -247,7 +247,10 @@ Claims on this page are intentionally narrower than “everything the repository
 
 Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports should follow [SECURITY.md](SECURITY.md).
 
-MIT licensed — see [LICENSE](LICENSE).
+## License
+
+- Core engine (`src/v3-core`), Hermes plugin (`src/v3-hermes-plugin`), and repository default: **AGPL-3.0-or-later** — see [LICENSE](LICENSE).
+- Thin host adapters (`packages/dsh-adapter`, `packages/pi-adapter`): **MIT** — see [packages/dsh-adapter/LICENSE](packages/dsh-adapter/LICENSE) and [packages/pi-adapter/LICENSE](packages/pi-adapter/LICENSE).
 
 <div align="center">
 
