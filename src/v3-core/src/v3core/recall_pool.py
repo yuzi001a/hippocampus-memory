@@ -4188,6 +4188,20 @@ def recall_pool(
         except Exception:
             _pre_fusion_positions = {}
 
+    # Opt-in G2 topic_v2 freshness / supersession guard (disabled by default).
+    if _resolve_topic_v2_mode(config):
+        try:
+            from .topic_v2 import apply_topic_v2_ranking_guard
+
+            apply_topic_v2_ranking_guard(
+                scored,
+                query=query,
+                trace=trace,
+                probe_fn=_probe,
+            )
+        except Exception as _tv2_exc:
+            logger.debug("topic_v2 ranking guard failed (skipped): %s", _safe_err(_tv2_exc)[:120])
+
     # P0-B4 deterministic-ordering: ``scored`` is built by iterating the ``hits``
     # dict (insertion-ordered, but populated from several hash-ordered lanes),
     # and the sort key was score-only — so exactly-equal fused scores used to
@@ -4375,6 +4389,18 @@ _CHAIN_ANCHOR_TOP_N = 1
 _CHAIN_CARDS_TOP_N = 5
 # Trace count -- how many raw dialogues per card
 _CHAIN_TRACES_PER_CARD = 2
+
+
+def _resolve_topic_v2_mode(config) -> bool:
+    """Resolve opt-in ``prefetch.topic_v2_mode`` flag (defaults to False)."""
+    if config is None:
+        return False
+    if isinstance(config, dict):
+        return bool((config.get("prefetch") or {}).get("topic_v2_mode", False))
+    pf = getattr(config, "prefetch", None)
+    if pf is not None:
+        return bool(getattr(pf, "topic_v2_mode", False))
+    return False
 
 
 def _resolve_half_life(config, default: int = 30) -> int:

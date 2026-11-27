@@ -364,21 +364,49 @@ class AblationScenario:
     expect_empty: bool = False
 
 
+PROFILE_ORDER: tuple[str, ...] = (
+    "G0_qa_only",
+    "G1_obs",
+    "G1_full",
+    "G2_freshness_only",
+    "G2_structured",
+)
+
 PROFILES: dict[str, dict[str, Any]] = {
     "G0_qa_only": {
         "include_topic": False,
         "include_notes": False,
         "include_yin": False,
+        "topic_v2_mode": False,
+        "consolidate_v2": False,
     },
     "G1_obs": {
         "include_topic": False,
         "include_notes": True,
         "include_yin": False,
+        "topic_v2_mode": False,
+        "consolidate_v2": False,
     },
     "G1_full": {
         "include_topic": True,
         "include_notes": True,
         "include_yin": True,
+        "topic_v2_mode": False,
+        "consolidate_v2": False,
+    },
+    "G2_freshness_only": {
+        "include_topic": True,
+        "include_notes": True,
+        "include_yin": True,
+        "topic_v2_mode": True,
+        "consolidate_v2": False,
+    },
+    "G2_structured": {
+        "include_topic": True,
+        "include_notes": True,
+        "include_yin": True,
+        "topic_v2_mode": True,
+        "consolidate_v2": True,
     },
 }
 
@@ -743,8 +771,13 @@ def _extract_trace_summary(engine_trace: Any) -> dict[str, Any]:
     selected_sids = resolve_trace_source_ids(engine_trace, selected_cids)
     injected_sids: list[str] = []
     seen_inj: set[str] = set()
-    for cid, snap in snaps.items():
-        if bool(getattr(snap, "injected", False)):
+    # Preserve real prompt-ranking order from final_selected_ids first (matching
+    # context_block top-to-bottom order), then any remaining injected snapshots.
+    selected_set = set(selected_cids)
+    ordered_cids = list(selected_cids) + [cid for cid in snaps.keys() if cid not in selected_set]
+    for cid in ordered_cids:
+        snap = snaps.get(cid)
+        if snap is not None and bool(getattr(snap, "injected", False)):
             sid = str(getattr(snap, "source_id", "") or cid)
             if sid and sid not in seen_inj:
                 seen_inj.add(sid)
@@ -806,7 +839,10 @@ def _evaluate_case(
     context_block: str,
     trace_summary: Mapping[str, Any],
     latency_ms: float,
+    active_topics: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    from v3core.topic_v2 import strip_topic_v2_header
+
     cand_ids = list(trace_summary.get("candidate_ids") or [])
     selected_ids = list(trace_summary.get("selected_ids") or [])
     injected_ids = list(trace_summary.get("injected_ids") or [])
@@ -837,15 +873,19 @@ def _evaluate_case(
     # for stale-only artifact outranking current source.
     stale_outranks_current = False
     ranking_ids = injected_ids if injected_ids else selected_ids
+    topics_for_map = active_topics if active_topics is not None else scenario.topics
     if scenario.stale_tokens and ranking_ids:
         # Map source_id -> raw stored text in scenario to determine whether that source carries stale-only vs current
         source_text: dict[str, str] = {}
         for q in scenario.qa_pairs:
             source_text[f"qa_{q['id']}"] = f"{q.get('question', '')}\n{q.get('answer', '')}"
-        for t in scenario.topics:
-            source_text[f"topic_{t['topic_id']}"] = f"{t.get('title', '')}\n{t.get('summary', '')}\n{t.get('body', '')}"
+        for t in topics_for_map:
+            clean_body = strip_topic_v2_header(str(t.get("body", "") or ""))
+            source_text[f"topic_{t['topic_id']}"] = f"{t.get('title', '')}\n{t.get('summary', '')}\n{clean_body}"
         for n in scenario.observation_notes:
-            source_text[f"obs_{n['id']}"] = str(n.get("content") or "")
+            note_txt = str(n.get("content") or "")
+            source_text[f"obs_{n['id']}"] = note_txt
+            source_text[f"note:{n['version']}"] = note_txt
         for y in scenario.yin_paragraphs:
             source_text[f"yin:{y['yin_version']}#{y['section']}"] = str(y.get("content") or "")
 
@@ -944,7 +984,7 @@ def _aggregate_profile(profile_name: str, case_results: list[dict[str, Any]]) ->
 def _render_markdown_report(summary: Mapping[str, Any]) -> str:
     profiles = summary["profiles"]
     lines = [
-        "# Topic / Observer Offline Ablation Baseline (`G0` vs `G1`)",
+        "# Topic / Observer Offline Ablation Benchmark (`G0` / `G1` vs `G2`)",
         "",
         f"- Generated UTC: `{summary['timestamp_utc']}`",
         f"- Scenarios: `{summary['scenario_count']}` across 5 categories",
@@ -952,7 +992,7 @@ def _render_markdown_report(summary: Mapping[str, Any]) -> str:
         "| Profile | Overall Pass | A->B Evolution | Cross-Session Synth | Correction Residual | Historical Trace | Stale Outranks Current | Stale In Context | False Recall | Avg Context Chars |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for pname in ("G0_qa_only", "G1_obs", "G1_full"):
+    for pname in PROFILE_ORDER:
         m = profiles[pname]
         lines.append(
             f"| `{pname}` | {m['pass_count']}/{m['scenario_count']} ({m['pass_rate']:.1%}) "
@@ -970,17 +1010,17 @@ def _render_markdown_report(summary: Mapping[str, Any]) -> str:
 
 
 def run_ablation(out_dir: str | Path | None = None) -> dict[str, Any]:
-    """Execute all three profiles across every scenario via real ``prefetch_to_context_block``."""
+    """Execute all five profiles across every scenario via real ``prefetch_to_context_block``."""
     import v3core.config as v3_config
     import v3core.topic_recall as v3_topic_recall
-    from v3core.prefetch import prefetch_to_context_block
+    from v3core.topic_v2 import TopicConsolidatorV2
 
     scenarios = build_scenarios()
     orig_cfg_resolver = v3_config._resolve_data_dir
     orig_tr_resolver = v3_topic_recall._resolve_data_dir
 
     profile_summaries: dict[str, Any] = {}
-    all_cases: dict[str, list[dict[str, Any]]] = {pname: [] for pname in PROFILES}
+    all_cases: dict[str, list[dict[str, Any]]] = {pname: [] for pname in PROFILE_ORDER}
 
     with tempfile.TemporaryDirectory(
         prefix="v3core_ablation_", ignore_cleanup_errors=True
@@ -988,15 +1028,33 @@ def run_ablation(out_dir: str | Path | None = None) -> dict[str, Any]:
         tmp_path = Path(tmp_root)
         try:
             for s_idx, scenario in enumerate(scenarios):
-                pg = _AblationFakePg(
+                pg_legacy = _AblationFakePg(
                     qa_pairs=scenario.qa_pairs,
                     topics=scenario.topics,
                     observation_notes=scenario.observation_notes,
                     yin_paragraphs=scenario.yin_paragraphs,
                 )
+                consolidator = TopicConsolidatorV2(embed_fn=embed_text)
+                seeds = consolidator.seed_from_legacy_topics(scenario.topics)
+                dossiers, _ = consolidator.consolidate_qa_stream(
+                    scenario.qa_pairs,
+                    existing_dossiers=seeds,
+                )
+                consolidated_topics = [d.to_topic_row(embed_text) for d in dossiers]
+                pg_v2 = _AblationFakePg(
+                    qa_pairs=scenario.qa_pairs,
+                    topics=consolidated_topics,
+                    observation_notes=scenario.observation_notes,
+                    yin_paragraphs=scenario.yin_paragraphs,
+                )
                 q_emb = embed_text(scenario.query)
 
-                for p_idx, (pname, flags) in enumerate(PROFILES.items()):
+                for p_idx, pname in enumerate(PROFILE_ORDER):
+                    flags = PROFILES[pname]
+                    use_v2 = bool(flags.get("consolidate_v2", False))
+                    active_pg = pg_v2 if use_v2 else pg_legacy
+                    active_topics = consolidated_topics if use_v2 else scenario.topics
+
                     case_dir = tmp_path / f"{s_idx}_{p_idx}_{pname}"
                     case_dir.mkdir(parents=True, exist_ok=True)
                     v3_config._resolve_data_dir = lambda cfg=None, _d=case_dir: _d
@@ -1011,6 +1069,7 @@ def run_ablation(out_dir: str | Path | None = None) -> dict[str, Any]:
                             "include_topic": bool(flags["include_topic"]),
                             "include_notes": bool(flags["include_notes"]),
                             "include_yin": bool(flags["include_yin"]),
+                            "topic_v2_mode": bool(flags.get("topic_v2_mode", False)),
                         },
                     }
                     t0 = time.perf_counter()
@@ -1018,24 +1077,31 @@ def run_ablation(out_dir: str | Path | None = None) -> dict[str, Any]:
                         scenario.query,
                         limit=5,
                         config=cfg,
-                        pg=pg,
+                        pg=active_pg,
                         q_emb=q_emb,
                         max_chars=4000,
                     )
                     elapsed_ms = (time.perf_counter() - t0) * 1000.0
                     all_cases[pname].append(
-                        _evaluate_case(scenario, pname, context_block, trace_summary, elapsed_ms)
+                        _evaluate_case(
+                            scenario,
+                            pname,
+                            context_block,
+                            trace_summary,
+                            elapsed_ms,
+                            active_topics=active_topics,
+                        )
                     )
         finally:
             v3_config._resolve_data_dir = orig_cfg_resolver
             v3_topic_recall._resolve_data_dir = orig_tr_resolver
             gc.collect()
 
-    for pname in PROFILES:
+    for pname in PROFILE_ORDER:
         profile_summaries[pname] = _aggregate_profile(pname, all_cases[pname])
 
     summary = {
-        "version": "topic-ablation-v1",
+        "version": "topic-ablation-v2",
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "scenario_count": len(scenarios),
         "profiles": profile_summaries,
@@ -1057,7 +1123,7 @@ def run_ablation(out_dir: str | Path | None = None) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run offline G0 vs G1 + A->B stale-memory ablation benchmark."
+        description="Run offline G0/G1 vs G2 + A->B stale-memory ablation benchmark."
     )
     parser.add_argument(
         "--out-dir",
@@ -1066,7 +1132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     summary = run_ablation(out_dir=args.out_dir)
-    for pname in ("G0_qa_only", "G1_obs", "G1_full"):
+    for pname in PROFILE_ORDER:
         m = summary["profiles"][pname]
         print(
             f"[topic-ablation] profile={pname} pass={m['pass_count']}/{m['scenario_count']} "

@@ -141,17 +141,27 @@ def test_locomo_cli_parses_ablation_flags_without_breaking_defaults(tmp_path):
     }
 
 
-def test_topic_ablation_bench_runs_all_three_profiles_with_real_traces(tmp_path):
+def test_topic_ablation_bench_runs_all_profiles_and_g2_beats_g1(tmp_path):
     summary = run_ablation(out_dir=tmp_path)
     assert summary["scenario_count"] == 18
     assert (tmp_path / "ablation_summary.json").is_file()
     assert (tmp_path / "ablation_report.md").is_file()
 
-    for pname in ("G0_qa_only", "G1_obs", "G1_full"):
+    for pname in ("G0_qa_only", "G1_obs", "G1_full", "G2_freshness_only", "G2_structured"):
         assert len(summary["cases"][pname]) == 18
         assert summary["profiles"][pname]["trace_coverage"] == 1.0
 
     for case in summary["cases"]["G0_qa_only"]:
         assert not any(
-            sid.startswith(("topic_", "obs_", "yin:")) for sid in case["injected_ids"]
+            sid.startswith(("topic_", "obs_", "note:", "yin:")) for sid in case["injected_ids"]
         )
+
+    g1_obs = summary["profiles"]["G1_obs"]
+    g2 = summary["profiles"]["G2_structured"]
+    assert g2["pass_rate"] > g1_obs["pass_rate"]
+    assert g2["evolution_pass_rate"] == 1.0
+    assert g2["correction_pass_rate"] == 1.0
+    assert g2["synthesis_pass_rate"] == 1.0
+    assert g2["history_pass_rate"] == 1.0
+    assert g2["false_recall_rate"] == 0.0
+    assert g2["stale_outranks_current_rate"] == 0.0
