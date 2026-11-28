@@ -3736,7 +3736,7 @@ class V3Core:
         """
         if not items:
             return
-        if getattr(self, "_topic_v2_stop_requested", False) or getattr(self, "_core_fenced", False):
+        if getattr(self, "_topic_v2_stop_requested", False):
             return
         cfg_v2 = getattr(self, "_config", None) or getattr(self, "config", None)
         if not self._is_topic_v2_enabled(cfg_v2):

@@ -33,6 +33,7 @@ import math
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,11 +117,29 @@ _GENERIC_PLATFORM_TOKENS = frozenset(
     }
 )
 
+_GENERIC_EN_UMBRELLA = frozenset(
+    {
+        "database", "databases", "system", "systems", "service", "services", "project", "projects",
+        "module", "modules", "config", "configs", "configuration", "setting", "settings",
+        "data", "file", "files", "code", "user", "users", "account", "accounts",
+        "app", "apps", "application", "applications", "tool", "tools", "plugin", "plugins",
+        "task", "tasks", "error", "errors", "issue", "issues", "problem", "problems",
+        "feature", "features", "change", "changes", "update", "updates", "version", "versions",
+        "test", "tests", "dev", "prod", "production", "env", "environment",
+        "manager", "worker", "handler", "layer", "store", "storage", "core", "base",
+        "default", "common", "general", "custom", "local", "remote", "web", "info",
+        "note", "notes", "memory", "memories", "topic", "topics", "rule", "rules",
+        "mode", "plan", "option", "options", "choice", "selected", "preferred", "solution",
+    }
+)
+
 _GENERIC_CJK_UMBRELLA = frozenset(
     {
         "数据", "据库", "项目", "服务", "代码", "插件", "模块", "工具", "平台", "容器",
         "环境", "接口", "模型", "架构", "文件", "目录", "应用", "工程", "开发", "技术",
         "运行", "管理", "设置", "参数", "功能", "消息", "内容", "逻辑", "流程",
+        "用户", "团队", "人员", "账号", "角色", "信息", "状态", "方式", "模式",
+        "策略", "规则", "业务", "需求", "文档", "页面", "客户", "户端", "务端",
     }
 )
 
@@ -196,36 +215,54 @@ def _extract_tokens(text: str) -> set[str]:
     return tokens
 
 
+_CAMEL_IDENT_RE = re.compile(r"[a-z][A-Z]|[A-Z]{2,}[a-z]")
+
+
+def _is_concrete_identifier(raw_tok: str) -> bool:
+    """True only for concrete component/version/code identifiers, never plain nouns."""
+    if any(ch in raw_tok for ch in "-_."):
+        return True
+    if any(ch.isdigit() for ch in raw_tok):
+        return True
+    if _CAMEL_IDENT_RE.search(raw_tok):
+        return True
+    return False
+
+
 def _extract_association_terms(
     text: str, extra_keywords: Sequence[str] = ()
 ) -> tuple[set[str], set[str], set[str]]:
     """Return ``(specific_terms, platform_terms, domain_terms)`` for scoped topic matching.
 
-    Separates broad shared platform/ecosystem identifiers (e.g. ``PostgreSQL``, ``Docker``,
-    ``Python``) from concrete component/version identifiers (e.g. ``PgBouncer``, ``WAL-G``)
-    and CJK sub-topic bigrams so unrelated sub-topics on the same platform stay independent.
+    Only versioned/hyphenated/CamelCase identifiers (e.g. ``PgBouncer``, ``WAL-G``,
+    ``Cron-Worker-V1``) qualify as ``specific_terms``. Plain English domain words (e.g.
+    ``connection``, ``pool``, ``backup``) enter ``domain_terms`` alongside CJK sub-topic
+    bigrams so shared generic words like ``database`` or ``用户`` never trigger false overlap.
     """
     raw = str(text or "")
     specific: set[str] = set()
     platform: set[str] = set()
     domain: set[str] = set()
 
-    def _classify_ascii(tok_low: str) -> None:
-        if len(tok_low) < 2 or tok_low in _ASSOC_STOPWORDS:
+    def _classify_ascii(raw_tok: str) -> None:
+        tok_low = raw_tok.strip().lower()
+        if len(tok_low) < 2 or tok_low in _ASSOC_STOPWORDS or tok_low in _GENERIC_EN_UMBRELLA:
             return
         if tok_low in _GENERIC_PLATFORM_TOKENS:
             platform.add(tok_low)
-        else:
+        elif _is_concrete_identifier(raw_tok):
             specific.add(tok_low)
+        else:
+            domain.add(tok_low)
 
     for tok in _ASCII_CODE_TOKEN_RE.findall(raw):
-        _classify_ascii(tok.lower())
+        _classify_ascii(tok)
 
     for kw in extra_keywords:
-        ks = str(kw or "").strip().lower()
-        if len(ks) < 2 or ks in _ASSOC_STOPWORDS:
+        ks = str(kw or "").strip()
+        if len(ks) < 2 or ks.lower() in _ASSOC_STOPWORDS:
             continue
-        if re.search(r"[a-z0-9]", ks):
+        if re.search(r"[A-Za-z0-9]", ks):
             _classify_ascii(ks)
         else:
             for run in _ZH_WORD_RUN_RE.findall(ks):
@@ -246,15 +283,12 @@ def _has_topic_overlap(
     terms_a: tuple[set[str], set[str], set[str]],
     terms_b: tuple[set[str], set[str], set[str]],
 ) -> bool:
-    """Return True when two texts share a concrete component, platform+subtopic concept, or >=2 domain bigrams."""
-    spec_a, plat_a, dom_a = terms_a
-    spec_b, plat_b, dom_b = terms_b
+    """Return True when two texts share a concrete component identifier or >=2 concrete domain terms."""
+    spec_a, _plat_a, dom_a = terms_a
+    spec_b, _plat_b, dom_b = terms_b
     if spec_a & spec_b:
         return True
-    dom_inter = dom_a & dom_b
-    if (plat_a & plat_b) and len(dom_inter) >= 1:
-        return True
-    if len(dom_inter) >= 2:
+    if len(dom_a & dom_b) >= 2:
         return True
     return False
 
@@ -1448,6 +1482,10 @@ def apply_topic_v2_ranking_guard(
         for qid, _, dt, q_terms in qa_entries
         if qid not in superseded_qa_ids
     ]
+    superseded_specific_terms: set[str] = set()
+    for qid, _, _, q_terms in qa_entries:
+        if qid in superseded_qa_ids:
+            superseded_specific_terms.update(q_terms[0])
 
     # First, adjust non-demoted QA recency tie-breaks on current-state queries (lag-window protection).
     qa_recency_adjusted = 0
@@ -1517,17 +1555,25 @@ def apply_topic_v2_ranking_guard(
                 f"{getattr(hit, 'content', '') or getattr(hit, 'content_preview', '') or ''}"
             )
             derived_terms = _extract_association_terms(derived_text)
-            overlaps_fresh_topic = any(
-                _has_topic_overlap(derived_terms, ft_terms)
-                and (dt is None or ft_dt is None or dt <= ft_dt)
-                for ft_dt, ft_terms in fresh_topic_info
-            )
-            overlaps_newer_qa = any(
-                _has_topic_overlap(derived_terms, q_terms)
-                and (q_dt is None or dt is None or dt < q_dt)
-                for q_dt, q_terms in active_qa_terms
-            )
-            if overlaps_fresh_topic or overlaps_newer_qa:
+            if dt is not None:
+                overlaps_fresh_topic = any(
+                    _has_topic_overlap(derived_terms, ft_terms)
+                    and ft_dt is not None
+                    and dt <= ft_dt
+                    for ft_dt, ft_terms in fresh_topic_info
+                )
+                overlaps_newer_qa = any(
+                    _has_topic_overlap(derived_terms, q_terms)
+                    and q_dt is not None
+                    and dt < q_dt
+                    for q_dt, q_terms in active_qa_terms
+                )
+                cites_superseded = bool(derived_terms[0] & superseded_specific_terms)
+                should_demote = overlaps_fresh_topic or overlaps_newer_qa or cites_superseded
+            else:
+                # Unknown timestamp: fail safe and keep unless citing a superseded concrete identifier.
+                should_demote = bool(derived_terms[0] & superseded_specific_terms)
+            if should_demote:
                 hit.rrf_score = _cap_demoted_score(float(hit.rrf_score), 0.25, min_fresh_score)
                 demoted_derived += 1
                 demoted_sids.add(sid)
@@ -1603,58 +1649,60 @@ def _get_state_dir_lock(state_dir: str | Path) -> threading.Lock:
 
 
 @contextlib.contextmanager
-def _state_dir_file_lock(state_dir: Path):
-    """Best-effort advisory file lock serializing multi-process writers on the same state_dir."""
+def _state_dir_file_lock(state_dir: Path, timeout: float = 15.0):
+    """Fail-closed advisory file lock serializing multi-process writers on the same state_dir."""
     lock_path = state_dir / ".topic_v2.lock"
-    fh = None
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a+b")
     locked = False
     try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_path, "a+b")
-        if fh.tell() == 0 and lock_path.stat().st_size == 0:
+        fh.seek(0, os.SEEK_END)
+        if fh.tell() == 0:
             fh.write(b"0")
             fh.flush()
-        try:
-            import fcntl  # type: ignore
-
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-            locked = True
-        except ImportError:
+        deadline = time.monotonic() + max(0.05, float(timeout))
+        while True:
             try:
-                import msvcrt  # type: ignore
-
-                fh.seek(0)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
-                locked = True
-            except Exception:
-                pass
-        except Exception:
-            pass
-    except Exception:
-        pass
-    try:
-        yield
-    finally:
-        if fh is not None:
-            if locked:
                 try:
                     import fcntl  # type: ignore
 
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
                 except ImportError:
-                    try:
-                        import msvcrt  # type: ignore
+                    import msvcrt  # type: ignore
 
-                        fh.seek(0)
-                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                    except Exception:
-                        pass
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+            except (BlockingIOError, PermissionError, OSError) as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"topic_v2: failed to acquire file lock {lock_path} within {timeout:.1f}s"
+                    ) from exc
+                time.sleep(0.02)
+        yield
+    finally:
+        if locked:
+            try:
+                import fcntl  # type: ignore
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except ImportError:
+                try:
+                    import msvcrt  # type: ignore
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
                 except Exception:
                     pass
-            try:
-                fh.close()
             except Exception:
                 pass
+        try:
+            fh.close()
+        except Exception:
+            pass
 
 
 def consolidate_pg_incremental(

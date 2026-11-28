@@ -240,6 +240,7 @@ def _cleanup_pg_rows(pool: PgPool) -> None:
         cur.execute("DELETE FROM public.topic_entries WHERE topic_id LIKE %s", (_TOPIC_PREFIX + "%",))
         cur.execute("DELETE FROM public.observation_notes WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
         cur.execute("DELETE FROM public.yin WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
+        cur.execute("DELETE FROM public.yin_paragraphs WHERE yin_version LIKE %s", (_NOTE_PREFIX + "%",))
         lease.connection.commit()
 
 
@@ -916,3 +917,99 @@ def test_pg_r2_legacy_migration_reembeds_and_missing_action_retries(
         final_row = cur.fetchone()
     assert final_row is not None and final_row[1] == "r2-fp-v2"
     assert "Dragonfly-Cluster-V2" in strip_topic_v2_header(final_row[0])
+
+
+def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    from v3core.recall_pool import recall_pool as _rp_call
+
+    t_topic = datetime(2026, 11, 20, 8, 0, tzinfo=timezone.utc)
+    t_old = datetime(2026, 11, 15, 8, 0, tzinfo=timezone.utc)
+    t_new = datetime(2026, 11, 27, 10, 0, tzinfo=timezone.utc)
+
+    _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r3_log_1",
+        session_id="sess_r3_log",
+        turn_id=1,
+        question="日志采集方案是什么？",
+        answer="日志采集系统当前选用 Fluentd-Legacy 方案。",
+        ts=t_topic,
+    )
+    consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=tmp_path / "r3_state",
+        dry_run=False,
+        embed_model="r3-fp",
+    )
+
+    emb_log = _vec_literal(_EMBED_FN("日志采集 Fluentd-Legacy 灰度验证"))
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            """
+            INSERT INTO public.observation_notes (version, content, embedding, embed_model, created_at)
+            VALUES (%s, %s, %s::vector, 'bge-m3', %s::timestamptz)
+            """,
+            (
+                f"{_NOTE_PREFIX}r3_new",
+                "最新观察：日志采集 Fluentd-Legacy 已安排近期切换 Vector 节点。",
+                emb_log,
+                t_new.isoformat(),
+            ),
+        )
+        cur.execute(
+            """
+            INSERT INTO public.observation_notes (version, content, embedding, embed_model, created_at)
+            VALUES (%s, %s, %s::vector, 'bge-m3', %s::timestamptz)
+            """,
+            (
+                f"{_NOTE_PREFIX}r3_old",
+                "早期观察：日志采集 Fluentd-Legacy 初版调研中。",
+                emb_log,
+                t_old.isoformat(),
+            ),
+        )
+        cur.execute(
+            """
+            INSERT INTO public.yin_paragraphs (yin_version, section, content, embedding, embed_model, created_at)
+            VALUES (%s, 'logging', %s, %s::vector, 'bge-m3', %s::timestamptz)
+            """,
+            (
+                f"{_NOTE_PREFIX}y_new",
+                "长期经验：日志采集 Fluentd-Legacy 需要结构化字段统一。",
+                emb_log,
+                t_new.isoformat(),
+            ),
+        )
+        lease.connection.commit()
+
+    cfg = _default_pg_dict_config(tmp_path)
+    hits, _rp_meta = _rp_call(
+        "日志采集 Fluentd-Legacy 最新情况？",
+        pg=pg_store,
+        q_emb=_EMBED_FN("日志采集 Fluentd-Legacy"),
+        include_keyword=True,
+        include_topic=True,
+        include_yin=True,
+        include_notes=True,
+        limit=10,
+        config=cfg,
+    )
+    by_sid = {h.source_id: h for h in hits}
+    new_note_sid = f"note:{_NOTE_PREFIX}r3_new"
+    old_note_sid = f"note:{_NOTE_PREFIX}r3_old"
+    new_yin_sid = f"yin:{_NOTE_PREFIX}y_new#logging"
+
+    assert new_note_sid in by_sid and by_sid[new_note_sid].created_at != ""
+    assert new_yin_sid in by_sid and by_sid[new_yin_sid].created_at != ""
+    assert old_note_sid in by_sid and by_sid[old_note_sid].created_at != ""
+
+    ranked_sids = [h.source_id for h in hits]
+    assert ranked_sids.index(new_note_sid) < ranked_sids.index(old_note_sid)
+    assert ranked_sids.index(new_yin_sid) < ranked_sids.index(old_note_sid)
+    assert by_sid[new_yin_sid].rrf_score > by_sid[old_note_sid].rrf_score
+    assert by_sid[new_note_sid].rrf_score > by_sid[old_note_sid].rrf_score

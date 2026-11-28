@@ -2189,6 +2189,12 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             continue
         _ver = _e.get("observation_version")
         _full = _e.get("content") or ""
+        _ts_val = _created.get((_e.get("observation_id"), _ver))
+        _created_str = (
+            _ts_val.isoformat()
+            if hasattr(_ts_val, "isoformat")
+            else (str(_ts_val) if _ts_val else "")
+        )
         _out.append(RecallHit(
             source_id=f"note:{_ver}",
             title=f"记忆印·{_ver}",
@@ -2199,7 +2205,7 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             cosine=_sim,
             rrf_score=0.0,
             kind="note",
-            created_at="",
+            created_at=_created_str,
         ))
     return _out
 
@@ -3767,7 +3773,7 @@ def recall_pool(
                                 cosine=float(yh.get("score") or 0.0),
                                 rrf_score=0.0,
                                 kind="yin",
-                                created_at="",
+                                created_at=str(yh.get("created_at") or ""),
                             )
         except ValueError:
             raise

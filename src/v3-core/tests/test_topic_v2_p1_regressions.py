@@ -975,3 +975,348 @@ def test_p2_4_deterministic_preserves_short_user_directives():
     assert "不要用表格" in combined
     assert "以后用中文回答" in combined
     assert "不要自动发邮件" in combined
+
+
+# ---------------------------------------------------------------------------
+# Round-3 Review Fixes: P1-1, P1-2, P2-1, P2-3 end-to-end regressions
+# ---------------------------------------------------------------------------
+
+def test_r3_p1_1_plain_english_and_cjk_subtopics_do_not_cross_demote():
+    consolidator = TopicConsolidatorV2(embed_fn=_embed)
+    dossiers, _ = consolidator.consolidate_qa_stream(
+        [
+            {
+                "id": 300,
+                "timestamp": _utc(48),
+                "question": "PostgreSQL database connection pool config?",
+                "answer": "PostgreSQL database connection pool uses connection pooling limits.",
+            },
+            {
+                "id": 310,
+                "timestamp": _utc(36),
+                "question": "Python 用户认证采用什么方案？",
+                "answer": "Python 用户认证采用独立令牌验证机制。",
+            },
+        ]
+    )
+    t_pg = next(d for d in dossiers if d.last_evidence_qa_id == 300)
+    t_py = next(d for d in dossiers if d.last_evidence_qa_id == 310)
+
+    scored_cross = [
+        rp_mod.RecallHit(
+            source_id=f"topic_{t_pg.topic_id}",
+            kind="topic",
+            title=t_pg.title,
+            content=t_pg.render_current_body(include_header=True),
+            content_preview=t_pg.render_current_body(include_header=True)[:500],
+            rrf_score=0.050,
+            created_at=_utc(48),
+        ),
+        rp_mod.RecallHit(
+            source_id="qa_400",
+            kind="qa",
+            title="PostgreSQL database backup plan?",
+            content="PostgreSQL database backup runs nightly snapshot archiving.",
+            content_preview="PostgreSQL database backup runs nightly snapshot archiving.",
+            rrf_score=0.048,
+            created_at=_utc(2),
+        ),
+        rp_mod.RecallHit(
+            source_id=f"topic_{t_py.topic_id}",
+            kind="topic",
+            title=t_py.title,
+            content=t_py.render_current_body(include_header=True),
+            content_preview=t_py.render_current_body(include_header=True)[:500],
+            rrf_score=0.049,
+            created_at=_utc(36),
+        ),
+        rp_mod.RecallHit(
+            source_id="qa_410",
+            kind="qa",
+            title="Python 用户权限怎么控制？",
+            content="Python 用户权限按部门隔离管理。",
+            content_preview="Python 用户权限按部门隔离管理。",
+            rrf_score=0.047,
+            created_at=_utc(1),
+        ),
+    ]
+    guard_cross = apply_topic_v2_ranking_guard(scored_cross, query="PostgreSQL Python 当前配置")
+    assert guard_cross["demoted_topics"] == 0, f"Plain English/CJK generic words caused false cross-demotion: {guard_cross}"
+
+    # Verify same sub-topic with >=2 concrete domain terms ("connection" + "pool") still marks stale.
+    scored_same = [
+        scored_cross[0],
+        rp_mod.RecallHit(
+            source_id="qa_450",
+            kind="qa",
+            title="PostgreSQL connection pool tuning?",
+            content="PostgreSQL connection pool sizing upgraded to 64 max workers.",
+            content_preview="PostgreSQL connection pool sizing upgraded to 64 max workers.",
+            rrf_score=0.042,
+            created_at=_utc(1),
+        ),
+    ]
+    guard_same = apply_topic_v2_ranking_guard(scored_same, query="PostgreSQL connection pool")
+    assert guard_same["demoted_topics"] == 1
+
+
+def test_r3_p1_2_real_recall_note_and_yin_propagate_created_at_and_protect_newer(monkeypatch):
+    from v3core import topic_recall as tr_mod
+    from v3core import yin_pool as yp_mod
+
+    ts_old_note = datetime(2026, 11, 15, 9, 0, tzinfo=timezone.utc)
+    ts_topic = "2026-11-20T08:00:00Z"
+    ts_newer = datetime(2026, 11, 27, 9, 0, tzinfo=timezone.utc)
+
+    # 1. Verify _merge_observation_note_hits propagates created_at onto RecallHit
+    merged_hits = rp_mod._merge_observation_note_hits(
+        [
+            (101, "v_new", "日志采集边缘集群已灰度切换到 Vector", 0.92, ts_newer),
+            (100, "v_old", "日志采集早期仍在评估方案", 0.85, ts_old_note),
+        ],
+        [],
+        limit=5,
+    )
+    by_sid = {h.source_id: h for h in merged_hits}
+    assert by_sid["note:v_new"].created_at == ts_newer.isoformat()
+    assert by_sid["note:v_old"].created_at == ts_old_note.isoformat()
+
+    # 2. Verify yin_pool.search_yin propagates created_at
+    class _YinCur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            pass
+
+        def fetchall(self):
+            return [("y_20261127", "偏好", "日志采集保持结构化输出", 0.94, ts_newer)]
+
+    class _YinConn:
+        def cursor(self):
+            return _YinCur()
+
+    monkeypatch.setattr(
+        yp_mod,
+        "query_with_exact_fallback",
+        lambda cur, sql, params, **kw: ([("y_20261127", "偏好", "日志采集保持结构化输出", 0.94, ts_newer)], False),
+    )
+    yin_res = yp_mod.search_yin(_embed("日志采集"), keyword="", pg=_YinConn(), limit=3)
+    assert yin_res[0]["created_at"] == ts_newer.isoformat()
+
+    # 3. End-to-end recall_pool -> real apply_topic_v2_ranking_guard (NO hand-built RecallHits)
+    topic_header = (
+        '<!-- topic_v2:{"v":2,"last_qa":50,"last_at":"2026-11-20T08:00:00Z",'
+        '"active_qas":[50],"superseded_qas":[],"kws":["Fluentd-Agent","日志采集"]} -->'
+    )
+
+    class _FakeTopicCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "from observation_notes" in q:
+                self._rows = [
+                    (101, "v_new", "日志采集边缘集群已切换 Fluentd-Agent 灰度替代方案", 0.88, ts_newer),
+                    (100, "v_old", "早期观察日志采集使用 Fluentd-Agent", 0.86, ts_old_note),
+                ]
+            elif "from yin_paragraphs" in q:
+                self._rows = [("y_20261127", "logging", "Fluentd-Agent 日志采集近期实践记录", 0.89, ts_newer)]
+            else:
+                self._rows = []
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakePoolConn:
+        def cursor(self):
+            return _FakeTopicCur()
+
+        def close(self):
+            pass
+
+    class _FakePg:
+        def _connect(self):
+            return _FakePoolConn()
+
+    class _FakeTopicRecall:
+        def __init__(self, *a, **kw):
+            pass
+
+        def match(self, query, top_k=5, query_embedding=None, deadline=None):
+            return [
+                (
+                    0.91,
+                    {
+                        "id": "tv2_log_50",
+                        "title": "日志采集架构",
+                        "body": f"{topic_header}\n- 当前结论：使用 Fluentd-Agent 采集容器日志。",
+                        "summary": "使用 Fluentd-Agent",
+                    },
+                )
+            ]
+
+    monkeypatch.setattr(tr_mod, "TopicRecall", _FakeTopicRecall)
+    monkeypatch.setattr(
+        yp_mod,
+        "search_yin",
+        lambda qemb, keyword="", pg=None, limit=3: [
+            {
+                "yin_version": "y_20261127",
+                "section": "logging",
+                "content": "Fluentd-Agent 日志采集近期实践记录",
+                "score": 0.89,
+                "matched_by": "vector",
+                "created_at": ts_newer.isoformat(),
+            }
+        ],
+    )
+    monkeypatch.setattr(rp_mod, "_fetch_observation_child_candidates", lambda cur, emb_str, lim: [])
+
+    results, _rp_meta = rp_mod.recall_pool(
+        "日志采集 Fluentd-Agent 现在情况？",
+        pg=_FakePg(),
+        q_emb=_embed("日志采集 Fluentd-Agent"),
+        include_keyword=False,
+        include_topic=True,
+        include_yin=True,
+        include_notes=True,
+        limit=10,
+        config={"prefetch": {"topic_v2_mode": True}},
+    )
+    by_res = {h.source_id: h for h in results}
+    assert by_res["note:v_new"].created_at == ts_newer.isoformat()
+    assert by_res["yin:y_20261127#logging"].created_at == ts_newer.isoformat()
+    assert by_res["note:v_old"].created_at == ts_old_note.isoformat()
+    assert "<!-- topic_v2:" not in by_res["topic_tv2_log_50"].content
+    # Newer note & yin must stay un-demoted while older note IS demoted below topic & newer hits
+    idx_ids = [h.source_id for h in results]
+    assert idx_ids.index("note:v_new") < idx_ids.index("note:v_old")
+    assert idx_ids.index("yin:y_20261127#logging") < idx_ids.index("note:v_old")
+    assert idx_ids.index("topic_tv2_log_50") < idx_ids.index("note:v_old")
+
+    # 4. Undated note/yin (created_at="") without superseded identifiers must fail safe and NOT be demoted
+    undated_yin = rp_mod.RecallHit(
+        source_id="yin:undated",
+        kind="yin",
+        title="日志",
+        content="Fluentd-Agent 补充原则说明",
+        content_preview="Fluentd-Agent 补充原则说明",
+        rrf_score=0.055,
+        created_at="",
+    )
+    topic_only = rp_mod.RecallHit(
+        source_id="topic_tv2_log_50",
+        kind="topic",
+        title="日志采集架构",
+        content=f"{topic_header}\n- 当前结论：Fluentd-Agent",
+        content_preview=f"{topic_header}\n- 当前结论：Fluentd-Agent",
+        rrf_score=0.050,
+        created_at=ts_topic,
+    )
+    guard_undated = apply_topic_v2_ranking_guard([undated_yin, topic_only], query="日志采集 Fluentd-Agent")
+    assert "yin:undated" not in guard_undated["demoted_sids"]
+
+
+def test_r3_p2_1_real_v3core_shutdown_drains_final_live_buffer_flush(monkeypatch):
+    import queue as _queue
+    import v3core
+    from v3core.config_model import from_legacy_dict
+
+    core = v3core.V3Core.__new__(v3core.V3Core)
+    core._config = from_legacy_dict({})
+    core._core_lock = threading.Lock()
+    core._core_closed = False
+    core._core_fenced = False
+    core._core_accepting = True
+    core._core_generation = 0
+    core._runtime = None
+    core._topic_refresher_stop = threading.Event()
+    core._topic_refresher_thread = None
+    core._qa_flush_timer = None
+    core._flush_worker = None
+    core._flush_queue = _queue.Queue()
+    core._qa_stop = threading.Event()
+    core._e1_scheduler = None
+    core._spill_all_pending_qa_to_durable = lambda: None
+    core._flush_all_pending_qa = lambda timeout=0: None
+
+    events_order: list[str] = []
+
+    class _FakePg:
+        def close(self):
+            events_order.append("pg_close")
+
+    class _FakeLiveBuffer:
+        def shutdown(self, timeout=1.0):
+            events_order.append("live_buffer_flush")
+            # Real V3Core.shutdown has ALREADY set _core_closed=True & _core_fenced=True here!
+            assert core._core_closed is True and core._core_fenced is True
+            core._on_live_flush([("sess", "m_final", "final msg", "user")])
+
+    core._pg = _FakePg()
+    core._live_buffer = _FakeLiveBuffer()
+
+    consolidate_calls: list[int] = []
+
+    def fake_consolidate(**kw):
+        events_order.append("consolidate")
+        consolidate_calls.append(1)
+        return {"processed_qas": 1, "failed_qa_ids": []}
+
+    monkeypatch.setattr(core, "consolidate_topics_v2", fake_consolidate)
+
+    core.shutdown(timeout=2.0)
+    assert len(consolidate_calls) == 1, "Final LiveBuffer flush during real shutdown MUST execute consolidate_topics_v2"
+    assert events_order.index("consolidate") < events_order.index("pg_close")
+
+    # After shutdown finishes, _topic_v2_stop_requested prevents restarting worker on late flush.
+    core._on_live_flush([("sess", "m_late", "late msg", "user")])
+    assert len(consolidate_calls) == 1
+
+
+def test_r3_p2_3_state_dir_file_lock_fails_closed_on_contention(tmp_path: Path):
+    import pytest
+    from v3core.topic_v2 import _state_dir_file_lock
+
+    lock_path = tmp_path / ".topic_v2.lock"
+    lock_path.write_bytes(b"0")
+    holder = open(lock_path, "r+b")
+    try:
+        try:
+            import fcntl  # type: ignore
+
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:
+            import msvcrt  # type: ignore
+
+            holder.seek(0)
+            msvcrt.locking(holder.fileno(), msvcrt.LK_NBLCK, 1)
+
+        with pytest.raises(TimeoutError, match="failed to acquire file lock"):
+            with _state_dir_file_lock(tmp_path, timeout=0.08):
+                pytest.fail("Must NOT enter locked body when OS file lock is held")
+    finally:
+        try:
+            import fcntl  # type: ignore
+
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        except ImportError:
+            try:
+                import msvcrt  # type: ignore
+
+                holder.seek(0)
+                msvcrt.locking(holder.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception:
+                pass
+        holder.close()
