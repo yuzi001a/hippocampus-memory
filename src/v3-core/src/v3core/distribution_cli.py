@@ -327,6 +327,7 @@ def _doctor(args: argparse.Namespace) -> int:
                  "memory_relations.sql",
                  "derived_memory_invalidations.sql",
                  "assistant_deliveries.sql",
+                 "topic_claims.sql",
                  "upgrade_v0_2.sql"):
         try:
             text = _package_sql(name)
