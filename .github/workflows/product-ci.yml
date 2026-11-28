@@ -286,6 +286,7 @@ jobs:
               tests/test_serve_tool_profile_scoping.py \
               tests/test_recall_pool_premise_deadline.py \
               tests/test_topic_v2.py \
+              tests/test_topic_v2_p1_regressions.py \
               tests/test_topic_ablation_bench.py \
               tests/test_embedding_policy_guard.py \
               tests/test_schema_packaged_parity.py \

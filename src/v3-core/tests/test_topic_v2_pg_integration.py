@@ -231,6 +231,7 @@ def _cleanup_pg_rows(pool: PgPool) -> None:
         )
         cur.execute("DELETE FROM public.topic_entries WHERE topic_id LIKE %s", (_TOPIC_PREFIX + "%",))
         cur.execute("DELETE FROM public.observation_notes WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
+        cur.execute("DELETE FROM public.yin WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
         lease.connection.commit()
 
 
@@ -246,7 +247,7 @@ def _insert_qa(
     pool: PgPool,
     *,
     source_id: str,
-    session_id: str,
+    session_id: str | None,
     turn_id: int,
     question: str,
     answer: str,
@@ -526,6 +527,8 @@ def test_pg_v3core_live_flush_and_topic_maintain_tool(
     monkeypatch.setattr(v3core, "call_embedding", lambda text, cfg, **kw: _EMBED_FN(text))
 
     core._on_live_flush([("sess_flush", "m1", "msg", "user")])
+    assert core.wait_topic_v2_idle(timeout=5.0)
+    core._stop_topic_v2_worker(timeout=1.0)
     assert len(invalidations) == 1
 
     # Add a second QA and trigger via v3_topic_maintain tool handler
@@ -646,3 +649,170 @@ def test_pg_60qa_multi_topic_stress_no_fragmentation(
         )
         assert "<!-- topic_v2:" not in ctx
         assert new_tech in ctx
+
+
+def test_pg_p2_null_session_id_and_embed_model_updated_at(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    t0 = datetime(2026, 11, 25, 10, 0, tzinfo=timezone.utc)
+    qa_null = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}null_sess_1",
+        session_id=None,
+        turn_id=1,
+        question="数据库连接池采用什么？",
+        answer="PostgreSQL 确定采用 PgBouncer 连接池方案。",
+        ts=t0,
+    )
+    state_dir = tmp_path / "null_sess_state"
+    res1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="fp-alpha-v1",
+    )
+    assert res1["processed_qas"] == 1
+    assert res1["new_last_qa_id"] == qa_null
+    assert res1["upserted_topics"] == 1
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT embed_model, updated_at FROM public.topics WHERE topic_id LIKE %s",
+            (_TOPIC_PREFIX + "%",),
+        )
+        row1 = cur.fetchone()
+    assert row1 is not None and row1[0] == "fp-alpha-v1" and row1[1] is not None
+
+    res2 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="fp-beta-v2",
+    )
+    assert res2["upserted_topics"] == 1
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT embed_model, updated_at FROM public.topics WHERE topic_id LIKE %s",
+            (_TOPIC_PREFIX + "%",),
+        )
+        row2 = cur.fetchone()
+    assert row2 is not None and row2[0] == "fp-beta-v2" and row2[1] >= row1[1]
+
+
+def test_pg_p1_cross_topic_unrelated_yin_and_failed_qa_recovery(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    t_db = datetime(2026, 11, 20, 8, 0, tzinfo=timezone.utc)
+    t_log = datetime(2026, 11, 26, 8, 0, tzinfo=timezone.utc)
+    qa_db = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}cross_db",
+        session_id="sess_cross_1",
+        turn_id=1,
+        question="数据库连接池采用什么方案？",
+        answer="PostgreSQL 连接池统一采用 PgBouncer-Pool-V2。",
+        ts=t_db,
+    )
+    qa_log = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}cross_log",
+        session_id="sess_cross_2",
+        turn_id=1,
+        question="日志采集管线目前决定采用什么？",
+        answer="正式废弃 Fluentd-Legacy，改为 Vector-Agent-V2。",
+        ts=t_log,
+    )
+
+    state_dir = tmp_path / "cross_state"
+    attempts = {"log": 0}
+
+    def flaky_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        qid = payload["qa_id"]
+        if qid == qa_db:
+            return json.dumps(
+                {
+                    "action": "create",
+                    "topic_title": "数据库连接池",
+                    "update_type": "add",
+                    "claim_text": "PostgreSQL 连接池采用 PgBouncer-Pool-V2",
+                    "keywords": ["PgBouncer-Pool-V2", "postgres"],
+                }
+            )
+        attempts["log"] += 1
+        if attempts["log"] == 1:
+            return "NOT VALID JSON"
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_title": "日志采集管线",
+                "update_type": "add",
+                "claim_text": "日志采集采用 Vector-Agent-V2",
+                "keywords": ["Vector-Agent-V2", "logging"],
+            }
+        )
+
+    out1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=flaky_llm,
+        state_dir=state_dir,
+        dry_run=False,
+    )
+    assert out1["new_last_qa_id"] == qa_db
+    assert out1["failed_qa_ids"] == [qa_log]
+
+    out2 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=flaky_llm,
+        state_dir=state_dir,
+        dry_run=False,
+    )
+    assert out2["new_last_qa_id"] == qa_log
+    assert out2["failed_qa_ids"] == []
+
+    # Seed unrelated long-term yin & a stale DB observation note
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "INSERT INTO public.yin (version, title, content, is_current) VALUES (%s, %s, %s, TRUE)",
+            (f"{_NOTE_PREFIX}yin_style", "沟通风格", "回答保持简明扼要，避免空话与冗余表格。"),
+        )
+        cur.execute(
+            """
+            INSERT INTO public.observation_notes (version, content, embedding, embed_model, created_at)
+            VALUES (%s, %s, %s::vector, 'bge-m3', %s::timestamptz)
+            """,
+            (
+                f"{_NOTE_PREFIX}stale_db",
+                "早期观察：PostgreSQL 暂未使用 PgBouncer-Pool-V2。",
+                _vec_literal(_EMBED_FN("PostgreSQL PgBouncer-Pool-V2 数据库连接池")),
+                (t_db - timedelta(days=5)).isoformat(),
+            ),
+        )
+        lease.connection.commit()
+
+    cfg = _default_pg_dict_config(tmp_path)
+    q_db = "PostgreSQL PgBouncer 连接池方案是什么？"
+    hits = prefetch(
+        q_db,
+        limit=8,
+        config=cfg,
+        pg=pg_store,
+        q_emb=_EMBED_FN(q_db),
+        max_chars=4000,
+    )
+    hit_map = {h["source_id"]: h for h in hits}
+    db_topics = [sid for sid in hit_map if sid.startswith("topic_") and "PgBouncer" in hit_map[sid].get("text", "")]
+    assert db_topics
+    # Topic A (last_qa == qa_db < qa_log) must NOT be demoted below stale DB note even if qa_log exists!
+    stale_note_sid = f"note:{_NOTE_PREFIX}stale_db"
+    if stale_note_sid in hit_map:
+        assert list(hit_map).index(db_topics[0]) < list(hit_map).index(stale_note_sid)

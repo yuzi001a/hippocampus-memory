@@ -4189,11 +4189,12 @@ def recall_pool(
             _pre_fusion_positions = {}
 
     # Topic V2 freshness / supersession guard (enabled by default; set false to disable).
+    _tv2_guard_info = None
     if _resolve_topic_v2_mode(config):
         try:
             from .topic_v2 import apply_topic_v2_ranking_guard
 
-            apply_topic_v2_ranking_guard(
+            _tv2_guard_info = apply_topic_v2_ranking_guard(
                 scored,
                 query=query,
                 trace=trace,
@@ -4293,6 +4294,18 @@ def recall_pool(
                 rerank_cfg=rerank_cfg,
                 deadline=deadline,
             )
+        if _tv2_guard_info and _tv2_guard_info.get("demoted_sids") and not _tv2_guard_info.get("is_historical"):
+            try:
+                from .topic_v2 import enforce_topic_v2_post_rerank_order
+
+                ranked = enforce_topic_v2_post_rerank_order(
+                    ranked,
+                    demoted_sids=_tv2_guard_info["demoted_sids"],
+                    is_historical=False,
+                )
+            except Exception as _tv2_post_exc:
+                logger.debug("topic_v2 post-rerank guard failed (skipped): %s", _safe_err(_tv2_post_exc)[:120])
+
         # A5 (G6B Slice B): when ``_rerank`` actually runs, emit a
         # RERANKED event for every hit in the reranked list.  Guarded
         # so a faulty sink cannot change the reranked order path.
@@ -4454,7 +4467,8 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
         sql = (
             "SELECT topic_id, COALESCE(title, %s), "
             " LEFT(COALESCE(summary, '') || COALESCE(body, ''), 500),"
-            " 1 - (embedding <=> %s::vector) AS cosine"
+            " 1 - (embedding <=> %s::vector) AS cosine,"
+            " COALESCE(body, '')"
             " FROM topics WHERE status='active' AND embedding IS NOT NULL"
             " ORDER BY embedding <=> %s::vector LIMIT %s"
         )
@@ -4463,7 +4477,8 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
         sql = (
             "SELECT topic_id, LEFT(COALESCE(question, %s), 200),"
             " LEFT(COALESCE(question, '') || ' ' || COALESCE(answer, ''), 500),"
-            " 1 - (embedding <=> %s::vector) AS cosine"
+            " 1 - (embedding <=> %s::vector) AS cosine,"
+            " source_qa_id"
             " FROM topic_entries WHERE embedding IS NOT NULL"
             " ORDER BY embedding <=> %s::vector LIMIT %s"
         )
@@ -4485,13 +4500,19 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
     out = []
     for row in rows:
         # topics / topic_entries use the same compact result shape.
-        out.append({
+        item = {
             "source_id": row[0],
             "title": row[1],
             "content_preview": _trim(row[2], 300),
             "cosine": float(row[3]) if row[3] is not None else 0.0,
             "kind": kind,
-        })
+        }
+        if len(row) > 4:
+            if kind == "topic":
+                item["raw_body"] = row[4] or ""
+            elif kind == "entry":
+                item["source_qa_id"] = row[4]
+        out.append(item)
     return out
 
 
@@ -4591,6 +4612,43 @@ def chain_recall(query, pg=None, q_emb=None,
                 return _chain_fallback_b(query, pg, q_emb, reason="no cards for anchor", config=config, core=core, deadline=deadline)
 
             # Step 3: per-card embedding -> topic_entries top-K (QA 原文)
+            tv2_enabled = _resolve_topic_v2_mode(config)
+            tv2_superseded_qa_ids: set[int] = set()
+            is_hist_query = False
+            if tv2_enabled:
+                from .topic_v2 import (
+                    is_historical_trace_query,
+                    parse_topic_v2_header,
+                    strip_topic_v2_header,
+                )
+
+                is_hist_query = is_historical_trace_query(query)
+                anchor_meta = parse_topic_v2_header(anchor.get("raw_body") or anchor.get("content_preview") or "")
+                anchor["content_preview"] = strip_topic_v2_header(anchor.get("content_preview") or "")
+                if anchor_meta:
+                    for _sq in anchor_meta.get("superseded_qas") or []:
+                        try:
+                            tv2_superseded_qa_ids.add(int(_sq))
+                        except (TypeError, ValueError):
+                            pass
+
+                fresh_cards = []
+                legacy_cards = []
+                for card in card_hits:
+                    c_meta = parse_topic_v2_header(card.get("raw_body") or card.get("content_preview") or "")
+                    card["content_preview"] = strip_topic_v2_header(card.get("content_preview") or "")
+                    if c_meta and int(c_meta.get("v") or 0) == 2:
+                        fresh_cards.append(card)
+                        for _sq in c_meta.get("superseded_qas") or []:
+                            try:
+                                tv2_superseded_qa_ids.add(int(_sq))
+                            except (TypeError, ValueError):
+                                pass
+                    else:
+                        legacy_cards.append(card)
+                if not is_hist_query and fresh_cards and legacy_cards:
+                    card_hits = fresh_cards + legacy_cards
+
             traces = {}
             for card in card_hits:
                 card_emb = _get_topic_embedding(pg, card["source_id"])
@@ -4599,6 +4657,11 @@ def chain_recall(query, pg=None, q_emb=None,
                 msg_hits = _chain_search_by_embedding(
                     pg, card_emb, "topic_entries", "entry", traces_per_card
                 )
+                if tv2_enabled and not is_hist_query and tv2_superseded_qa_ids and msg_hits:
+                    msg_hits = [
+                        m for m in msg_hits
+                        if m.get("source_qa_id") is None or int(m["source_qa_id"]) not in tv2_superseded_qa_ids
+                    ]
                 if msg_hits:
                     traces[card["source_id"]] = msg_hits
 

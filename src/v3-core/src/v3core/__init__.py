@@ -1307,7 +1307,13 @@ class V3Core:
                     logger.warning("LiveBuffer shutdown skip: remaining=%.2fs no timeout support, bounded detach fenced", remaining)
             except Exception as e:
                 logger.warning("LiveBuffer shutdown failed: %s", _safe_err(e))
-        # 6. bounded legacy E1 scheduler shutdown — remaining deadline
+        # 6. bounded Topic V2 background worker shutdown — remaining deadline
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
+            self._stop_topic_v2_worker(timeout=remaining)
+        except Exception as e:
+            logger.warning("Topic V2 worker shutdown failed: %s", _safe_err(e))
+        # 7. bounded legacy E1 scheduler shutdown — remaining deadline
         if getattr(self, "_runtime", None) is None and self._e1_scheduler:
             try:
                 remaining = max(0.0, deadline - time.monotonic())
@@ -3581,10 +3587,12 @@ class V3Core:
             return {"skipped": True, "reason": "no_pg"}
 
         eff_embed_fn = embed_fn
+        eff_embed_model = ""
         if eff_embed_fn is None:
             embed_cfg = safe_embed_cfg(cfg) if cfg is not None else None
             if embed_cfg is None:
                 return {"skipped": True, "reason": "no_embedding"}
+            eff_embed_model = str(embed_cfg.get("_fingerprint") or "")
             eff_embed_fn = (
                 lambda text: call_embedding(
                     str(text or ""), embed_cfg, policy=DURABLE_WRITE_EMBED_POLICY
@@ -3608,6 +3616,7 @@ class V3Core:
                 state_dir=state_dir,
                 dry_run=bool(dry_run),
                 batch_limit=max(int(batch_limit or 100), 1),
+                embed_model=eff_embed_model,
             )
         if not dry_run and int(result.get("upserted_topics") or 0) > 0:
             try:
@@ -3616,31 +3625,95 @@ class V3Core:
                 logger.warning("consolidate_topics_v2 on_topics_commit 失败 (非阻塞): %s", _safe_err(e)[:100])
         return result
 
-    def _on_live_flush(self, items: list):
-        """LiveBuffer 刷入 PG 后的回调 — 触发 Topic V2 增量巩固.
+    def _ensure_topic_v2_worker(self):
+        """Lazily initialize the background Topic V2 consolidation worker (compatible with __new__)."""
+        import threading as _threading
 
-        Bound to V3Core (not LiveBuffer). TopicRecallCache.invalidate runs only
-        after PG commit succeeds inside consolidate_topics_v2.
+        init_lock = getattr(self, "_topic_v2_worker_init_lock", None)
+        if init_lock is None:
+            init_lock = _threading.Lock()
+            self._topic_v2_worker_init_lock = init_lock
+        with init_lock:
+            stop_ev = getattr(self, "_topic_v2_stop", None)
+            if stop_ev is None:
+                stop_ev = _threading.Event()
+                self._topic_v2_stop = stop_ev
+            wake_ev = getattr(self, "_topic_v2_wake", None)
+            if wake_ev is None:
+                wake_ev = _threading.Event()
+                self._topic_v2_wake = wake_ev
+            busy_ev = getattr(self, "_topic_v2_busy", None)
+            if busy_ev is None:
+                busy_ev = _threading.Event()
+                self._topic_v2_busy = busy_ev
+            worker = getattr(self, "_topic_v2_worker", None)
+            if worker is None or not worker.is_alive():
+                stop_ev.clear()
+                worker = _threading.Thread(
+                    target=self._topic_v2_worker_loop,
+                    name="v3core-topic-v2-worker",
+                    daemon=True,
+                )
+                self._topic_v2_worker = worker
+                worker.start()
+            return wake_ev
+
+    def _topic_v2_worker_loop(self) -> None:
+        stop_ev = self._topic_v2_stop
+        wake_ev = self._topic_v2_wake
+        busy_ev = self._topic_v2_busy
+        while not stop_ev.is_set():
+            if not wake_ev.wait(timeout=0.5):
+                continue
+            while wake_ev.is_set() and not stop_ev.is_set():
+                busy_ev.set()
+                wake_ev.clear()
+                try:
+                    if not (getattr(self, "_core_closed", False) or getattr(self, "_core_fenced", False)):
+                        self.consolidate_topics_v2(dry_run=False, batch_limit=20)
+                except Exception as e:
+                    logger.warning("_topic_v2_worker consolidation error: %s", _safe_err(e)[:100])
+                finally:
+                    busy_ev.clear()
+
+    def wait_topic_v2_idle(self, timeout: float = 2.0) -> bool:
+        """Wait until pending background Topic V2 flush consolidation has finished."""
+        wake_ev = getattr(self, "_topic_v2_wake", None)
+        busy_ev = getattr(self, "_topic_v2_busy", None)
+        if wake_ev is None and busy_ev is None:
+            return True
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() <= deadline:
+            if (wake_ev is None or not wake_ev.is_set()) and (busy_ev is None or not busy_ev.is_set()):
+                return True
+            time.sleep(0.01)
+        return (wake_ev is None or not wake_ev.is_set()) and (busy_ev is None or not busy_ev.is_set())
+
+    def _stop_topic_v2_worker(self, timeout: float = 0.5) -> None:
+        stop_ev = getattr(self, "_topic_v2_stop", None)
+        wake_ev = getattr(self, "_topic_v2_wake", None)
+        worker = getattr(self, "_topic_v2_worker", None)
+        if stop_ev is not None:
+            stop_ev.set()
+        if wake_ev is not None:
+            wake_ev.set()
+        if worker is not None and worker.is_alive() and worker is not threading.current_thread():
+            worker.join(timeout=max(0.0, float(timeout)))
+
+    def _on_live_flush(self, items: list):
+        """LiveBuffer 刷入 PG 后的回调 — 异步唤醒后台 Topic V2 巩固线程.
+
+        Never performs remote LLM calls on LiveBuffer's ingestion thread.
         """
         if not items:
+            return
+        if getattr(self, "_core_closed", False) or getattr(self, "_core_fenced", False):
             return
         cfg_v2 = getattr(self, "_config", None) or getattr(self, "config", None)
         if not self._is_topic_v2_enabled(cfg_v2):
             return
-        import threading as _threading
-
-        lock = getattr(self, "_topic_v2_lock", None)
-        if lock is None:
-            lock = _threading.Lock()
-            self._topic_v2_lock = lock
-        if getattr(lock, "locked", lambda: False)():
-            return
-        try:
-            self.consolidate_topics_v2(dry_run=False, batch_limit=20)
-        except ValueError:
-            raise
-        except Exception as e:
-            logger.warning("_on_live_flush topic_v2 consolidation error: %s", _safe_err(e)[:100])
+        wake_ev = self._ensure_topic_v2_worker()
+        wake_ev.set()
 
     def _enqueue_live_message_status(self, session_id: str, msg_id: str,
                                      content: str, role: str, turn_id: str,
