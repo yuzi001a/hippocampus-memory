@@ -1487,6 +1487,11 @@ def test_pg_pr71_r2_v3core_pg_recovery_and_late_merge_past_grace_window(
         def is_connected(self):
             return self.online
 
+        def lease(self, timeout: float = 10.0):
+            if not self.online:
+                raise RuntimeError("pg temporarily down")
+            return self._inner.lease(timeout=timeout)
+
         def _connect(self):
             if not self.online:
                 raise RuntimeError("pg temporarily down")
