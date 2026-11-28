@@ -10,7 +10,7 @@ import logging
 import math
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from .types import RecallHit
 from ._deadline import (
@@ -2014,7 +2014,7 @@ def _fetch_observation_child_candidates(cur, emb_str: str, limit: int) -> list:
         cur.execute(
             "SELECT c.observation_id, n.version, n.content, n.created_at, "
             " 1 - (c.embedding <=> %s::vector) AS cosine, "
-            " c.source_sha256, c.representation_version "
+            " c.source_sha256, c.representation_version, n.source_qa_range "
             "FROM observation_embedding_chunks c "
             "JOIN observation_notes n ON n.id = c.observation_id "
             "WHERE c.embedding IS NOT NULL AND n.embedding IS NOT NULL "
@@ -2050,9 +2050,11 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
     _cap = max(int(limit or 0), 3)
     _cands: list[dict] = []
     _created: dict[tuple, object] = {}
+    _qa_ranges: dict[tuple, object] = {}
     for _row in parent_rows or []:
         _nid, _ver, _content, _cos = _row[0], _row[1], _row[2], _row[3]
         _ts = _row[4] if len(_row) > 4 else None
+        _qrange = _row[5] if len(_row) > 5 else None
         try:
             _sim = float(_cos) if _cos is not None else float("-inf")
         except (TypeError, ValueError):
@@ -2062,10 +2064,13 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             "cosine": _sim, "content": _content or "", "kind": "parent",
         })
         _created.setdefault((_nid, _ver), _ts)
+        if _qrange is not None:
+            _qa_ranges.setdefault((_nid, _ver), _qrange)
     for _row in child_rows or []:
         try:
             _cid, _cver, _ccontent = _row[0], _row[1], _row[2]
             _cts, _ccos, _csha, _crep = _row[3], _row[4], _row[5], _row[6]
+            _cqrange = _row[7] if len(_row) > 7 else None
         except (IndexError, TypeError, ValueError):
             continue
         if not (_ccontent or ""):
@@ -2090,6 +2095,8 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             "cosine": _csim, "content": _ccontent or "", "kind": "child",
         })
         _created.setdefault((_cid, _cver), _cts)
+        if _cqrange is not None:
+            _qa_ranges.setdefault((_cid, _cver), _cqrange)
 
     if _merge_hits is not None:
         _merged = _merge_hits(_cands)
@@ -2189,6 +2196,13 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             continue
         _ver = _e.get("observation_version")
         _full = _e.get("content") or ""
+        _ts_val = _created.get((_e.get("observation_id"), _ver))
+        _qrange_val = _qa_ranges.get((_e.get("observation_id"), _ver))
+        _created_str = (
+            _ts_val.isoformat()
+            if hasattr(_ts_val, "isoformat")
+            else (str(_ts_val) if _ts_val else "")
+        )
         _out.append(RecallHit(
             source_id=f"note:{_ver}",
             title=f"记忆印·{_ver}",
@@ -2199,7 +2213,8 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             cosine=_sim,
             rrf_score=0.0,
             kind="note",
-            created_at="",
+            created_at=_created_str,
+            source_qa_range=_qrange_val,
         ))
     return _out
 
@@ -3767,7 +3782,7 @@ def recall_pool(
                                 cosine=float(yh.get("score") or 0.0),
                                 rrf_score=0.0,
                                 kind="yin",
-                                created_at="",
+                                created_at=str(yh.get("created_at") or ""),
                             )
         except ValueError:
             raise
@@ -3802,7 +3817,7 @@ def recall_pool(
                     with conn.cursor() as cur:
                         cur.execute(
                             "SELECT DISTINCT ON (created_at::date) id, version, content, "
-                            " 1 - (embedding <=> %s::vector) AS cosine, created_at "
+                            " 1 - (embedding <=> %s::vector) AS cosine, created_at, source_qa_range "
                             " FROM observation_notes WHERE embedding IS NOT NULL "
                             " ORDER BY created_at::date DESC, embedding <=> %s::vector LIMIT %s",
                             (emb_str, emb_str, max(limit, 3)),
@@ -4064,7 +4079,11 @@ def recall_pool(
             try:
                 cat_str = hit.created_at.replace("Z", "+00:00")
                 card_time = datetime.fromisoformat(cat_str)
-                age_days = max(0, (datetime.now() - card_time).days)
+                if card_time.tzinfo is None:
+                    card_time = card_time.replace(tzinfo=timezone.utc)
+                else:
+                    card_time = card_time.astimezone(timezone.utc)
+                age_days = max(0, (datetime.now(timezone.utc) - card_time).days)
                 decay = math.exp(-age_days / half_life)
                 hit.rrf_score = round(hit.rrf_score * max(decay, 0.05), 6)
                 # A2 (G6B Slice B): record the temporal half-life decay
@@ -4189,11 +4208,12 @@ def recall_pool(
             _pre_fusion_positions = {}
 
     # Topic V2 freshness / supersession guard (enabled by default; set false to disable).
+    _tv2_guard_info = None
     if _resolve_topic_v2_mode(config):
         try:
             from .topic_v2 import apply_topic_v2_ranking_guard
 
-            apply_topic_v2_ranking_guard(
+            _tv2_guard_info = apply_topic_v2_ranking_guard(
                 scored,
                 query=query,
                 trace=trace,
@@ -4293,6 +4313,18 @@ def recall_pool(
                 rerank_cfg=rerank_cfg,
                 deadline=deadline,
             )
+        if _tv2_guard_info and _tv2_guard_info.get("demoted_sids") and not _tv2_guard_info.get("is_historical"):
+            try:
+                from .topic_v2 import enforce_topic_v2_post_rerank_order
+
+                ranked = enforce_topic_v2_post_rerank_order(
+                    ranked,
+                    demoted_sids=_tv2_guard_info["demoted_sids"],
+                    is_historical=False,
+                )
+            except Exception as _tv2_post_exc:
+                logger.debug("topic_v2 post-rerank guard failed (skipped): %s", _safe_err(_tv2_post_exc)[:120])
+
         # A5 (G6B Slice B): when ``_rerank`` actually runs, emit a
         # RERANKED event for every hit in the reranked list.  Guarded
         # so a faulty sink cannot change the reranked order path.
@@ -4441,7 +4473,7 @@ def _trim(s, n=200):
     return s[:n].strip()
 
 
-def _chain_search_by_embedding(pg, emb, table, kind, limit):
+def _chain_search_by_embedding(pg, emb, table, kind, limit, exclude_qa_ids=None):
     """Search the current chain tables and return compact vector hits.
 
     ``topics`` supplies the anchor/card layer and ``topic_entries`` supplies
@@ -4449,33 +4481,52 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
     """
     if not pg or not emb:
         return []
+    excluded_list = [int(x) for x in (exclude_qa_ids or [])]
+    excluded_set = set(excluded_list)
     if table == "topics":
         # topics 是观察者链的唯一锚点/主题卡索引
         sql = (
             "SELECT topic_id, COALESCE(title, %s), "
             " LEFT(COALESCE(summary, '') || COALESCE(body, ''), 500),"
-            " 1 - (embedding <=> %s::vector) AS cosine"
+            " 1 - (embedding <=> %s::vector) AS cosine,"
+            " COALESCE(body, '')"
             " FROM topics WHERE status='active' AND embedding IS NOT NULL"
             " ORDER BY embedding <=> %s::vector LIMIT %s"
         )
+        sql_params = (chr(34), None, None, limit)
     elif table == "topic_entries":
         # 2026-08-06: chain traces 用 topic_entries (QA 原文 + embedding)
-        sql = (
-            "SELECT topic_id, LEFT(COALESCE(question, %s), 200),"
-            " LEFT(COALESCE(question, '') || ' ' || COALESCE(answer, ''), 500),"
-            " 1 - (embedding <=> %s::vector) AS cosine"
-            " FROM topic_entries WHERE embedding IS NOT NULL"
-            " ORDER BY embedding <=> %s::vector LIMIT %s"
-        )
+        if excluded_list:
+            sql = (
+                "SELECT topic_id, LEFT(COALESCE(question, %s), 200),"
+                " LEFT(COALESCE(question, '') || ' ' || COALESCE(answer, ''), 500),"
+                " 1 - (embedding <=> %s::vector) AS cosine,"
+                " source_qa_id"
+                " FROM topic_entries WHERE embedding IS NOT NULL"
+                " AND (source_qa_id IS NULL OR NOT (source_qa_id = ANY(%s)))"
+                " ORDER BY embedding <=> %s::vector LIMIT %s"
+            )
+            sql_params = (chr(34), None, excluded_list, None, limit + len(excluded_list))
+        else:
+            sql = (
+                "SELECT topic_id, LEFT(COALESCE(question, %s), 200),"
+                " LEFT(COALESCE(question, '') || ' ' || COALESCE(answer, ''), 500),"
+                " 1 - (embedding <=> %s::vector) AS cosine,"
+                " source_qa_id"
+                " FROM topic_entries WHERE embedding IS NOT NULL"
+                " ORDER BY embedding <=> %s::vector LIMIT %s"
+            )
+            sql_params = (chr(34), None, None, limit)
     else:
         return []
     emb_str = "[" + ",".join(str(x) for x in emb) + "]"
+    resolved_params = tuple(emb_str if p is None else p for p in sql_params)
     try:
         with _lease_pg_connection(pg) as conn:
             if not conn:
                 return []
             with conn.cursor() as cur:
-                cur.execute(sql, (chr(34), emb_str, emb_str, limit))
+                cur.execute(sql, resolved_params)
                 rows = cur.fetchall()
     except PrefetchDeadlineExceeded:
         raise
@@ -4484,14 +4535,28 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
         return []
     out = []
     for row in rows:
+        if kind == "entry" and len(row) > 4 and row[4] is not None and excluded_set:
+            try:
+                if int(row[4]) in excluded_set:
+                    continue
+            except (TypeError, ValueError):
+                pass
         # topics / topic_entries use the same compact result shape.
-        out.append({
+        item = {
             "source_id": row[0],
             "title": row[1],
             "content_preview": _trim(row[2], 300),
             "cosine": float(row[3]) if row[3] is not None else 0.0,
             "kind": kind,
-        })
+        }
+        if len(row) > 4:
+            if kind == "topic":
+                item["raw_body"] = row[4] or ""
+            elif kind == "entry":
+                item["source_qa_id"] = row[4]
+        out.append(item)
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -4591,13 +4656,51 @@ def chain_recall(query, pg=None, q_emb=None,
                 return _chain_fallback_b(query, pg, q_emb, reason="no cards for anchor", config=config, core=core, deadline=deadline)
 
             # Step 3: per-card embedding -> topic_entries top-K (QA 原文)
+            tv2_enabled = _resolve_topic_v2_mode(config)
+            tv2_superseded_qa_ids: set[int] = set()
+            is_hist_query = False
+            if tv2_enabled:
+                from .topic_v2 import (
+                    is_historical_trace_query,
+                    parse_topic_v2_header,
+                    strip_topic_v2_header,
+                )
+
+                is_hist_query = is_historical_trace_query(query)
+                anchor_meta = parse_topic_v2_header(anchor.get("raw_body") or anchor.get("content_preview") or "")
+                anchor["content_preview"] = strip_topic_v2_header(anchor.get("content_preview") or "")
+                if anchor_meta:
+                    for _sq in anchor_meta.get("superseded_qas") or []:
+                        try:
+                            tv2_superseded_qa_ids.add(int(_sq))
+                        except (TypeError, ValueError):
+                            pass
+
+                fresh_cards = []
+                legacy_cards = []
+                for card in card_hits:
+                    c_meta = parse_topic_v2_header(card.get("raw_body") or card.get("content_preview") or "")
+                    card["content_preview"] = strip_topic_v2_header(card.get("content_preview") or "")
+                    if c_meta and int(c_meta.get("v") or 0) == 2:
+                        fresh_cards.append(card)
+                        for _sq in c_meta.get("superseded_qas") or []:
+                            try:
+                                tv2_superseded_qa_ids.add(int(_sq))
+                            except (TypeError, ValueError):
+                                pass
+                    else:
+                        legacy_cards.append(card)
+                if not is_hist_query and fresh_cards and legacy_cards:
+                    card_hits = fresh_cards + legacy_cards
+
             traces = {}
+            exclude_qas = sorted(tv2_superseded_qa_ids) if (tv2_enabled and not is_hist_query and tv2_superseded_qa_ids) else None
             for card in card_hits:
                 card_emb = _get_topic_embedding(pg, card["source_id"])
                 if not card_emb:
                     continue
                 msg_hits = _chain_search_by_embedding(
-                    pg, card_emb, "topic_entries", "entry", traces_per_card
+                    pg, card_emb, "topic_entries", "entry", traces_per_card, exclude_qa_ids=exclude_qas
                 )
                 if msg_hits:
                     traces[card["source_id"]] = msg_hits

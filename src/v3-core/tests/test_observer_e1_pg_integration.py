@@ -744,12 +744,10 @@ def test_pg_full_pipeline_topic_v2_observer_e1_freshness_preserved(
     active_qa_sid = f"qa_{qa2}"
     fresh_topic_sid = f"topic_{fresh_topic_id}"
     stale_qa_sid = f"qa_{qa1}"
-    obs_note_sid = f"note:v1"
+    obs_note_sid = "note:v1"
     assert active_qa_sid in ranked_ids and fresh_topic_sid in ranked_ids
-    for active in (active_qa_sid, fresh_topic_sid):
-        if stale_qa_sid in ranked_ids:
+    # Active QA, Topic V2 dossier, and the post-evolution observation note (created AFTER qa2
+    # and carrying Event-Scheduler-V2) must all outrank the superseded raw QA.
+    for active in (active_qa_sid, fresh_topic_sid, obs_note_sid):
+        if active in ranked_ids and stale_qa_sid in ranked_ids:
             assert ranked_ids.index(active) < ranked_ids.index(stale_qa_sid), f"{active} vs {stale_qa_sid}: {ranked_ids}"
-        if obs_note_sid in ranked_ids:
-            assert ranked_ids.index(active) < ranked_ids.index(obs_note_sid), f"{active} vs {obs_note_sid}: {ranked_ids}"
-        if f"note:{note_id}" in ranked_ids:
-            assert ranked_ids.index(active) < ranked_ids.index(f"note:{note_id}"), f"{active} vs note:{note_id}: {ranked_ids}"

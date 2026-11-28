@@ -62,6 +62,7 @@ def handle_v3_topic_maintain(args: dict, **kw) -> str:
                 cfg = None
 
         eff_embed_fn = kw.get("embed_fn")
+        eff_embed_model = str(kw.get("embed_model") or "")
         if eff_embed_fn is None:
             embed_cfg = safe_embed_cfg(cfg) if cfg is not None else None
             if embed_cfg is None:
@@ -69,6 +70,7 @@ def handle_v3_topic_maintain(args: dict, **kw) -> str:
                     "success": False,
                     "error": "Topic V2 maintenance requires embedding configuration",
                 }, ensure_ascii=False)
+            eff_embed_model = str(embed_cfg.get("_fingerprint") or "")
             eff_embed_fn = (
                 lambda text: call_embedding(
                     str(text or ""), embed_cfg, policy=DURABLE_WRITE_EMBED_POLICY
@@ -101,6 +103,7 @@ def handle_v3_topic_maintain(args: dict, **kw) -> str:
             llm_fn=eff_llm_fn,
             state_dir=state_dir,
             dry_run=dry_run,
+            embed_model=eff_embed_model,
         )
         result["engine"] = "topic_v2"
         if not dry_run and int(result.get("upserted_topics") or 0) > 0:

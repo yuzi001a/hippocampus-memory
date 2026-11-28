@@ -73,6 +73,8 @@ class RecallHit:
     created_at: str = ""  # ISO datetime string for time-decay calculation
     # 2026-08-08: 全文通道 — 存储层全文完整返回, 注入时按类型给预算, 不再截 500/60/200
     content: str = ""
+    # Optional explicit QA provenance range (e.g. PG INT8RANGE from observation_notes.source_qa_range)
+    source_qa_range: Any = None
 
     def to_dict(self) -> dict:
         return {
