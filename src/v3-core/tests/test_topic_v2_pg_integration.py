@@ -1888,10 +1888,10 @@ def test_pg_pr71_r3_races_baseline_before_flush_and_concurrent_late_merge(
         c3_prompts.append(messages[-1]["content"])
         return json.dumps(
             {
-                "action": "attach",
+                "action": "create",
                 "topic_id": "",
-                "title": "分析库选型",
-                "summary": "分析库采用 DuckDB-V1，计算引擎补充采用 Polars-V1。",
+                "title": "计算引擎选型",
+                "summary": "计算引擎补充采用 Polars-V1。",
                 "keywords": ["DuckDB-V1", "Polars-V1"],
                 "update_type": "add",
                 "claim_text": "计算引擎补充采用 Polars-V1。",
