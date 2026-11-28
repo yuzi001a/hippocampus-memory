@@ -11,7 +11,7 @@
 
 复用点 (按 phase2_task_spec.md):
 1. compression_trigger.maybe_compress() 骨架 — debounce/import_lock/alive-check/PG DSN
-2. topic_refine.TopicMatcher.match(text) — 候选主题召回
+2. TopicMatcher.match(text) — 候选主题召回
 3. compression_engine._get_runtime_config() + _resolve_llm_api_key() — 配置 + key
 4. phase0_m3_length_test.py call_m3() + _strip_think + _parse_json_lenient
 
@@ -385,7 +385,7 @@ _DEFAULT_OBSERVER_CONFIG: dict[str, Any] = {
     "base_url": None,             # None → 用 llm.base_url
     "temperature": 0.3,           # 与 phase0 一致
     "candidate_top_k": 5,         # TopicMatcher 返回前 N
-    "candidate_threshold": 0.40,  # MATCH_LOW = 0.40 (topic_refine.py)
+    "candidate_threshold": 0.40,  # legacy MATCH_LOW threshold
     # ---- v4 当轮快照 + 事件时间窗口 ----
     "prompt_note_min_chars": 1500,    # 兜底下限, 真正用软引导
     "prompt_note_max_chars": 8000,    # 正常目标/自动时间拆批触发线, 不是原子 QA 死亡线

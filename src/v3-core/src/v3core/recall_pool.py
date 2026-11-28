@@ -2702,126 +2702,127 @@ def recall_pool(
                                 _topic_snapshot_main: list = []
                                 _topic_snapshot_rare: list[list] = [[] for _ in _terms]
                                 _topic_version = None
-                                if _snapshot_eligible and _use_combined_qa and _is_real_pg_cursor(_pg_cur):
-                                    try:
-                                        _pg_cur.execute(
-                                            "SELECT COUNT(*), "
-                                            "       COALESCE(MAX(id), 0), "
-                                            "       COALESCE(MAX(updated_at), 'epoch') "
-                                            "FROM topics WHERE status='active'"
-                                        )
-                                        _tv_row = _pg_cur.fetchone() or (0, 0, "epoch")
-                                        _topic_version = (
-                                            int(_tv_row[0] or 0),
-                                            int(_tv_row[1] or 0),
-                                            str(_tv_row[2] or "epoch"),
-                                        )
-                                    except PrefetchDeadlineExceeded:
-                                        raise
-                                    except Exception:
-                                        _topic_version = None
+                                if include_topic:
+                                    if _snapshot_eligible and _use_combined_qa and _is_real_pg_cursor(_pg_cur):
                                         try:
-                                            _pg_conn.rollback()
-                                        except Exception:
-                                            pass
-                                    if _topic_version is not None:
-                                        try:
-                                            _topic_snapshot_cache = _topic_snapshot_load(
-                                                pg, _pg_pool, _pg_cur,
-                                                _topic_version, config,
+                                            _pg_cur.execute(
+                                                "SELECT COUNT(*), "
+                                                "       COALESCE(MAX(id), 0), "
+                                                "       COALESCE(MAX(updated_at), 'epoch') "
+                                                "FROM topics WHERE status='active'"
+                                            )
+                                            _tv_row = _pg_cur.fetchone() or (0, 0, "epoch")
+                                            _topic_version = (
+                                                int(_tv_row[0] or 0),
+                                                int(_tv_row[1] or 0),
+                                                str(_tv_row[2] or "epoch"),
                                             )
                                         except PrefetchDeadlineExceeded:
                                             raise
                                         except Exception:
-                                            _topic_snapshot_cache = None
+                                            _topic_version = None
                                             try:
                                                 _pg_conn.rollback()
                                             except Exception:
                                                 pass
-                                        if _topic_snapshot_cache is not None:
+                                        if _topic_version is not None:
                                             try:
-                                                (
-                                                    _topic_snapshot_main,
-                                                    _topic_snapshot_rare,
-                                                ) = _topic_snapshot_lookup(
-                                                    _topic_snapshot_cache,
-                                                    _terms,
-                                                    limit=max(rerank_top_n or 0, limit * 3),
-                                                )
-                                            except Exception:
-                                                _topic_snapshot_cache = None
-
-                                if _topic_snapshot_cache is not None:
-                                    # Snapshot served the keyword path. Append in
-                                    # the same order the SQL path would have used:
-                                    # main OR rows first, then rare-batch rows in
-                                    # original term order, de-duplicated by topic_id.
-                                    for _r in _topic_snapshot_main:
-                                        _kw_topics.append(_r)
-                                    for _et_list in _topic_snapshot_rare:
-                                        _existing_t = {r[0] for r in _kw_topics}
-                                        for _et in _et_list:
-                                            if _et[0] not in _existing_t:
-                                                _existing_t.add(_et[0])
-                                                _kw_topics.append(_et)
-                                else:
-                                    _wheres = []
-                                    _params = []
-                                    for _t in _terms:
-                                        # 2026-08-09: keywords 列加入匹配 — 提炼时生成的原词/同义词/实体
-                                        # (t_eaca3584 keywords 含'瑞典', query 'sweden' 可命中; 原文改写丢词由 keywords 补回)
-                                        _wheres.append("(title ILIKE %s OR body ILIKE %s OR summary ILIKE %s OR EXISTS (SELECT 1 FROM unnest(keywords) kw WHERE kw ILIKE %s))")
-                                        _params.extend([f'%{_t}%', f'%{_t}%', f'%{_t}%', f'%{_t}%'])
-                                    _params.append(max(rerank_top_n or 0, limit * 3))
-                                    _pg_cur.execute(
-                                        f"SELECT topic_id, title, summary, body FROM topics "
-                                        f"WHERE status='active' AND ({' OR '.join(_wheres)}) LIMIT %s",
-                                        _params
-                                    )
-                                    for _r in _pg_cur.fetchall():
-                                        _kw_topics.append(_r)
-
-                                    # 2026-08-09: 主题卡稀有词补充查询 — OR+LIKE+LIMIT 让泛词(research)
-                                    # 命中一堆卡, 精确实体(adoption)卡排 30 名外被截断 (idx 3 案例)
-                                    # 主题卡库 ≤3 张含该词 = 稀有 → 单独查保证进候选
-                                    try:
-                                        _topic_rare_terms = [t for t in _terms if len(t) > 3]
-                                        _topic_rare_batch = None
-                                        if _use_combined_qa and _is_real_pg_cursor(_pg_cur):
-                                            try:
-                                                _topic_rare_batch = _combined_topic_rare_keyword_lookup(
-                                                    _pg_cur,
-                                                    _topic_rare_terms,
-                                                    max(rerank_top_n or 0, limit * 3),
+                                                _topic_snapshot_cache = _topic_snapshot_load(
+                                                    pg, _pg_pool, _pg_cur,
+                                                    _topic_version, config,
                                                 )
                                             except PrefetchDeadlineExceeded:
                                                 raise
                                             except Exception:
+                                                _topic_snapshot_cache = None
                                                 try:
                                                     _pg_conn.rollback()
                                                 except Exception:
                                                     pass
-                                        if _topic_rare_batch is not None:
+                                            if _topic_snapshot_cache is not None:
+                                                try:
+                                                    (
+                                                        _topic_snapshot_main,
+                                                        _topic_snapshot_rare,
+                                                    ) = _topic_snapshot_lookup(
+                                                        _topic_snapshot_cache,
+                                                        _terms,
+                                                        limit=max(rerank_top_n or 0, limit * 3),
+                                                    )
+                                                except Exception:
+                                                    _topic_snapshot_cache = None
+
+                                    if _topic_snapshot_cache is not None:
+                                        # Snapshot served the keyword path. Append in
+                                        # the same order the SQL path would have used:
+                                        # main OR rows first, then rare-batch rows in
+                                        # original term order, de-duplicated by topic_id.
+                                        for _r in _topic_snapshot_main:
+                                            _kw_topics.append(_r)
+                                        for _et_list in _topic_snapshot_rare:
                                             _existing_t = {r[0] for r in _kw_topics}
-                                            for _et in _topic_rare_batch:
+                                            for _et in _et_list:
                                                 if _et[0] not in _existing_t:
                                                     _existing_t.add(_et[0])
                                                     _kw_topics.append(_et)
-                                        for _rt in ([] if _topic_rare_batch is not None else _topic_rare_terms):
-                                            _pg_cur.execute(
-                                                "SELECT topic_id, title, summary, body FROM topics "
-                                                "WHERE status='active' AND (title ILIKE %s OR body ILIKE %s OR summary ILIKE %s OR EXISTS (SELECT 1 FROM unnest(keywords) kw WHERE kw ILIKE %s)) LIMIT %s",
-                                                [f'%{_rt}%', f'%{_rt}%', f'%{_rt}%', f'%{_rt}%', max(rerank_top_n or 0, limit * 3)]
-                                            )
-                                            _extra_t = _pg_cur.fetchall()
-                                            _existing_t = {r[0] for r in _kw_topics}
-                                            for _et in _extra_t:
-                                                if _et[0] not in _existing_t:
-                                                    _kw_topics.append(_et)
-                                    except PrefetchDeadlineExceeded:
-                                        raise
-                                    except Exception:
-                                        pass
+                                    else:
+                                        _wheres = []
+                                        _params = []
+                                        for _t in _terms:
+                                            # 2026-08-09: keywords 列加入匹配 — 提炼时生成的原词/同义词/实体
+                                            # (t_eaca3584 keywords 含'瑞典', query 'sweden' 可命中; 原文改写丢词由 keywords 补回)
+                                            _wheres.append("(title ILIKE %s OR body ILIKE %s OR summary ILIKE %s OR EXISTS (SELECT 1 FROM unnest(keywords) kw WHERE kw ILIKE %s))")
+                                            _params.extend([f'%{_t}%', f'%{_t}%', f'%{_t}%', f'%{_t}%'])
+                                        _params.append(max(rerank_top_n or 0, limit * 3))
+                                        _pg_cur.execute(
+                                            f"SELECT topic_id, title, summary, body FROM topics "
+                                            f"WHERE status='active' AND ({' OR '.join(_wheres)}) LIMIT %s",
+                                            _params
+                                        )
+                                        for _r in _pg_cur.fetchall():
+                                            _kw_topics.append(_r)
+
+                                        # 2026-08-09: 主题卡稀有词补充查询 — OR+LIKE+LIMIT 让泛词(research)
+                                        # 命中一堆卡, 精确实体(adoption)卡排 30 名外被截断 (idx 3 案例)
+                                        # 主题卡库 ≤3 张含该词 = 稀有 → 单独查保证进候选
+                                        try:
+                                            _topic_rare_terms = [t for t in _terms if len(t) > 3]
+                                            _topic_rare_batch = None
+                                            if _use_combined_qa and _is_real_pg_cursor(_pg_cur):
+                                                try:
+                                                    _topic_rare_batch = _combined_topic_rare_keyword_lookup(
+                                                        _pg_cur,
+                                                        _topic_rare_terms,
+                                                        max(rerank_top_n or 0, limit * 3),
+                                                    )
+                                                except PrefetchDeadlineExceeded:
+                                                    raise
+                                                except Exception:
+                                                    try:
+                                                        _pg_conn.rollback()
+                                                    except Exception:
+                                                        pass
+                                            if _topic_rare_batch is not None:
+                                                _existing_t = {r[0] for r in _kw_topics}
+                                                for _et in _topic_rare_batch:
+                                                    if _et[0] not in _existing_t:
+                                                        _existing_t.add(_et[0])
+                                                        _kw_topics.append(_et)
+                                            for _rt in ([] if _topic_rare_batch is not None else _topic_rare_terms):
+                                                _pg_cur.execute(
+                                                    "SELECT topic_id, title, summary, body FROM topics "
+                                                    "WHERE status='active' AND (title ILIKE %s OR body ILIKE %s OR summary ILIKE %s OR EXISTS (SELECT 1 FROM unnest(keywords) kw WHERE kw ILIKE %s)) LIMIT %s",
+                                                    [f'%{_rt}%', f'%{_rt}%', f'%{_rt}%', f'%{_rt}%', max(rerank_top_n or 0, limit * 3)]
+                                                )
+                                                _extra_t = _pg_cur.fetchall()
+                                                _existing_t = {r[0] for r in _kw_topics}
+                                                for _et in _extra_t:
+                                                    if _et[0] not in _existing_t:
+                                                        _kw_topics.append(_et)
+                                        except PrefetchDeadlineExceeded:
+                                            raise
+                                        except Exception:
+                                            pass
 
                                 # 2026-08-09: QA 原文维 (用户: 原文精确匹配就该兜住) —
                                 # qa_pairs 问题+答案 ILIKE, 命中返回原文 (含时间戳)
@@ -2976,7 +2977,7 @@ def recall_pool(
                     except Exception:
                         pass
                     logger.debug("PG keyword search failed: %s", str(_e)[:100])
-            elif _terms:
+            elif _terms and include_topic:
                 # SQLite 兜底
                 import os as _os
                 _kw_db = str(_resolve_data_dir(config) / 'v3_topic_full.db')
@@ -3318,48 +3319,49 @@ def recall_pool(
                 _am_vec_ids_for_probe = []
             # G6B Slice D (D2): the explicit lane now always finishes below,
             # outside the ``if include_card_vector:`` branch.
-            _emb_cfg = _extract_embed(config) if config is not None else None
-            # Runtime cache when a real runtime-backed Core is passed; legacy
-            # core._topic_recall and core=None temporary fallback unchanged.
-            if deadline is None:
-                _tr = _resolve_topic_recall(core, _emb_cfg, pg)
-            else:
-                _tr = _resolve_topic_recall(core, _emb_cfg, pg, deadline=deadline)
-            _vec_mult = int((config.get("recall") or {}).get("vector_top_mult", 4))
-            # 2026-08-17: 把上游已算好的 q_emb 透传给 TopicRecall.match,
-            # 避免长 query (>1000 字符) 因 cache key 与上游 call_embedding 不同
-            # 而再次调 provider embedding (实测多耗 0.5-1.9s). q_emb 缺失时
-            # match 仍走旧路径 (内部 call_embedding(query[:1000], ...)).
-            _tm = _tr.match(
-                query,
-                threshold=0.4,
-                top_k=max(rerank_top_n or 0, limit * _vec_mult),
-                query_embedding=q_emb,
-                deadline=deadline,
-            )
-            for _sim, _t in _tm:
-                _tid = _t.get('id')
-                if _tid is None:
-                    continue
-                _sid = f"topic_{_tid}"
-                vec_ids.add(_sid)
-                if _sid in hits:
-                    if _sim > hits[_sid].cosine:
-                        hits[_sid].cosine = float(_sim)
+            if include_topic:
+                _emb_cfg = _extract_embed(config) if config is not None else None
+                # Runtime cache when a real runtime-backed Core is passed; legacy
+                # core._topic_recall and core=None temporary fallback unchanged.
+                if deadline is None:
+                    _tr = _resolve_topic_recall(core, _emb_cfg, pg)
                 else:
-                    _full = (_t.get('body', '') or _t.get('summary', ''))  # 2026-08-09: body 优先 — summary 丢细节 (Sweden 案例)
-                    hits[_sid] = RecallHit(
-                        source_id=_sid,
-                        title=_t.get('title', ''),
-                        content_preview=_full[:500],
-                        content=_full,  # 2026-08-08: 全文通道
-                        category='topic',
-                        tags=[],
-                        cosine=float(_sim),
-                        rrf_score=0.0,
-                        kind='topic',
-                        created_at='',
-                    )
+                    _tr = _resolve_topic_recall(core, _emb_cfg, pg, deadline=deadline)
+                _vec_mult = int((config.get("recall") or {}).get("vector_top_mult", 4))
+                # 2026-08-17: 把上游已算好的 q_emb 透传给 TopicRecall.match,
+                # 避免长 query (>1000 字符) 因 cache key 与上游 call_embedding 不同
+                # 而再次调 provider embedding (实测多耗 0.5-1.9s). q_emb 缺失时
+                # match 仍走旧路径 (内部 call_embedding(query[:1000], ...)).
+                _tm = _tr.match(
+                    query,
+                    threshold=0.4,
+                    top_k=max(rerank_top_n or 0, limit * _vec_mult),
+                    query_embedding=q_emb,
+                    deadline=deadline,
+                )
+                for _sim, _t in _tm:
+                    _tid = _t.get('id')
+                    if _tid is None:
+                        continue
+                    _sid = f"topic_{_tid}"
+                    vec_ids.add(_sid)
+                    if _sid in hits:
+                        if _sim > hits[_sid].cosine:
+                            hits[_sid].cosine = float(_sim)
+                    else:
+                        _full = (_t.get('body', '') or _t.get('summary', ''))  # 2026-08-09: body 优先 — summary 丢细节 (Sweden 案例)
+                        hits[_sid] = RecallHit(
+                            source_id=_sid,
+                            title=_t.get('title', ''),
+                            content_preview=_full[:500],
+                            content=_full,  # 2026-08-08: 全文通道
+                            category='topic',
+                            tags=[],
+                            cosine=float(_sim),
+                            rrf_score=0.0,
+                            kind='topic',
+                            created_at='',
+                        )
 
             # 2026-08-09: QA 原文向量检索 (措辞不同时兜底: speech vs event)
             # 关键词匹配对措辞敏感 (school event ≠ speech), 向量语义匹配兜住
@@ -4186,6 +4188,20 @@ def recall_pool(
         except Exception:
             _pre_fusion_positions = {}
 
+    # Topic V2 freshness / supersession guard (enabled by default; set false to disable).
+    if _resolve_topic_v2_mode(config):
+        try:
+            from .topic_v2 import apply_topic_v2_ranking_guard
+
+            apply_topic_v2_ranking_guard(
+                scored,
+                query=query,
+                trace=trace,
+                probe_fn=_probe,
+            )
+        except Exception as _tv2_exc:
+            logger.debug("topic_v2 ranking guard failed (skipped): %s", _safe_err(_tv2_exc)[:120])
+
     # P0-B4 deterministic-ordering: ``scored`` is built by iterating the ``hits``
     # dict (insertion-ordered, but populated from several hash-ordered lanes),
     # and the sort key was score-only — so exactly-equal fused scores used to
@@ -4373,6 +4389,18 @@ _CHAIN_ANCHOR_TOP_N = 1
 _CHAIN_CARDS_TOP_N = 5
 # Trace count -- how many raw dialogues per card
 _CHAIN_TRACES_PER_CARD = 2
+
+
+def _resolve_topic_v2_mode(config) -> bool:
+    """Resolve ``prefetch.topic_v2_mode`` flag (defaults to True)."""
+    if config is None:
+        return True
+    if isinstance(config, dict):
+        return bool((config.get("prefetch") or {}).get("topic_v2_mode", True))
+    pf = getattr(config, "prefetch", None)
+    if pf is not None:
+        return bool(getattr(pf, "topic_v2_mode", True))
+    return True
 
 
 def _resolve_half_life(config, default: int = 30) -> int:
