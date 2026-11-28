@@ -631,33 +631,35 @@ class V3Core:
         except Exception:  # noqa: BLE001
             return None
 
-    def _ensure_topic_v2_baseline(self) -> None:
+    def _ensure_topic_v2_baseline(self, pg_override: Any = None) -> bool:
         """Pin first-boot Topic V2 baseline watermark BEFORE LiveBuffer accepts new turns."""
         if getattr(self, "_topic_v2_baseline_checked", False):
-            return
+            return True
         try:
             cfg = getattr(self, "_config", None) or getattr(self, "config", None)
             if not self._is_topic_v2_enabled(cfg):
                 self._topic_v2_baseline_checked = True
-                return
+                return True
             backfill = self._is_topic_v2_backfill_enabled(cfg)
             if backfill:
                 self._topic_v2_baseline_checked = True
-                return
-            pg = getattr(self, "_pg", None)
+                return True
+            pg = pg_override
             if pg is None:
-                try:
-                    pg = self.pg
-                except Exception:
-                    pg = None
-            if pg is None:
-                return
-            if hasattr(pg, "is_connected") and callable(pg.is_connected):
-                try:
-                    if not pg.is_connected() and getattr(self, "_pg_pool", None) is None:
-                        return
-                except Exception:
-                    return
+                pg = getattr(self, "_pg", None)
+                if pg is None:
+                    try:
+                        pg = self.pg
+                    except Exception:
+                        pg = None
+                if pg is None:
+                    return False
+                if hasattr(pg, "is_connected") and callable(pg.is_connected):
+                    try:
+                        if not pg.is_connected() and getattr(self, "_pg_pool", None) is None:
+                            return False
+                    except Exception:
+                        return False
             from .config import _resolve_data_dir
             from .topic_v2 import ensure_topic_v2_baseline_watermark
 
@@ -673,8 +675,10 @@ class V3Core:
                 "backfill_enabled",
             ):
                 self._topic_v2_baseline_checked = True
+                return True
         except Exception as e:
             logger.debug("_ensure_topic_v2_baseline skipped (non-blocking): %s", _safe_err(e)[:120])
+        return bool(getattr(self, "_topic_v2_baseline_checked", False))
 
     @property
     def live_buffer(self) -> LiveBuffer:
@@ -4974,8 +4978,11 @@ class V3Core:
             with _lease_pg_store(pg) as conn:
                 if not conn:
                     return None
+                manual_tx = getattr(conn, "autocommit", None) is True
                 try:
                     with conn.cursor() as cur:
+                        if manual_tx:
+                            cur.execute("BEGIN")
                         if emb_str:
                             cur.execute(
                                 "UPDATE qa_pairs "
@@ -5014,13 +5021,17 @@ class V3Core:
                                 )
                             except Exception:
                                 pass
-                        if rowcount > 0 and qa_id:
-                            _use_sp = getattr(conn, "autocommit", None) is not True
-                            _sp_created = False
+                        cfg_v2_late = getattr(self, "_config", None) or getattr(self, "config", None)
+                        if rowcount > 0 and qa_id and self._is_topic_v2_enabled(cfg_v2_late):
+                            has_tv2_state = False
                             try:
-                                if _use_sp:
-                                    cur.execute("SAVEPOINT tv2_late_requeue")
-                                    _sp_created = True
+                                cur.execute("SELECT to_regclass('public.topic_v2_state')")
+                                trow = cur.fetchone()
+                                has_tv2_state = bool(trow and trow[0])
+                            except Exception as probe_err:
+                                if "unmodelled sql" not in str(probe_err).lower():
+                                    raise
+                            if has_tv2_state:
                                 cur.execute(
                                     "UPDATE public.topic_v2_state "
                                     "SET reprocess_qa_ids = CASE "
@@ -5028,25 +5039,30 @@ class V3Core:
                                     "        THEN reprocess_qa_ids "
                                     "    ELSE COALESCE(reprocess_qa_ids, '[]'::jsonb) || to_jsonb(%s::bigint) "
                                     "END, "
+                                    "reprocess_qa_versions = COALESCE(reprocess_qa_versions, '{}'::jsonb) || jsonb_build_object("
+                                    "    %s::text, "
+                                    "    COALESCE((reprocess_qa_versions ->> %s::text)::bigint, 0) + 1"
+                                    "), "
                                     "updated_at = NOW() "
-                                    "WHERE state_key = 'default' AND last_qa_id >= %s",
-                                    (int(qa_id), int(qa_id), int(qa_id)),
+                                    "WHERE state_key = 'default'",
+                                    (int(qa_id), int(qa_id), str(int(qa_id)), str(int(qa_id))),
                                 )
-                                if _sp_created:
-                                    cur.execute("RELEASE SAVEPOINT tv2_late_requeue")
-                            except Exception:
-                                if _sp_created:
-                                    try:
-                                        cur.execute("ROLLBACK TO SAVEPOINT tv2_late_requeue")
-                                        cur.execute("RELEASE SAVEPOINT tv2_late_requeue")
-                                    except Exception:
-                                        pass
-                    conn.commit()
+                        if manual_tx:
+                            cur.execute("COMMIT")
+                    if not manual_tx:
+                        conn.commit()
                 except Exception as e:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
+                    if manual_tx:
+                        try:
+                            with conn.cursor() as rcur:
+                                rcur.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
                     logger.warning(
                         "_late_merge_into_qa UPDATE 失败 (非阻塞): %s",
                         _safe_err(e)[:120],
@@ -5297,6 +5313,20 @@ class V3Core:
                 schema_status = self._schema_readiness(conn)
                 if schema_status is not None and schema_status.write_blocked:
                     self._log_schema_blocked(schema_status)
+                    should_ack = False
+                    return
+                if not getattr(self, "_topic_v2_baseline_checked", False):
+                    self._ensure_topic_v2_baseline(pg_override=conn)
+                cfg_v2_gate = getattr(self, "_config", None) or getattr(self, "config", None)
+                if (
+                    self._is_topic_v2_enabled(cfg_v2_gate)
+                    and not self._is_topic_v2_backfill_enabled(cfg_v2_gate)
+                    and not getattr(self, "_topic_v2_baseline_checked", False)
+                ):
+                    logger.warning(
+                        "_flush_pending_qa deferred: Topic V2 baseline watermark not initialized (q_turn=%s)",
+                        q_turn,
+                    )
                     should_ack = False
                     return
                 with conn.cursor() as cur:

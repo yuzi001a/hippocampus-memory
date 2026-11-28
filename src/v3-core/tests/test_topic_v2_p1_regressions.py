@@ -2487,3 +2487,153 @@ def test_pr71_r2_baseline_retry_after_pg_outage_and_zero_state_file(tmp_path: Pa
     saved_zero = json.loads((legacy_dir / "topic_v2_state.json").read_text(encoding="utf-8"))
     assert saved_zero["baseline_initialized"] is True
     assert saved_zero["last_qa_id"] == 3
+
+
+def test_pr71_r3_flush_defers_qa_when_baseline_uninitialized_and_late_merge_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """P1-1 & P1-2 unit regressions:
+    1) _flush_pending_qa must defer QA insertion (fail-closed) when Topic V2 baseline
+       watermark cannot be initialized and backfill_history=False.
+    2) _late_merge_into_qa must roll back the QA answer update and return None (not
+       'completed_late' / no remember()) if enqueueing topic_v2_state fails.
+    """
+    from types import SimpleNamespace
+    import v3core.topic_v2 as tv2_mod
+    from v3core import V3Core
+
+    data_dir = tmp_path / "r3_unit"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._fenced = False
+    core._pg_pool = None
+    core._live_buffer = None
+    core._topic_v2_baseline_checked = False
+    core._schema_readiness = lambda conn: None
+    core._is_core_fenced = lambda: False
+    core._qa_source_id = lambda s, t, m, host="": f"{s}:{t}:{m}"
+
+    inserted_qa_sqls: list[str] = []
+
+    class _FlushCur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "insert into qa_pairs" in q:
+                inserted_qa_sqls.append(q)
+
+        def fetchone(self):
+            return None
+
+    class _FlushConn:
+        def cursor(self):
+            return _FlushCur()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _FlushPg:
+        def is_connected(self):
+            return True
+
+        def _connect(self):
+            return _FlushConn()
+
+    core._pg = _FlushPg()
+    monkeypatch.setattr(
+        tv2_mod,
+        "ensure_topic_v2_baseline_watermark",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("baseline failed")),
+    )
+
+    core._flush_pending_qa(
+        "sess_r3_unit",
+        {"q": "测试问题", "a": "测试回答", "q_turn": "1", "q_msg_id": "m1"},
+    )
+    assert inserted_qa_sqls == [], "QA insert must be deferred when baseline init fails"
+    assert core._topic_v2_baseline_checked is False
+
+    # 2. _late_merge_into_qa atomic rollback when topic_v2_state UPDATE fails
+    rollback_called = {"n": 0}
+    remember_called = {"n": 0}
+
+    class _FailRequeueCur:
+        def __init__(self):
+            self._rows = []
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if q.startswith("update qa_pairs"):
+                self.rowcount = 1
+                self._rows = []
+            elif "to_regclass('public.topic_v2_state')" in q:
+                self.rowcount = 0
+                self._rows = [("public.topic_v2_state",)]
+            elif "update public.topic_v2_state" in q:
+                raise RuntimeError("simulated deadlock on topic_v2_state")
+            else:
+                self.rowcount = 0
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _FailRequeueConn:
+        autocommit = False
+
+        def cursor(self):
+            return _FailRequeueCur()
+
+        def commit(self):
+            raise AssertionError("commit must not run when requeue failed")
+
+        def rollback(self):
+            rollback_called["n"] += 1
+
+        def close(self):
+            pass
+
+    class _FailRequeuePg:
+        def _connect(self):
+            return _FailRequeueConn()
+
+    core._pg = _FailRequeuePg()
+    res_late = core._late_merge_into_qa(
+        pg=core._pg,
+        qa_row=(99, "", [], "问题 99"),
+        msg_id="msg_99",
+        content="迟到回答 99",
+        remember=lambda: remember_called.__setitem__("n", remember_called["n"] + 1),
+    )
+    assert res_late is None
+    assert rollback_called["n"] >= 1
+    assert remember_called["n"] == 0
