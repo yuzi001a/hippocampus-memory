@@ -2722,14 +2722,17 @@ def recall_pool(
                                         try:
                                             _pg_cur.execute(
                                                 "SELECT COUNT(*), "
-                                                "       COALESCE(MAX(id), 0), "
+                                                "       COALESCE(MAX(topic_id), ''), "
                                                 "       COALESCE(MAX(updated_at), 'epoch') "
                                                 "FROM topics WHERE status='active'"
                                             )
-                                            _tv_row = _pg_cur.fetchone() or (0, 0, "epoch")
+                                            _tv_row = _pg_cur.fetchone() or (0, "", "epoch")
+                                            # topics.topic_id 是文本主键（如 t_1b123592），
+                                            # 不是自增整数：版本三元组的中段必须保持 str，
+                                            # 强转 int 会在第一行就炸掉整条快照路径。
                                             _topic_version = (
                                                 int(_tv_row[0] or 0),
-                                                int(_tv_row[1] or 0),
+                                                str(_tv_row[1] or ""),
                                                 str(_tv_row[2] or "epoch"),
                                             )
                                         except PrefetchDeadlineExceeded:

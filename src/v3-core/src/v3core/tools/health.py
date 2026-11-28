@@ -124,17 +124,110 @@ def _classify_failed_segments(segments, cursor) -> dict:
     return {"total": total, "active": active, "malformed": malformed, "first": first, "container_malformed": container_malformed}
 
 
+class _BorrowedPgLease:
+    """``PgLease``-shaped wrapper over a connection the caller already owns.
+
+    The lifetime of the underlying connection belongs to the caller's outer
+    ``pg.lease()`` block, so releasing this wrapper must never close it.
+    """
+
+    __slots__ = ("connection",)
+
+    def __init__(self, conn: Any) -> None:
+        self.connection = conn
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> "_BorrowedPgLease":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
 class _PrefetchPgView:
     """Bounded PG view for prefetch/recall_pool compatibility in pool mode."""
 
     def __init__(self, conn: Any) -> None:
         self._connection = conn
+        # 自检用：prefetch 的 keyword 路径会吞掉 lease 异常后返回空列表，
+        # 所以"没抛异常"不能当作这条链走到了 PG 的证据。计数才作数。
+        self.lease_acquisitions = 0
 
     def is_connected(self) -> bool:
         return self._connection is not None and not getattr(self._connection, "closed", False)
 
     def _connect(self) -> Any:
         return self._connection
+
+    @contextlib.contextmanager
+    def lease(self, timeout: float | None = None, *, deadline: Any = None):
+        """Hand the borrowed connection out in the shape ``_acquire_lease`` expects.
+
+        ``active_memory_store._acquire_lease`` takes ``pg.lease(timeout=...)``
+        when the store exposes no ``open_side_connection`` seam, wraps it in
+        ``_PgStoreLeaseAdapter`` and then reads ``lease.connection``. Without
+        this method that lookup raises ``AttributeError``, the keyword search
+        swallows it and returns no rows — which health used to report as
+        "working, hit_count=0".
+        """
+        self.lease_acquisitions += 1
+        yield _BorrowedPgLease(self._connection)
+
+
+def _prefetch_lease_probe(view: _PrefetchPgView) -> tuple[bool, str | None]:
+    """Prove the health view can really hand out a usable lease."""
+    try:
+        with view.lease() as lease:
+            cur = lease.connection.cursor()
+            try:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            finally:
+                cur.close()
+        return True, None
+    except Exception as e:  # pragma: no cover - exercised by the failure test
+        return False, _safe_err(e)[:200]
+
+
+def _prefetch_self_check(pg: Any, pool: Any, *, pg_connected: bool) -> dict:
+    """Run prefetch once and report honestly whether it ever reached PG.
+
+    ``prefetch`` swallows the keyword-path lease failure, so a bare
+    ``working: True`` is a false positive: a broken view reported success with
+    ``hit_count=0`` forever. Two independent signals now gate "working":
+    the number of leases the real prefetch took, and — when that is zero — an
+    explicit probe of the lease seam.
+    """
+    from ..prefetch import prefetch
+
+    view = None
+    if pool is not None and pg is not None:
+        if pg_connected:
+            with pg.lease() as pf_conn:
+                view = _PrefetchPgView(pf_conn)
+                hits = prefetch("health check", limit=1, pg=view)
+                leases = int(getattr(view, "lease_acquisitions", 0) or 0)
+        else:
+            hits = prefetch("health check", limit=1, pg=None)
+            leases = None
+    else:
+        pg_conn = pg if pg_connected else None
+        hits = prefetch("health check", limit=1, pg=pg_conn)
+        leases = None
+
+    out: dict = {"working": True, "hit_count": len(hits)}
+    if view is not None:
+        out["leases_during_prefetch"] = leases
+        if leases == 0:
+            ok, err = _prefetch_lease_probe(view)
+            out["lease_probe"] = {"ok": ok}
+            if not ok:
+                out["lease_probe"]["error"] = err
+                out["working"] = False
+                out["error"] = "prefetch lease probe failed: " + str(err)
+    return out
 
 
 def _read_observer_state(cfg: dict) -> dict:
@@ -422,20 +515,13 @@ def handle_v3_health(args: dict, **kw) -> str:
     except Exception as e:
         result["checks"].setdefault("embed", {})["reachable"] = False
         result["checks"]["embed"]["error"] = _safe_err(e)[:200]
-    # 6. Prefetch
+    # 6. Prefetch（自检必须是真自检：keyword 路径吞掉 lease 异常后返回空列表，
+    #    旧写法照样报 working=True，hit_count 恒为 0 —— 验收假阳性）
     try:
-        from ..prefetch import prefetch
-        if pool is not None and pg is not None:
-            if result["checks"].get("pg", {}).get("connected"):
-                with pg.lease() as pf_conn:
-                    pg_view = _PrefetchPgView(pf_conn)
-                    hits = prefetch("health check", limit=1, pg=pg_view)
-            else:
-                hits = prefetch("health check", limit=1, pg=None)
-        else:
-            pg_conn = pg if result["checks"].get("pg", {}).get("connected") else None
-            hits = prefetch("health check", limit=1, pg=pg_conn)
-        result["checks"]["prefetch"] = {"working": True, "hit_count": len(hits)}
+        result["checks"]["prefetch"] = _prefetch_self_check(
+            pg, pool,
+            pg_connected=bool(result["checks"].get("pg", {}).get("connected")),
+        )
     except Exception as e:
         result["checks"]["prefetch"] = {"working": False, "error": _safe_err(e)[:200]}
     # 7. 一致性（旧 b/ 仅观测信息）
