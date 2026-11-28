@@ -543,6 +543,7 @@ def test_pg_v3core_live_flush_and_topic_maintain_tool(
 
     core = v3core.V3Core.__new__(v3core.V3Core)
     core._config = from_legacy_dict({"basePath": str(tmp_path)})
+    core._config.prefetch.topic_v2_backfill_history = True  # type: ignore[attr-defined]
     core._pg = pg_store
     invalidations = []
     monkeypatch.setattr(core, "_notify_topic_recall_invalidation", lambda: invalidations.append(1))
