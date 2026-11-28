@@ -162,6 +162,51 @@ def _default_base_url() -> str:
     return DEFAULT_LLM_BASE_URL
 
 
+_GATEWAY_DEFAULT_BASE_URLS: dict[str, str] = {
+    "deepseek": "https://api.deepseek.com/v1",
+    "siliconflow": "https://api.siliconflow.cn/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "moonshot": "https://api.moonshot.cn/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "ollama": "http://127.0.0.1:11434/v1",
+}
+
+
+def _gateway_default_base_url(prov_low: str) -> str:
+    if prov_low == "minimax-cn":
+        return _default_base_url()
+    return _GATEWAY_DEFAULT_BASE_URLS.get(prov_low, "")
+
+_PROVIDER_ENV_KEY_MAP: dict[str, tuple[str, ...]] = {
+    "anthropic": ("V3_LLM_API_KEY", "ANTHROPIC_API_KEY"),
+    "deepseek": ("V3_LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"),
+    "siliconflow": ("V3_LLM_API_KEY", "SILICONFLOW_API_KEY", "OPENAI_API_KEY"),
+    "openrouter": ("V3_LLM_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"),
+    "openai": ("V3_LLM_API_KEY", "OPENAI_API_KEY"),
+    "openai-compat": ("V3_LLM_API_KEY", "OPENAI_API_KEY"),
+}
+
+
+def _resolve_client_api_key(llm_cfg: dict, provider: str) -> str:
+    direct = str(llm_cfg.get("api_key") or llm_cfg.get("apiKey") or "").strip()
+    if direct:
+        return direct
+    prov = (provider or "").strip().lower()
+    env_candidates = _PROVIDER_ENV_KEY_MAP.get(
+        prov,
+        ("V3_LLM_API_KEY", "MINIMAX_CN_API_KEY", "MINIMAX_API_KEY", "OPENAI_API_KEY"),
+    )
+    for env_name in env_candidates:
+        val = os.environ.get(env_name, "").strip()
+        if val:
+            return val
+    if prov == "ollama":
+        return "ollama"
+    return ""
+
+
 class LLMClient:
     """统一 LLM 客户端"""
 
@@ -192,11 +237,7 @@ class LLMClient:
             self._max_tokens = int(llm_cfg.get("max_tokens") or 131072)
         except (TypeError, ValueError):
             self._max_tokens = 131072
-        self.api_key = (
-            llm_cfg.get("api_key", "")
-            or os.environ.get("MINIMAX_CN_API_KEY", "")
-            or os.environ.get("MINIMAX_API_KEY", "")
-        )
+        self.api_key = _resolve_client_api_key(llm_cfg, self.provider)
         # 自定义端点（支持 config.yaml 中 llm.base_url）— 空 = 按 provider 用官方默认
         self.base_url = llm_cfg.get("base_url", "") or ""
         # 提取代理: 优先 llm.proxy, 回退 storage.{embed,rerank}.proxy, 再回退 env
@@ -318,11 +359,16 @@ class LLMClient:
             raise
     
     def _profile_routed(self) -> bool:
-        """是否走通道画像路由（OpenCode 家族，或在 providers: 段显式声明的通道）。"""
+        """Route via llm_gateway for OpenCode, declared providers:, standard gateway vendors, or custom base_url."""
         if self._opencode_family():
             return True
-        raw_cfg = self._raw_config
         prov = str(self.provider or "").strip()
+        prov_low = prov.lower()
+        if prov_low in _GATEWAY_DEFAULT_BASE_URLS or prov_low in ("minimax-cn", "openai-compat"):
+            return True
+        if self.base_url and prov_low not in ("minimax", "openai"):
+            return True
+        raw_cfg = self._raw_config
         if not prov or raw_cfg is None:
             return False
         from collections.abc import Mapping as _Mapping
@@ -342,6 +388,47 @@ class LLMClient:
             return True
         return providers_opencode.family_of(raw, self.base_url) is not None
 
+    def _resolve_gateway_profile(self, cfg: Any, model: str) -> Any:
+        from collections.abc import Mapping as _Mapping
+        from . import providers
+
+        prov = str(self.provider or "").strip()
+        prov_low = prov.lower()
+        raw_provs = (
+            cfg.get("providers") if isinstance(cfg, _Mapping) else getattr(cfg, "providers", None)
+        ) if cfg is not None else None
+        is_declared = isinstance(raw_provs, _Mapping) and prov in raw_provs
+        eff_base_url = (self.base_url or _gateway_default_base_url(prov_low)).strip()
+
+        if is_declared or self._opencode_family() or prov_low == "minimax-cn":
+            return providers.resolve_profile(
+                model,
+                cfg,
+                api_key=self.api_key,
+                base_url=eff_base_url,
+                provider=prov,
+            )
+        if prov_low == "anthropic":
+            return providers.ProviderProfile(
+                name="anthropic",
+                api_mode=providers.API_ANTHROPIC,
+                base_url=eff_base_url or _gateway_default_base_url("anthropic"),
+                max_tokens_field="max_tokens",
+                api_key_header="x-api-key",
+                api_key_prefix="",
+                anthropic_version="2023-06-01",
+                supports=frozenset({"temperature"}),
+            )
+        if eff_base_url:
+            return providers.ProviderProfile(
+                name=f"{prov_low or 'custom'}(openai-compat)",
+                api_mode=providers.API_CHAT,
+                base_url=eff_base_url,
+                max_tokens_field="max_tokens",
+                supports=frozenset({"temperature", "response_format"}),
+            )
+        return None
+
     def _chat_via_profile(self, system: str, messages: list[dict], temperature: float,
                           max_output_tokens: int | None = None) -> str:
         """按通道画像发请求：统一委托给 ``v3core.llm_gateway.invoke``。"""
@@ -349,6 +436,8 @@ class LLMClient:
 
         cfg = self._raw_config
         model = str(self.model or "")
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
         budget = self._max_tokens if max_output_tokens is None else max_output_tokens
         effort = (
             self._resolved_reasoning_effort()
@@ -360,6 +449,8 @@ class LLMClient:
             if (not getattr(self, "_thinking", True) and self._thinking_mode == "auto")
             else self._thinking_mode
         )
+        profile = self._resolve_gateway_profile(cfg, model)
+        eff_base_url = profile.base_url if profile is not None else self.base_url
         res = _gw_invoke(
             ModelRequest(
                 model=model,
@@ -372,14 +463,16 @@ class LLMClient:
                 explicit_effort=effort,
                 force_none_when_disabled=True,
                 api_key=self.api_key,
-                base_url=self.base_url,
+                base_url=eff_base_url,
                 proxy=getattr(self, "_proxy", None) or None,
                 timeout=self._timeout,
                 retry_attempts=_MAX_RETRIES,
                 retry_backoff_schedule=tuple(_RETRY_BACKOFF),
                 allow_reasoning_fallback_text=True,
                 cfg=cfg,
+                profile=profile,
             ),
+            post_fn=requests.post,
             sleep_fn=time.sleep,
         )
         if not res.ok:

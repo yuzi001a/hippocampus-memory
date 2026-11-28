@@ -288,7 +288,12 @@ jobs:
               tests/test_topic_v2.py \
               tests/test_topic_ablation_bench.py \
               tests/test_embedding_policy_guard.py \
-              tests/test_schema_packaged_parity.py
+              tests/test_schema_packaged_parity.py \
+              tests/test_observer_e1_decoupling_and_gateway.py \
+              tests/test_e1_output_budget.py \
+              tests/test_e1_identity_length_retry.py \
+              tests/test_e1_generated_context_contract.py \
+              tests/test_e1_identity_block_boundary.py
 
       - name: focused-tests-g5b-evaluator
         working-directory: src/v3-core
@@ -440,4 +445,5 @@ jobs:
           PYTHONPATH=src \
             python -m pytest -v --no-header \
               -p no:cacheprovider \
-              tests/test_topic_v2_pg_integration.py
+              tests/test_topic_v2_pg_integration.py \
+              tests/test_observer_e1_pg_integration.py

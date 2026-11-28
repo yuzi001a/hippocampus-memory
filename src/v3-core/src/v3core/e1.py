@@ -236,13 +236,51 @@ def _extract_e1_cfg(config) -> tuple[bool, str, float]:
     """兼容 V3Config / dict. 返回 (e1_enabled, llm_api_key, confidence_threshold)."""
     if hasattr(config, "e1") and hasattr(config, "llm") and not isinstance(config, dict):
         threshold = getattr(config.e1, "confidence_threshold", 0.3)
-        return bool(config.e1.enabled), config.llm.api_key, float(threshold)
+        api_key = getattr(config.llm, "api_key", "") or getattr(config.llm, "apiKey", "")
+        return bool(config.e1.enabled), str(api_key or ""), float(threshold)
     if isinstance(config, dict):
         e1_block = config.get("e1", {}) or {}
         llm_block = config.get("llm", {}) or {}
         threshold = e1_block.get("confidence_threshold", 0.3)
-        return bool(e1_block.get("enabled", True)), llm_block.get("api_key", ""), float(threshold)
+        api_key = llm_block.get("api_key", "") or llm_block.get("apiKey", "")
+        return bool(e1_block.get("enabled", True)), str(api_key or ""), float(threshold)
     return True, "", 0.3
+
+
+def _resolve_e1_api_key(config: Any, explicit_key: str = "") -> str:
+    """Resolve provider-agnostic API key for E1 (via llm_gateway + env fallbacks)."""
+    if explicit_key and str(explicit_key).strip():
+        return str(explicit_key).strip()
+    try:
+        from .llm_gateway import resolve_simple_llm_cfg
+
+        resolved = resolve_simple_llm_cfg(config)
+        if resolved and resolved.get("api_key"):
+            return str(resolved["api_key"]).strip()
+    except Exception:
+        pass
+    for env_name in (
+        "V3_LLM_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "MINIMAX_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "SILICONFLOW_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        val = os.environ.get(env_name, "").strip()
+        if val:
+            return val
+    # Local Ollama needs no cloud key.
+    prov = ""
+    if hasattr(config, "llm") and not isinstance(config, dict) and config.llm is not None:
+        prov = str(getattr(config.llm, "provider", "") or "").strip().lower()
+    elif isinstance(config, dict):
+        prov = str((config.get("llm") or {}).get("provider") or "").strip().lower()
+    if prov == "ollama":
+        return "ollama"
+    return ""
 
 
 def _read_card_confidence(card_path: Path, store: DeepStore) -> float:
@@ -446,8 +484,7 @@ def synthesize_yin(
     if not e1_enabled:
         return "E1 已禁用 (config.yaml e1.enabled=false)"
 
-    import os as _e1_os
-    _e1_key = llm_api_key or _e1_os.environ.get("MINIMAX_CN_API_KEY", "") or _e1_os.environ.get("MINIMAX_API_KEY", "")
+    _e1_key = _resolve_e1_api_key(cfg, llm_api_key)
     if not _e1_key:
         return "E1 跳过: LLM api_key 未配置"
 
@@ -483,27 +520,19 @@ def synthesize_yin(
             except Exception:
                 pass
 
-    # ── 2026-08-06 Step 3a: 雷达候选 → LLM 合并判断 → merge（先整理再读卡）──
-    # 失败不阻塞 E1 主流程（雷达/LLM 任何一步挂了都跳过合并, 继续生成印）
-    # on_topics_commit fires only after the early PG lease/connection is closed.
-    merged = False
+    # ── Read-only topic duplicate diagnostics (Topic V2 owns public.topics writes) ──
+    # Retained strictly read-only for observability; E1 never mutates topics/topic_entries.
+    _ = on_topics_commit
     try:
         _pg_early = _get_cfg_pg_conn_compat(cfg, pool)
         if _pg_early is not None:
             try:
                 from .topic_radar import radar_scan
-                from .topic_store import TopicStore
                 _radar = radar_scan(_pg_early, max_dups=20)
                 if _radar["duplicates"]:
-                    _store = TopicStore()
-                    _m, _s, _log = _merge_duplicate_topics(
-                        cfg, _store, _pg_early, _radar["duplicates"]
-                    )
-                    if _m:
-                        merged = True
                     logger.info(
-                        "[e1] 主题卡整理: 扫描=%d 重复候选=%d merged=%d skipped=%d\n%s",
-                        _radar["scanned"], _radar["dup_total"], _m, _s, _log[:600],
+                        "[e1] 主题卡只读巡检: 扫描=%d 相似候选=%d (写权归 Topic V2)",
+                        _radar["scanned"], _radar["dup_total"],
                     )
             finally:
                 try:
@@ -511,13 +540,7 @@ def synthesize_yin(
                 except Exception:
                     pass
     except Exception as e:
-        logger.warning("[e1] 雷达合并跳过 (不阻塞): %s", _safe_err(e)[:150])
-        merged = False
-    if merged and callable(on_topics_commit):
-        try:
-            on_topics_commit()
-        except Exception as _e_cb:
-            logger.warning("[e1] on_topics_commit 失败 (非阻塞): %s", _safe_err(_e_cb)[:150])
+        logger.debug("[e1] 主题巡检跳过 (不阻塞): %s", _safe_err(e)[:150])
 
     # ── 读 last_e1 之后的新卡片 ──
     # 首选 PG topics 表 (增量提炼新写路径); PG 失败/无数据时降级 SQLite v3_cards.db
@@ -562,9 +585,12 @@ def synthesize_yin(
                 except Exception:
                     pass
             if _pg_rows:
+                from .topic_v2 import strip_topic_v2_header
+
                 _lines = []
                 for title, body, created_at in _pg_rows:
-                    preview = (body or "")[:300].replace("\n", " ")
+                    clean_body = strip_topic_v2_header(body or "")
+                    preview = clean_body[:300].replace("\n", " ")
                     dt = (str(created_at or ""))[:10]
                     _lines.append(f"- [{dt}] {title}: {preview}")
                     category_source_ids.setdefault("topic", []).append(f"topic/{title}")
@@ -1005,8 +1031,11 @@ def synthesize_yin(
                         _sit_pg.close()
                     except Exception:
                         pass
+                from .topic_v2 import strip_topic_v2_header
+
                 for _st, _ss, _sa in _sit_rows:
-                    _sit_active_topics.append(f"- [{(_sa or '')[:10]}] {_st}: {(_ss or '')[:120]}")
+                    _clean_ss = strip_topic_v2_header(_ss or "")
+                    _sit_active_topics.append(f"- [{(_sa or '')[:10]}] {_st}: {_clean_ss[:120]}")
         except Exception as _sit_pg_e:
             logger.debug("[e1] 态势总览 PG 读取失败（用空列表兜底）: %s", str(_sit_pg_e)[:100])
 
@@ -1094,136 +1123,6 @@ def synthesize_yin(
         logger.warning("[e1] 状态更新失败 (不阻塞): %s", _safe_err(e)[:200])
 
     return f"E1 完成: {new_count} 张卡片 (过滤 {filtered_count}) → {target.name}"
-
-def merge_topic_pg(pg, source_id: str, target_id: str,
-                   new_title: str = '', new_summary: str = '', new_body: str = '') -> tuple[bool, str]:
-    """纯 PG 主题卡合并（2026-08-06 生产真值在 PG topics — SQLite 双写断链后不用）。
-
-    观察者重建后 SQLite topic_blocks 只剩 80 张（PG 688 是真值）— merge 直接操作 PG:
-    entries 迁移 → target 更新（body 拼接保留双方）→ source 清理。
-    """
-    try:
-        conn = pg._connect() if hasattr(pg, "_connect") else pg
-        if not conn:
-            return False, "PG 连接失败"
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT title, summary, body, keywords FROM topics WHERE topic_id=%s",
-                (target_id,),
-            )
-            tgt = cur.fetchone()
-            cur.execute(
-                "SELECT title, summary, body, keywords FROM topics WHERE topic_id=%s",
-                (source_id,),
-            )
-            src = cur.fetchone()
-            if not tgt:
-                return False, f"target 不存在: {target_id}"
-            if not src:
-                return False, f"source 不存在: {source_id}"
-            if source_id == target_id:
-                return False, "source == target"
-
-            # 1. entries 迁移（统计 + 更新）
-            cur.execute("SELECT count(*) FROM topic_entries WHERE topic_id=%s", (source_id,))
-            cnt = cur.fetchone()[0]
-            cur.execute(
-                "UPDATE topic_entries SET topic_id=%s WHERE topic_id=%s",
-                (target_id, source_id),
-            )
-            # 2. target 更新（body 拼接保留双方; keywords 合并; embedding 保留 target 原值）
-            body = new_body or ((tgt[2] or "") + "\n\n---\n" + (src[2] or "")).strip()
-            summary = new_summary or tgt[1] or ""
-            title = new_title or tgt[0] or ""
-            kw = []
-            try:
-                import json as _json
-                for k in (tgt[3], src[3]):
-                    if isinstance(k, str):
-                        kw.extend(_json.loads(k))
-                    elif isinstance(k, (list, tuple)):
-                        kw.extend(k)
-            except Exception:
-                pass
-            kw = list(dict.fromkeys(x for x in kw if x))  # 去重保序
-            cur.execute(
-                "UPDATE topics SET title=%s, summary=%s, body=%s, keywords=%s WHERE topic_id=%s",
-                (title, summary, body, kw, target_id),
-            )
-            # 3. source 清理（topics + entries 残留）
-            cur.execute("DELETE FROM topics WHERE topic_id=%s", (source_id,))
-            cur.execute("DELETE FROM topic_entries WHERE topic_id=%s", (source_id,))
-        conn.commit()
-        return True, f"merged {source_id} → {target_id} (entries moved: {cnt})"
-    except Exception as e:
-        return False, str(e)[:180]
-
-
-def _merge_duplicate_topics(cfg, store, pg, radar_pairs, top_n: int = 20):
-    """雷达候选 → LLM 批量判断 → merge 执行（2026-08-06 Step 3a 落地）。
-
-    输入: radar_scan(pg) 的 duplicates 前 top_n 对
-    流程: 标题对 → LLM 一次调用判断是否同一主题 → merge=true 的执行 store.merge_topic
-    返回: (merged_count, skipped_count, 日志字符串)
-    """
-    if not radar_pairs:
-        return 0, 0, "无候选"
-    pairs = radar_pairs[:top_n]
-    pair_lines = []
-    for idx, p in enumerate(pairs, 1):
-        pair_lines.append(
-            f"{idx}. A[{p['source_id']}] {p['source_title']} ||| "
-            f"B[{p['target_id']}] {p['target_title']} (cos={p['cosine']})"
-        )
-    prompt = (
-        "判断以下主题卡对是否属于同一主题（语义重复、应合并为一张卡）。\n"
-        "规则: 标题高度相似 / 同一话题的不同表述 / 同一工作不同阶段 = merge=true; "
-        "不同话题、不同侧面、需要各自保留 = merge=false。\n"
-        "只输出 JSON 数组，如 [{\"i\": 1, \"merge\": true}, {\"i\": 2, \"merge\": false}]，不要其他文字。\n\n"
-        + "\n".join(pair_lines)
-    )
-    try:
-        from .llm import LLMClient
-        client = LLMClient(cfg)
-        raw = client.chat(
-            "你是记忆主题卡整理器。判断主题卡对是否重复。",
-            [{"role": "user", "content": prompt}],
-            temperature=0.1,
-        )
-    except Exception as e:
-        return 0, 0, f"LLM 判断失败: {_safe_err(e)}"
-
-    # 容错解析 JSON
-    decisions = {}
-    try:
-        import re as _re
-        m = _re.search(r"\[[\s\S]*\]", raw or "")
-        if m:
-            arr = json.loads(m.group(0))
-            for item in arr:
-                if isinstance(item, dict) and "i" in item:
-                    decisions[int(item.get("i"))] = bool(item.get("merge"))
-    except Exception as e:
-        logger.warning("[e1] 合并判断 JSON 解析失败, 全部跳过: %s", _safe_err(e)[:120])
-        return 0, len(pairs), f"JSON 解析失败: {_safe_err(e)[:80]}"
-
-    merged, skipped = 0, 0
-    log_parts = []
-    for idx, p in enumerate(pairs, 1):
-        if decisions.get(idx):
-            ok, msg = merge_topic_pg(
-                pg, p["source_id"], p["target_id"],
-                # 结构性合并: 保留双方内容（body 拼接由 merge 内做）
-            )
-            if ok:
-                merged += 1
-                log_parts.append(f"  merged: {p['source_id']} → {p['target_id']} ({p['source_title'][:20]} ⇔ {p['target_title'][:20]})")
-            else:
-                skipped += 1
-                log_parts.append(f"  merge 失败: {msg}")
-        else:
-            skipped += 1
-    return merged, skipped, "\n".join(log_parts)
 
 
 def _match_topics_by_embedding(seg_emb, top_k: int = 3, threshold: float = 0.55, pool: Any = None):
@@ -1595,7 +1494,6 @@ def compress_observer_note(
         # 不写盘, 不 commit, 不返回成功字符串.
         # 2026-08-22: prompt 走 _resolve_prompt 配置化 (prompts.e1_observer_compress
         # 可覆盖, 支持内联文本/文件路径; 用户不配 = 内置默认), 对齐 8/3 prompt 全配置化规范。
-        from .llm import LLMClient
         _compress_prompt = _cfg_prompt(cfg, "e1_observer_compress", _OBS_COMPRESS_PROMPT)
         client = LLMClient(cfg)
         # 2026-08-22 v2: 迭代压缩循环 (checkpoint 框架 + 对话形态输入 + 条数上限 prompt;
