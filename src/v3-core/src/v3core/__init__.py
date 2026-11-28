@@ -672,6 +672,7 @@ class V3Core:
                 "baseline_pinned",
                 "pg_state_exists",
                 "local_state_exists",
+                "local_state_migrated",
                 "backfill_enabled",
             ):
                 self._topic_v2_baseline_checked = True
@@ -4974,6 +4975,16 @@ class V3Core:
                     fp = ""
                     pending_long_chunks = []
 
+            cfg_v2_pre = getattr(self, "_config", None) or getattr(self, "config", None)
+            if (
+                self._is_topic_v2_enabled(cfg_v2_pre)
+                and not getattr(self, "_topic_v2_baseline_checked", False)
+            ):
+                try:
+                    self._ensure_topic_v2_baseline()
+                except Exception:
+                    pass
+
             rowcount = 0
             with _lease_pg_store(pg) as conn:
                 if not conn:
@@ -5047,6 +5058,14 @@ class V3Core:
                                     "WHERE state_key = 'default'",
                                     (int(qa_id), int(qa_id), str(int(qa_id)), str(int(qa_id))),
                                 )
+                                try:
+                                    _rq_rows = int(getattr(cur, "rowcount", 0) or 0)
+                                except Exception:
+                                    _rq_rows = 0
+                                if _rq_rows <= 0:
+                                    raise RuntimeError(
+                                        "topic_v2_state default row missing; late-merge reprocess enqueue not persisted"
+                                    )
                         if manual_tx:
                             cur.execute("COMMIT")
                     if not manual_tx:

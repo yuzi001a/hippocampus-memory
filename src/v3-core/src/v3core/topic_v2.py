@@ -2080,6 +2080,8 @@ def ensure_topic_v2_baseline_watermark(
             if conn is None:
                 return {"initialized": False, "last_qa_id": local_last_qa, "reason": "no_conn"}
             has_pg_state = False
+            migrated_local = False
+            baseline = 0
             with conn.cursor() as cur:
                 has_pg_state = _has_pg_state_table(cur)
                 if has_pg_state:
@@ -2094,21 +2096,34 @@ def ensure_topic_v2_baseline_watermark(
                     except Exception:
                         pass
                 if has_valid_local:
-                    return {"initialized": False, "last_qa_id": local_last_qa, "reason": "local_state_exists"}
+                    if has_pg_state:
+                        cur.execute(
+                            "INSERT INTO public.topic_v2_state "
+                            "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
+                            "VALUES (%s, %s, 0, '[]'::jsonb, NOW()) "
+                            "ON CONFLICT (state_key) DO NOTHING",
+                            ("default", int(local_last_qa)),
+                        )
+                        migrated_local = True
+                    else:
+                        return {"initialized": False, "last_qa_id": local_last_qa, "reason": "local_state_exists"}
 
-                baseline = _compute_safe_baseline_qa_id(
-                    cur, pending_answer_grace_s=pending_answer_grace_s, strict=has_pg_state
-                )
-                if has_pg_state:
-                    cur.execute(
-                        "INSERT INTO public.topic_v2_state "
-                        "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
-                        "VALUES (%s, %s, 0, '[]'::jsonb, NOW()) "
-                        "ON CONFLICT (state_key) DO NOTHING",
-                        ("default", int(baseline)),
+                if not migrated_local:
+                    baseline = _compute_safe_baseline_qa_id(
+                        cur, pending_answer_grace_s=pending_answer_grace_s, strict=has_pg_state
                     )
+                    if has_pg_state:
+                        cur.execute(
+                            "INSERT INTO public.topic_v2_state "
+                            "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
+                            "VALUES (%s, %s, 0, '[]'::jsonb, NOW()) "
+                            "ON CONFLICT (state_key) DO NOTHING",
+                            ("default", int(baseline)),
+                        )
             if has_pg_state and getattr(conn, "autocommit", None) is not True and callable(getattr(conn, "commit", None)):
                 conn.commit()
+            if migrated_local:
+                return {"initialized": False, "last_qa_id": int(local_last_qa), "reason": "local_state_migrated"}
         _atomic_write_json(
             state_path,
             {

@@ -2637,3 +2637,90 @@ def test_pr71_r3_flush_defers_qa_when_baseline_uninitialized_and_late_merge_roll
     assert res_late is None
     assert rollback_called["n"] >= 1
     assert remember_called["n"] == 0
+
+
+def test_pr71_r4_late_merge_zero_row_enqueue_rolls_back(tmp_path: Path):
+    """P1: _late_merge_into_qa must treat 0-row UPDATE on public.topic_v2_state as failure,
+    roll back qa_pairs answer, return None, and avoid calling remember().
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    data_dir = tmp_path / "r4_unit"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._topic_v2_baseline_checked = True
+
+    rollback_called = {"n": 0}
+    remember_called = {"n": 0}
+
+    class _ZeroRowCur:
+        def __init__(self):
+            self._rows = []
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if q.startswith("update qa_pairs"):
+                self.rowcount = 1
+                self._rows = []
+            elif "to_regclass('public.topic_v2_state')" in q:
+                self.rowcount = 0
+                self._rows = [("public.topic_v2_state",)]
+            elif "update public.topic_v2_state" in q:
+                self.rowcount = 0
+                self._rows = []
+            else:
+                self.rowcount = 0
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _ZeroRowConn:
+        autocommit = False
+
+        def cursor(self):
+            return _ZeroRowCur()
+
+        def commit(self):
+            raise AssertionError("commit must not run when topic_v2_state updated 0 rows")
+
+        def rollback(self):
+            rollback_called["n"] += 1
+
+        def close(self):
+            pass
+
+    class _ZeroRowPg:
+        def _connect(self):
+            return _ZeroRowConn()
+
+    core._pg = _ZeroRowPg()
+    res = core._late_merge_into_qa(
+        pg=core._pg,
+        qa_row=(101, "", [], "问题 101"),
+        msg_id="msg_101",
+        content="迟到回答 101",
+        remember=lambda: remember_called.__setitem__("n", remember_called["n"] + 1),
+    )
+    assert res is None
+    assert rollback_called["n"] >= 1
+    assert remember_called["n"] == 0

@@ -1992,3 +1992,169 @@ def test_pg_pr71_r3_races_baseline_before_flush_and_concurrent_late_merge(
         ans_after, mev_after = cur.fetchone()
         assert "SHOULD_ROLL_BACK" not in str(ans_after)
         assert "r3_boom_msg" not in list(mev_after or [])
+
+
+def test_pg_pr71_r4_local_state_migrated_to_pg_and_late_merge_persists(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """PG16 integration test for PR #71 round-4 state migration & zero-row guard:
+    1) Local valid topic_v2_state.json exists while PG topic_v2_state table is empty:
+       _ensure_topic_v2_baseline() migrates local_last_qa into PG topic_v2_state.
+    2) Subsequent _late_merge_into_qa() on an older empty QA persists into reprocess_qa_ids
+       and consolidates into topic_claims.
+    3) If PG topic_v2_state row is missing while _topic_v2_baseline_checked is stale True,
+       0-row enqueue rolls back qa_pairs answer and returns None.
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    qa_old_empty = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r4_old_empty",
+        session_id="sess_r4",
+        turn_id=1,
+        question="分布式存储引擎选型？",
+        answer="",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r4_after",
+        session_id="sess_r4",
+        turn_id=2,
+        question="网关用什么？",
+        answer="网关采用 Kong-V3。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    data_dir = tmp_path / "r4_pg_core"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "topic_v2_state.json").write_text(
+        json.dumps({"last_qa_id": qa_after, "baseline_initialized": True}),
+        encoding="utf-8",
+    )
+
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._fenced = False
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+    core._topic_v2_worker = None
+    core._topic_v2_stop_requested = True
+    core._pg = pg_store
+
+    ok = core._ensure_topic_v2_baseline()
+    assert ok is True
+    assert core._topic_v2_baseline_checked is True
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT last_qa_id FROM public.topic_v2_state WHERE state_key = 'default'")
+        row = cur.fetchone()
+        assert row is not None and int(row[0]) == qa_after
+
+    remember_ok = {"n": 0}
+    merge_res = core._late_merge_into_qa(
+        pg=pg_store,
+        qa_row=(qa_old_empty, "", [], "分布式存储引擎选型？"),
+        msg_id="r4_late_1",
+        content="迁移后迟到回答采用 ScyllaDB-V5。",
+        remember=lambda: remember_ok.__setitem__("n", remember_ok["n"] + 1),
+    )
+    assert merge_res == "completed_late"
+    assert remember_ok["n"] == 1
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT reprocess_qa_ids, reprocess_qa_versions FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        q_ids, q_vers = cur.fetchone()
+        assert qa_old_empty in list(q_ids)
+        assert int(q_vers[str(qa_old_empty)]) == 1
+
+    llm_calls: list[str] = []
+
+    def _r4_llm(messages: list[dict[str, str]]) -> str:
+        llm_calls.append(messages[-1]["content"])
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "分布式存储引擎选型",
+                "summary": "迁移后迟到回答采用 ScyllaDB-V5。",
+                "keywords": ["ScyllaDB-V5"],
+                "update_type": "add",
+                "claim_text": "迁移后迟到回答采用 ScyllaDB-V5。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "migrated local state late merge",
+            },
+            ensure_ascii=False,
+        )
+
+    res_rep = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_r4_llm,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r4-fp",
+    )
+    assert len(llm_calls) == 1
+    assert "ScyllaDB-V5" in llm_calls[0]
+    assert res_rep["new_last_qa_id"] == qa_after
+    assert res_rep["reprocessed_qa_ids"] == [qa_old_empty]
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%ScyllaDB-V5%",),
+        )
+        assert cur.fetchone() is not None
+        cur.execute("SELECT reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'")
+        assert list(cur.fetchone()[0]) == []
+
+        # Zero-row safety on real PG when default row is deleted while baseline_checked is stale True
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    remember_zero = {"n": 0}
+    res_zero = core._late_merge_into_qa(
+        pg=pg_store,
+        qa_row=(qa_after, "网关采用 Kong-V3。", [], "网关用什么？"),
+        msg_id="r4_zero_row",
+        content="SHOULD_ROLL_BACK_R4",
+        remember=lambda: remember_zero.__setitem__("n", remember_zero["n"] + 1),
+    )
+    assert res_zero is None
+    assert remember_zero["n"] == 0
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT answer, merged_event_ids FROM public.qa_pairs WHERE id = %s", (qa_after,))
+        ans_z, mev_z = cur.fetchone()
+        assert "SHOULD_ROLL_BACK_R4" not in str(ans_z)
+        assert "r4_zero_row" not in list(mev_z or [])
