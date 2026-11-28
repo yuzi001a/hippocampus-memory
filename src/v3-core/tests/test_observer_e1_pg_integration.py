@@ -267,6 +267,10 @@ def _cleanup_pg_rows(pool: PgPool) -> None:
             (_TOPIC_PREFIX + "%", _EXTRA_TOPIC_PREFIX + "%"),
         )
         cur.execute(
+            "DELETE FROM public.observation_notes WHERE prev_id IS NOT NULL AND (content LIKE %s OR version LIKE %s OR version IN ('v1', 'v1-compressed', 'v2', 'v2-compressed'))",
+            ("%" + _MARKER + "%", "oepg_%"),
+        )
+        cur.execute(
             "DELETE FROM public.observation_notes WHERE content LIKE %s OR version LIKE %s OR version IN ('v1', 'v1-compressed', 'v2', 'v2-compressed')",
             ("%" + _MARKER + "%", "oepg_%"),
         )
@@ -387,7 +391,7 @@ def test_pg_observer_and_topic_v2_no_double_write_conflict(
     with pg_pool.lease() as lease:
         cur = lease.connection.cursor()
         cur.execute(
-            "SELECT topic_id, title, body, version FROM public.topics WHERE topic_id LIKE %s ORDER BY topic_id",
+            "SELECT topic_id, title, body, status, updated_at FROM public.topics WHERE topic_id LIKE %s ORDER BY topic_id",
             (_TOPIC_PREFIX + "%",),
         )
         topics_before = cur.fetchall()
@@ -435,14 +439,14 @@ def test_pg_observer_and_topic_v2_no_double_write_conflict(
     with pg_pool.lease() as lease:
         cur = lease.connection.cursor()
         cur.execute(
-            "SELECT topic_id, title, body, version FROM public.topics WHERE topic_id LIKE %s ORDER BY topic_id",
+            "SELECT topic_id, title, body, status, updated_at FROM public.topics WHERE topic_id LIKE %s ORDER BY topic_id",
             (_TOPIC_PREFIX + "%",),
         )
         topics_after = cur.fetchall()
         cur.execute("SELECT COUNT(*) FROM public.topic_entries WHERE topic_id = %s", (existing_tid,))
         entry_count = int(cur.fetchone()[0])
         cur.execute(
-            "SELECT id, content, embedding IS NOT NULL, qa_range_end FROM public.observation_notes WHERE content LIKE %s",
+            "SELECT id, content, embedding IS NOT NULL, upper(source_qa_range) FROM public.observation_notes WHERE content LIKE %s",
             ("%" + _MARKER + "%",),
         )
         note_rows = cur.fetchall()
@@ -451,7 +455,7 @@ def test_pg_observer_and_topic_v2_no_double_write_conflict(
     assert entry_count == 0
     assert len(note_rows) == 1
     assert note_rows[0][2] is True
-    assert int(note_rows[0][3]) == qa1
+    assert int(note_rows[0][3]) == qa1 + 1
 
 
 def test_pg_e1_synthesize_yin_via_gateway_reads_clean_topics_and_never_mutates(
@@ -503,8 +507,8 @@ def test_pg_e1_synthesize_yin_via_gateway_reads_clean_topics_and_never_mutates(
             )
             cur.execute(
                 """
-                INSERT INTO public.topics (topic_id, title, body, embedding, embed_model, version, status, created_at)
-                VALUES (%s, %s, %s, %s::vector, 'bge-m3', 2, 'active', NOW())
+                INSERT INTO public.topics (topic_id, title, body, embedding, embed_model, status, created_at)
+                VALUES (%s, %s, %s, %s::vector, 'bge-m3', 'active', NOW())
                 """,
                 (tid, f"调度器升级-{suffix}", body, emb_dup),
             )
@@ -519,7 +523,7 @@ def test_pg_e1_synthesize_yin_via_gateway_reads_clean_topics_and_never_mutates(
             ),
         )
         cur.execute(
-            "SELECT topic_id, title, body, status, version FROM public.topics WHERE topic_id IN (%s, %s) ORDER BY topic_id",
+            "SELECT topic_id, title, body, status, updated_at FROM public.topics WHERE topic_id IN (%s, %s) ORDER BY topic_id",
             (t1, t2),
         )
         topics_before = cur.fetchall()
@@ -533,7 +537,7 @@ def test_pg_e1_synthesize_yin_via_gateway_reads_clean_topics_and_never_mutates(
     with pg_pool.lease() as lease:
         cur = lease.connection.cursor()
         cur.execute(
-            "SELECT topic_id, title, body, status, version FROM public.topics WHERE topic_id IN (%s, %s) ORDER BY topic_id",
+            "SELECT topic_id, title, body, status, updated_at FROM public.topics WHERE topic_id IN (%s, %s) ORDER BY topic_id",
             (t1, t2),
         )
         topics_after = cur.fetchall()
@@ -579,8 +583,8 @@ def test_pg_e1_compress_observer_note_via_gateway_atomic(
         cur = lease.connection.cursor()
         cur.execute(
             """
-            INSERT INTO public.topics (topic_id, title, body, version, status, created_at)
-            VALUES (%s, '压缩守护主题', '话题内容不应被压缩路径修改。', 1, 'active', NOW())
+            INSERT INTO public.topics (topic_id, title, body, status, created_at)
+            VALUES (%s, '压缩守护主题', '话题内容不应被压缩路径修改。', 'active', NOW())
             """,
             (topic_id,),
         )
@@ -614,13 +618,13 @@ def test_pg_e1_compress_observer_note_via_gateway_atomic(
             (orig_id, new_id),
         )
         rows = cur.fetchall()
-        cur.execute("SELECT title, body, version FROM public.topics WHERE topic_id = %s", (topic_id,))
+        cur.execute("SELECT title, body, status FROM public.topics WHERE topic_id = %s", (topic_id,))
         topic_row = cur.fetchone()
 
     assert len(rows) == 2
     assert rows[0][0] == "v1" and rows[0][1] == long_note
     assert rows[1][0] == "v1-compressed" and rows[1][2] is True
-    assert topic_row == ("压缩守护主题", "话题内容不应被压缩路径修改。", 1)
+    assert topic_row == ("压缩守护主题", "话题内容不应被压缩路径修改。", "active")
 
 
 def test_pg_full_pipeline_topic_v2_observer_e1_freshness_preserved(
@@ -682,7 +686,7 @@ def test_pg_full_pipeline_topic_v2_observer_e1_freshness_preserved(
 
     with pg_pool.lease() as lease:
         cur = lease.connection.cursor()
-        cur.execute("SELECT topic_id, title, body, version FROM public.topics WHERE topic_id LIKE %s", (_TOPIC_PREFIX + "%",))
+        cur.execute("SELECT topic_id, title, body, status, updated_at FROM public.topics WHERE topic_id LIKE %s", (_TOPIC_PREFIX + "%",))
         topics_before = cur.fetchall()
     assert len(topics_before) == 1
     fresh_topic_id = topics_before[0][0]
@@ -715,7 +719,7 @@ def test_pg_full_pipeline_topic_v2_observer_e1_freshness_preserved(
 
     with pg_pool.lease() as lease:
         cur = lease.connection.cursor()
-        cur.execute("SELECT topic_id, title, body, version FROM public.topics WHERE topic_id LIKE %s", (_TOPIC_PREFIX + "%",))
+        cur.execute("SELECT topic_id, title, body, status, updated_at FROM public.topics WHERE topic_id LIKE %s", (_TOPIC_PREFIX + "%",))
         topics_after = cur.fetchall()
         cur.execute("SELECT id FROM public.observation_notes WHERE content LIKE %s", ("%" + _MARKER + "%",))
         note_id = int(cur.fetchone()[0])
