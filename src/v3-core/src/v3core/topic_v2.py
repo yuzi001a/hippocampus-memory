@@ -20,12 +20,11 @@ Design goals (see docs/DESIGN-PHILOSOPHY.md):
        - Parses and strips ``<!-- topic_v2:... -->`` metadata before prompt injection.
        - Enforces LLM-established explicit relations ONLY (zero read-side keyword or
          bigram topic-overlap guessing):
-           * On current-state queries, demotes ``qa`` hits in persisted ``superseded_qas``,
-             Topic V2 dossiers whose ``active_qas`` were superseded by another dossier, and
-             derived ``note``/``yin`` hits whose explicit ``source_qa_range`` overlaps
-             ``superseded_qas`` (unless created after the superseding topic update).
-           * Preserves any memory lacking explicit supersession provenance (fail-safe:
-             never suppress valid long-term memory based on shared words).
+           * On current-state queries, demotes ``qa`` hits in persisted ``superseded_qas``
+             and Topic V2 dossiers whose ``active_qas`` were superseded by another dossier.
+           * Preserves derived ``note``/``yin`` hits (fail-safe: whole multi-topic notes
+             are never demoted merely from coarse ``source_qa_range`` intervals; they rely
+             on UTC half-life decay until paragraph-level provenance lands).
            * Breaks non-superseded QA ties via recency without hiding unique old facts.
        - On retrospective ``why did we drop X`` queries, preserves raw historical QA
          evidence and suppresses recency decay.
@@ -873,11 +872,13 @@ class TopicConsolidatorV2:
         valid_ids = {d.topic_id for _, d in candidates}
         target_id = str(data.get("target_topic_id") or "").strip()
         if action == "attach" and target_id not in valid_ids:
-            if candidates:
-                target_id = candidates[0][1].topic_id
-            else:
-                action = "create"
-                target_id = ""
+            logger.warning(
+                "topic_v2: Phase 1 attach JSON has invalid target_topic_id=%r (valid=%s) for qa_id=%s",
+                target_id,
+                sorted(valid_ids),
+                qa_id,
+            )
+            return None
 
         kws = [str(k).strip() for k in (data.get("keywords") or []) if str(k).strip()]
         raw_rep_ids = data.get("replaces_claim_ids")
@@ -886,14 +887,43 @@ class TopicConsolidatorV2:
             if isinstance(raw_rep_ids, (list, tuple))
             else ()
         )
+        claim_text = _clean_clause(str(data.get("claim_text") or ""))
+        replaces_text = _clean_clause(str(data.get("replaces_text") or ""))
+        reason = _clean_clause(str(data.get("reason") or ""))
+
+        if action != "skip":
+            if update_type == "historical_note":
+                if not (reason or claim_text):
+                    logger.warning(
+                        "topic_v2: Phase 1 historical_note missing reason/claim_text for qa_id=%s",
+                        qa_id,
+                    )
+                    return None
+            else:
+                if not claim_text:
+                    logger.warning(
+                        "topic_v2: Phase 1 JSON missing non-empty claim_text for qa_id=%s (action=%s update_type=%s)",
+                        qa_id,
+                        action,
+                        update_type,
+                    )
+                    return None
+                if update_type in ("evolve", "correct") and not (rep_ids or replaces_text):
+                    logger.warning(
+                        "topic_v2: Phase 1 %s JSON missing replaces_claim_ids/replaces_text for qa_id=%s",
+                        update_type,
+                        qa_id,
+                    )
+                    return None
+
         return Phase1Note(
             action=action,
             target_topic_id=target_id,
             topic_title=str(data.get("topic_title") or _derive_topic_title(question, answer)).strip(),
             update_type=update_type,
-            claim_text=_clean_clause(str(data.get("claim_text") or "")),
-            replaces_text=_clean_clause(str(data.get("replaces_text") or "")),
-            reason=_clean_clause(str(data.get("reason") or "")),
+            claim_text=claim_text,
+            replaces_text=replaces_text,
+            reason=reason,
             keywords=kws,
             evidence_qa_id=qa_id,
             timestamp=ts,
@@ -1060,18 +1090,38 @@ class TopicConsolidatorV2:
             old_codes = [c.lower() for c in _ASCII_CODE_TOKEN_RE.findall(note.replaces_text)]
             old_terms = [t for t in dict.fromkeys([old_low, old_clean, *old_codes]) if len(t) >= 2]
             matched_indices: set[int] = set()
-            for idx, claim in enumerate(target.current_claims):
-                c_low = claim.text.lower()
-                if claim.claim_id and claim.claim_id in replaces_id_set:
-                    matched_indices.add(idx)
-                elif old_terms and any(term in c_low for term in old_terms):
-                    matched_indices.add(idx)
-            # If the LLM explicitly evolved/corrected this dossier and no specific claim matched,
-            # supersede unparsed pre-V2 legacy_seed blobs belonging to this exact dossier.
-            if not matched_indices and not replaces_id_set:
+            if replaces_id_set:
+                # Strict ID-only replacement when LLM provided explicit replaces_claim_ids:
+                # never fall through to text matching that could wipe sibling claims.
                 for idx, claim in enumerate(target.current_claims):
-                    if claim.kind == "legacy_seed":
+                    if claim.claim_id and claim.claim_id in replaces_id_set:
                         matched_indices.add(idx)
+            else:
+                # Compatibility fallback (deterministic extractor / legacy LLM without IDs):
+                # require unambiguous match on primary claims (fact/decision/rule) so a shared
+                # term never wipes multiple distinct sibling claims.
+                primary_matches: list[int] = []
+                aux_matches: list[int] = []
+                for idx, claim in enumerate(target.current_claims):
+                    c_low = claim.text.lower()
+                    if old_terms and any(term in c_low for term in old_terms):
+                        if claim.kind in ("problem", "legacy_seed"):
+                            aux_matches.append(idx)
+                        else:
+                            primary_matches.append(idx)
+                if len(primary_matches) == 1:
+                    matched_indices.add(primary_matches[0])
+                    matched_indices.update(aux_matches)
+                elif len(primary_matches) == 0:
+                    if aux_matches:
+                        matched_indices.update(aux_matches)
+                    else:
+                        # Unparsed pre-V2 legacy_seed blob inside this exact dossier.
+                        for idx, claim in enumerate(target.current_claims):
+                            if claim.kind == "legacy_seed":
+                                matched_indices.add(idx)
+                # When len(primary_matches) > 1, text matching is ambiguous: preserve sibling
+                # claims rather than wiping them indiscriminately.
             kept_claims: list[TopicClaim] = []
             for idx, claim in enumerate(target.current_claims):
                 if idx in matched_indices:
@@ -1270,70 +1320,6 @@ def enforce_topic_v2_post_rerank_order(
     return active_group + demoted_group
 
 
-_INT8RANGE_RE = re.compile(r"^\s*([\[(])\s*(-?\d+)?\s*,\s*(-?\d+)?\s*([\])])\s*$")
-
-
-def _qa_ids_in_source_range(qa_range: Any, qa_ids: set[int]) -> set[int]:
-    """Return subset of ``qa_ids`` explicitly contained in a PG INT8RANGE / tuple / set."""
-    if not qa_range or not qa_ids:
-        return set()
-    if isinstance(qa_range, str):
-        s = qa_range.strip()
-        if not s or s.lower() == "empty":
-            return set()
-        m = _INT8RANGE_RE.match(s)
-        if not m:
-            return set()
-        lo_inc = m.group(1) == "["
-        lo = int(m.group(2)) if m.group(2) is not None else None
-        hi = int(m.group(3)) if m.group(3) is not None else None
-        hi_inc = m.group(4) == "]"
-        matched: set[int] = set()
-        for qid in qa_ids:
-            if lo is not None and (qid < lo if lo_inc else qid <= lo):
-                continue
-            if hi is not None and (qid > hi if hi_inc else qid >= hi):
-                continue
-            matched.add(qid)
-        return matched
-    # psycopg2 NumericRange (or duck-typed range object; exclude str methods via callable check)
-    if (
-        hasattr(qa_range, "lower")
-        and hasattr(qa_range, "upper")
-        and not callable(qa_range.lower)
-        and not callable(qa_range.upper)
-    ):
-        if getattr(qa_range, "isempty", False):
-            return set()
-        lo = qa_range.lower
-        hi = qa_range.upper
-        lo_inc = bool(getattr(qa_range, "lower_inc", True))
-        hi_inc = bool(getattr(qa_range, "upper_inc", False))
-        matched = set()
-        for qid in qa_ids:
-            if lo is not None and (qid < lo if lo_inc else qid <= lo):
-                continue
-            if hi is not None and (qid > hi if hi_inc else qid >= hi):
-                continue
-            matched.add(qid)
-        return matched
-    if isinstance(qa_range, (set, frozenset)):
-        return {int(q) for q in qa_range if isinstance(q, int)} & qa_ids
-    if isinstance(qa_range, (tuple, list)):
-        if len(qa_range) == 2 and all(x is None or isinstance(x, int) for x in qa_range):
-            lo, hi = qa_range
-            matched = set()
-            for qid in qa_ids:
-                if lo is not None and qid < lo:
-                    continue
-                if hi is not None and qid >= hi:
-                    continue
-                matched.add(qid)
-            return matched
-        return {int(q) for q in qa_range if isinstance(q, int)} & qa_ids
-    return set()
-
-
 def apply_topic_v2_ranking_guard(
     scored: list[Any],
     *,
@@ -1345,10 +1331,11 @@ def apply_topic_v2_ranking_guard(
 
     Design invariant:
       - Topic membership and supersession are established by the LLM during consolidation
-        and persisted as explicit QA IDs (``active_qas``, ``superseded_qas``) and derived
-        provenance ranges (``observation_notes.source_qa_range``).
-      - Recall NEVER guesses topic membership via keyword/bigram overlap. Memories without
-        explicit supersession provenance remain un-demoted (fail-safe).
+        and persisted as explicit QA IDs (``active_qas``, ``superseded_qas``).
+      - Recall NEVER guesses topic membership via keyword/bigram overlap and NEVER demotes
+        whole multi-topic Observation Notes or Yin paragraphs from coarse ``source_qa_range``
+        intervals (fail-safe preservation; notes rely on UTC half-life decay until
+        paragraph-level provenance lands).
 
     Mutates ``hit.content``, ``hit.content_preview`` (stripping internal ``topic_v2`` headers),
     and ``hit.rrf_score`` in place prior to final score sorting. Returns guard metadata
@@ -1511,24 +1498,8 @@ def apply_topic_v2_ranking_guard(
                 demoted_sids.add(sid)
                 if probe_fn is not None and trace is not None:
                     probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_freshness_guard")
-        elif kind in ("note", "yin") and not is_hist:
-            # Explicit provenance ONLY: demote iff source_qa_range explicitly covers a
-            # superseded QA AND the note was not regenerated after the superseding topic update.
-            hit_range = getattr(hit, "source_qa_range", None)
-            matched_sup = _qa_ids_in_source_range(hit_range, superseded_qa_ids)
-            if not matched_sup:
-                continue
-            dt = _parse_iso_ts(getattr(hit, "created_at", ""))
-            sup_dts = [superseded_qa_ts[q] for q in matched_sup if superseded_qa_ts.get(q) is not None]
-            latest_sup_dt = max(sup_dts) if sup_dts else None
-            if dt is not None and latest_sup_dt is not None and dt > latest_sup_dt:
-                # Derived note was regenerated AFTER the superseding evolution — preserve it.
-                continue
-            hit.rrf_score = _cap_demoted_score(float(hit.rrf_score), 0.25, min_fresh_score)
-            demoted_derived += 1
-            demoted_sids.add(sid)
-            if probe_fn is not None and trace is not None:
-                probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_freshness_guard")
+        # Derived multi-topic Observation Notes & Yin paragraphs are fail-safe preserved here:
+        # coarse source_qa_range intervals cannot prove an entire multi-topic note is stale.
 
     return {
         "is_historical": is_hist,

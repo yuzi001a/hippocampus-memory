@@ -19,7 +19,9 @@ if str(REPO_SRC) not in sys.path:
 
 from v3core import recall_pool as rp_mod  # noqa: E402
 from v3core.topic_v2 import (  # noqa: E402
+    TopicClaim,
     TopicConsolidatorV2,
+    TopicDossier,
     apply_topic_v2_ranking_guard,
     consolidate_pg_incremental,
     encode_topic_v2_header,
@@ -253,9 +255,9 @@ def test_p1_cross_topic_isolation_and_scoped_yin_note_demotion():
     assert hit_topic_a.rrf_score == 0.050
     assert "yin:v1" not in guard["demoted_sids"], "Unrelated long-term yin must NOT be demoted"
     assert hit_unrelated_yin.rrf_score == 0.049
-    assert "note:v_db_old" in guard["demoted_sids"], "Stale note with explicit superseded source_qa_range MUST be demoted"
-    assert hit_related_stale_note.rrf_score < hit_topic_a.rrf_score
-    assert "note:v_unlinked" not in guard["demoted_sids"], "Note without explicit supersession provenance must NOT be demoted by keywords"
+    # Multi-topic observation notes must NOT be whole-demoted merely from coarse source_qa_range
+    assert "note:v_db_old" not in guard["demoted_sids"]
+    assert "note:v_unlinked" not in guard["demoted_sids"]
 
 
 # ---------------------------------------------------------------------------
@@ -894,7 +896,8 @@ def test_p2_1_newer_note_not_demoted_by_older_topic_v2():
     guard = apply_topic_v2_ranking_guard(scored, query="日志采集方案现在怎样？")
     assert "note:v_newer" not in guard["demoted_sids"]
     assert scored[1].rrf_score == 0.049
-    assert "note:v_older" in guard["demoted_sids"]
+    # Coarse source_qa_range must not whole-demote multi-topic observation notes either
+    assert "note:v_older" not in guard["demoted_sids"]
 
 
 def test_p2_2_chain_recall_backfills_after_filtering_superseded_entries(monkeypatch):
@@ -1530,3 +1533,222 @@ def test_r4_p2_1_tz_aware_note_applies_utc_half_life_decay(monkeypatch):
     by_sid = {h.source_id: h for h in results}
     assert by_sid["note:v_fresh_tz"].rrf_score > by_sid["note:v_old_tz"].rrf_score
     assert results[0].source_id == "note:v_fresh_tz"
+
+
+def test_r5_p1_1a_replaces_claim_ids_is_strict_and_ambiguous_text_does_not_wipe_sibling_claims():
+    """P1-1A: Explicit replaces_claim_ids must NOT fall through to text matching on sibling claims."""
+    dossier = TopicDossier(
+        topic_id="tv2_auth_1",
+        title="Python 认证方案",
+        current_claims=[
+            TopicClaim(claim_id="c1", text="认证方式使用 Session", kind="decision", evidence_qa_ids=[10]),
+            TopicClaim(
+                claim_id="c2",
+                text="Session Cookie 设置 HttpOnly 和 Secure",
+                kind="rule",
+                evidence_qa_ids=[11],
+            ),
+        ],
+        keywords=["Python", "认证", "Session"],
+        last_evidence_qa_id=11,
+        last_evidence_at="2026-11-20T08:00:00Z",
+    )
+
+    def _strict_id_llm(messages):
+        return json.dumps(
+            {
+                "action": "attach",
+                "target_topic_id": "tv2_auth_1",
+                "topic_title": "Python 认证方案",
+                "update_type": "evolve",
+                "claim_text": "认证方式改用 JWT",
+                "replaces_claim_ids": ["c1"],
+                "replaces_text": "Session",
+                "reason": "无状态扩展需求",
+                "keywords": ["Python", "认证", "JWT"],
+            },
+            ensure_ascii=False,
+        )
+
+    consolidator = TopicConsolidatorV2(embed_fn=_embed, llm_fn=_strict_id_llm)
+    out, rep = consolidator.consolidate_qa_stream(
+        [
+            {
+                "id": 12,
+                "timestamp": "2026-11-25T08:00:00Z",
+                "question": "认证方案有变吗？",
+                "answer": "我们把认证方式从 Session 改为 JWT。",
+            }
+        ],
+        existing_dossiers=[dossier],
+    )
+    assert rep.superseded_claims == 1
+    active_ids = {c.claim_id for c in out[0].current_claims}
+    assert "c1" not in active_ids
+    assert "c2" in active_ids, "Sibling Session Cookie rule must NOT be wiped when LLM only replaced c1"
+    assert any("JWT" in c.text for c in out[0].current_claims)
+    assert out[0].superseded_qa_ids() == [10]
+
+    # When replaces_claim_ids is omitted and replaces_text ambiguously matches >1 primary claims,
+    # refuse to blindly wipe both sibling claims.
+    dossier_ambig = TopicDossier(
+        topic_id="tv2_auth_2",
+        title="Python 认证方案",
+        current_claims=[
+            TopicClaim(claim_id="c1", text="认证方式使用 Session", kind="decision", evidence_qa_ids=[20]),
+            TopicClaim(
+                claim_id="c2",
+                text="Session Cookie 设置 HttpOnly 和 Secure",
+                kind="rule",
+                evidence_qa_ids=[21],
+            ),
+        ],
+        keywords=["Python", "认证", "Session"],
+        last_evidence_qa_id=21,
+        last_evidence_at="2026-11-20T08:00:00Z",
+    )
+
+    def _no_id_ambig_llm(messages):
+        return json.dumps(
+            {
+                "action": "attach",
+                "target_topic_id": "tv2_auth_2",
+                "topic_title": "Python 认证方案",
+                "update_type": "evolve",
+                "claim_text": "认证方式改用 JWT",
+                "replaces_text": "Session",
+                "reason": "无状态扩展需求",
+                "keywords": ["Python", "认证", "JWT"],
+            },
+            ensure_ascii=False,
+        )
+
+    consolidator2 = TopicConsolidatorV2(embed_fn=_embed, llm_fn=_no_id_ambig_llm)
+    out2, rep2 = consolidator2.consolidate_qa_stream(
+        [
+            {
+                "id": 22,
+                "timestamp": "2026-11-25T08:00:00Z",
+                "question": "认证方案有变吗？",
+                "answer": "我们把认证方式从 Session 改为 JWT。",
+            }
+        ],
+        existing_dossiers=[dossier_ambig],
+    )
+    assert rep2.superseded_claims == 0
+    assert {"c1", "c2"}.issubset({c.claim_id for c in out2[0].current_claims})
+
+
+def test_r5_p1_1b_empty_claim_text_missing_target_or_invalid_target_topic_id_fails_for_retry():
+    """P1-1B & invalid target_topic_id: reject incomplete LLM JSON so watermark does NOT advance."""
+    existing = TopicDossier(
+        topic_id="tv2_sched_1",
+        title="定时任务调度",
+        current_claims=[
+            TopicClaim(claim_id="c1", text="使用 Cron-Worker-V1", kind="decision", evidence_qa_ids=[1]),
+        ],
+        keywords=["定时任务", "Cron-Worker-V1"],
+        last_evidence_qa_id=1,
+        last_evidence_at="2026-11-20T08:00:00Z",
+    )
+
+    bad_payloads = [
+        # 1. Empty claim_text on evolve -> must NOT drop old claim without adding replacement
+        {
+            "action": "attach",
+            "target_topic_id": "tv2_sched_1",
+            "topic_title": "定时任务调度",
+            "update_type": "evolve",
+            "claim_text": "",
+            "replaces_claim_ids": ["c1"],
+            "replaces_text": "Cron-Worker-V1",
+            "reason": "淘汰旧调度器",
+            "keywords": ["定时任务"],
+        },
+        # 2. Evolve missing both replaces_claim_ids and replaces_text
+        {
+            "action": "attach",
+            "target_topic_id": "tv2_sched_1",
+            "topic_title": "定时任务调度",
+            "update_type": "evolve",
+            "claim_text": "改用 Event-Scheduler-V2",
+            "replaces_text": "",
+            "reason": "升级",
+            "keywords": ["Event-Scheduler-V2"],
+        },
+        # 3. Invalid hallucinated target_topic_id on attach -> must NOT attach to candidates[0]
+        {
+            "action": "attach",
+            "target_topic_id": "tv2_nonexistent_999",
+            "topic_title": "定时任务调度",
+            "update_type": "add",
+            "claim_text": "补充配置参数",
+            "replaces_text": "",
+            "reason": "",
+            "keywords": ["定时任务"],
+        },
+    ]
+
+    for idx, payload in enumerate(bad_payloads, start=10):
+        fresh_copy = TopicDossier.from_dict(existing.to_dict())
+        consolidator = TopicConsolidatorV2(
+            embed_fn=_embed,
+            llm_fn=lambda _msgs, p=payload: json.dumps(p, ensure_ascii=False),
+        )
+        out, rep = consolidator.consolidate_qa_stream(
+            [
+                {
+                    "id": idx,
+                    "timestamp": "2026-11-25T08:00:00Z",
+                    "question": "定时任务调度更新？",
+                    "answer": "定时任务调度改为 Event-Scheduler-V2。",
+                }
+            ],
+            existing_dossiers=[fresh_copy],
+        )
+        assert rep.failed_qa_ids == (idx,), f"Expected failure for payload #{idx}: {rep}"
+        assert rep.updated_topics == 0 and rep.created_topics == 0 and rep.superseded_claims == 0
+        assert rep.max_qa_id == 1, "Watermark must NOT advance past existing last_evidence_qa_id=1"
+        assert [c.claim_id for c in out[0].current_claims] == ["c1"], "Old claim must stay intact on validation failure"
+
+
+def test_r5_p1_2_observation_note_not_whole_demoted_by_sparse_source_qa_range():
+    """P1-2: Multi-topic Observation Note whose sparse [min,max) range covers a superseded QA stays un-demoted."""
+    header = (
+        '<!-- topic_v2:{"v":2,"last_qa":8,"last_at":"2026-11-25T08:00:00Z",'
+        '"active_qas":[8],"superseded_qas":[5]} -->'
+    )
+    topic_hit = rp_mod.RecallHit(
+        source_id="topic_tv2_sched_8",
+        kind="topic",
+        title="定时任务调度",
+        content=f"{header}\n- 当前结论：Event-Scheduler-V2",
+        content_preview=f"{header}\n- 当前结论：Event-Scheduler-V2",
+        rrf_score=0.055,
+        created_at="2026-11-25T08:00:00Z",
+    )
+    superseded_qa = rp_mod.RecallHit(
+        source_id="qa_5",
+        kind="qa",
+        title="定时任务旧方案",
+        content="早期采用 Cron-Worker-V1。",
+        content_preview="早期采用 Cron-Worker-V1。",
+        rrf_score=0.054,
+        created_at="2026-11-10T08:00:00Z",
+    )
+    multi_topic_note = rp_mod.RecallHit(
+        source_id="note:v_multi_topic",
+        kind="note",
+        title="综合观察笔记",
+        content="记录 QA 1、7、9：包含安全规范与部署清单（未实际包含 QA 5）。",
+        content_preview="记录 QA 1、7、9：包含安全规范与部署清单（未实际包含 QA 5）。",
+        rrf_score=0.052,
+        created_at="2026-11-18T08:00:00Z",
+        source_qa_range="[1,10)",
+    )
+    guard = apply_topic_v2_ranking_guard(
+        [topic_hit, superseded_qa, multi_topic_note],
+        query="定时任务与部署规范现状",
+    )
+    assert guard["demoted_sids"] == ["qa_5"]
+    assert multi_topic_note.rrf_score == 0.052
