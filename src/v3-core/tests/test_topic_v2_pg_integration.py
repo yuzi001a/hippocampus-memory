@@ -400,12 +400,14 @@ def test_pg_a_to_b_evolution_and_default_prefetch_freshness_guard(
         cur = lease.connection.cursor()
         cur.execute(
             """
-            INSERT INTO public.observation_notes (version, content, embedding, embed_model, created_at)
-            VALUES (%s, %s, %s::vector, 'bge-m3', %s::timestamptz)
+            INSERT INTO public.observation_notes (version, content, source_qa_range, embedding, embed_model, created_at)
+            VALUES (%s, %s, int8range(%s, %s), %s::vector, 'bge-m3', %s::timestamptz)
             """,
             (
                 f"{_NOTE_PREFIX}1",
                 "历史观察：定时任务目前采用 Cron-Worker-V1 方案。",
+                qa1,
+                qa1 + 1,
                 _vec_literal(_EMBED_FN("定时任务 Cron-Worker-V1")),
                 t1.isoformat(),
             ),

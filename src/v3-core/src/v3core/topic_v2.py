@@ -1427,7 +1427,8 @@ def apply_topic_v2_ranking_guard(
         superseded_qa_by_topic[sid] = sup_set
 
     # A Topic V2 dossier is stale ONLY when another Topic V2 dossier explicitly superseded
-    # one of its active evidence QAs. Never demote any topic via keyword guessing or global max_qa_id.
+    # one of its active evidence QAs. Never demote any Topic V2 dossier via keyword guessing
+    # or global max_qa_id.
     fresh_topic_sids: set[str] = set()
     stale_topic_sids: set[str] = set()
     for sid, meta in topic_meta.items():
@@ -1441,6 +1442,13 @@ def apply_topic_v2_ranking_guard(
             stale_topic_sids.add(sid)
         else:
             fresh_topic_sids.add(sid)
+
+    # Schema-version precedence (zero keyword guessing): when structured Topic V2 dossiers
+    # are present, unmigrated pre-V2 legacy topic rows (meta is None) yield rank to them.
+    if fresh_topic_sids:
+        for sid, meta in topic_meta.items():
+            if meta is None:
+                stale_topic_sids.add(sid)
 
     # First, adjust non-demoted QA recency tie-breaks on current-state queries (pure timestamp recency).
     qa_recency_adjusted = 0
