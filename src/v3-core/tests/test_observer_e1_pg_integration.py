@@ -267,8 +267,8 @@ def _cleanup_pg_rows(pool: PgPool) -> None:
             (_TOPIC_PREFIX + "%", _EXTRA_TOPIC_PREFIX + "%"),
         )
         cur.execute(
-            "DELETE FROM public.observation_notes WHERE content LIKE %s OR version LIKE 'oepg_%' OR version IN ('v1', 'v1-compressed', 'v2', 'v2-compressed')",
-            ("%" + _MARKER + "%",),
+            "DELETE FROM public.observation_notes WHERE content LIKE %s OR version LIKE %s OR version IN ('v1', 'v1-compressed', 'v2', 'v2-compressed')",
+            ("%" + _MARKER + "%", "oepg_%"),
         )
         cur.execute("DELETE FROM public.yin WHERE content LIKE %s", ("%" + _MARKER + "%",))
         cur.execute("DELETE FROM public.yin_history WHERE content LIKE %s", ("%" + _MARKER + "%",))
