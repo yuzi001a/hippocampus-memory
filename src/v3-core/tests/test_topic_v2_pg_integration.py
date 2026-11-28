@@ -542,8 +542,7 @@ def test_pg_v3core_live_flush_and_topic_maintain_tool(
     )
 
     core = v3core.V3Core.__new__(v3core.V3Core)
-    core._config = from_legacy_dict({"basePath": str(tmp_path)})
-    core._config.prefetch.topic_v2_backfill_history = True  # type: ignore[attr-defined]
+    core._config = from_legacy_dict({"basePath": str(tmp_path), "prefetch": {"topic_v2_backfill_history": True}})
     core._pg = pg_store
     invalidations = []
     monkeypatch.setattr(core, "_notify_topic_recall_invalidation", lambda: invalidations.append(1))
@@ -1277,6 +1276,14 @@ def test_pg_pr71_stateless_recovery_deletes_both_json_files_and_skips_reprocessi
     assert res_reload["new_last_qa_id"] == qa4
     assert res_reload["claims_store"] == "pg"
     assert calls_after_wipe == [], "Deleting BOTH JSON files must restore watermark from PG without re-calling LLM"
+    # Also verify reconstructed claims/topics from PG retained Redis-V7 cleanly after JSON wipe.
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%Redis-V7%",),
+        )
+        assert cur.fetchone() is not None
 
     # 4. Insert QA5 -> only QA5 is processed.
     qa5 = _insert_qa(
@@ -1299,3 +1306,137 @@ def test_pg_pr71_stateless_recovery_deletes_both_json_files_and_skips_reprocessi
     assert res_next["previous_last_qa_id"] == qa4
     assert res_next["new_last_qa_id"] == qa5
     assert calls_after_wipe == [qa5]
+
+
+def test_pg_pr71_fresh_install_first_conversation_and_late_answer_never_lost(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """P1 PG16 regression:
+    1) Fresh install (0 rows): startup baseline=0 so turn #1 is NEVER swallowed.
+    2) Existing install: startup baseline=MAX(completed) skips history while live turns after boot process.
+    3) In-flight empty-answer QA + later completed QA: watermark halts before empty QA until late answer fills.
+    """
+    from v3core.topic_v2 import ensure_topic_v2_baseline_watermark
+
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    # Ensure clean qa_pairs table state for the fresh-install baseline check
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    # 1. Fresh install: startup pins baseline BEFORE turn #1 arrives
+    state_fresh = tmp_path / "fresh_state"
+    boot_fresh = ensure_topic_v2_baseline_watermark(pg_store, state_dir=state_fresh)
+    assert boot_fresh["initialized"] is True
+
+    qa1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}first_conv_1",
+        session_id="sess_first",
+        turn_id=1,
+        question="新库首次真实对话：队列选什么？",
+        answer="新库首次真实对话决定采用 NATS-JetStream-V1。",
+        ts=t0,
+    )
+    res_fresh = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_fresh,
+        dry_run=False,
+        embed_model="first-fp",
+    )
+    assert res_fresh["processed_qas"] == 1
+    assert res_fresh["new_last_qa_id"] == qa1
+
+    # 2. Existing install with pre-existing qa1: new state_dir2 pins baseline at qa1 BEFORE qa2 arrives
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+    state_existing = tmp_path / "existing_state"
+    boot_existing = ensure_topic_v2_baseline_watermark(pg_store, state_dir=state_existing)
+    assert boot_existing["initialized"] is True
+    assert boot_existing["last_qa_id"] == qa1
+
+    qa2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}existing_live_2",
+        session_id="sess_live",
+        turn_id=1,
+        question="上线后首条对话：缓存用什么？",
+        answer="上线后首条对话决定采用 Valkey-V8。",
+        ts=t0 + timedelta(seconds=30),
+    )
+    res_live = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_existing,
+        dry_run=False,
+        embed_model="first-fp",
+    )
+    assert res_live["previous_last_qa_id"] == qa1
+    assert res_live["processed_qas"] == 1
+    assert res_live["new_last_qa_id"] == qa2
+
+    # 3. In-flight empty-answer qa3 + later completed qa4 -> watermark holds at qa2 until qa3 gets late answer
+    qa3 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}late_3",
+        session_id="sess_late",
+        turn_id=1,
+        question="对象存储用什么方案？",
+        answer="",
+        ts=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+    qa4 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}late_4",
+        session_id="sess_late",
+        turn_id=2,
+        question="监控告警用什么？",
+        answer="监控告警采用 Prometheus-Alertmanager。",
+        ts=datetime.now(timezone.utc) - timedelta(seconds=2),
+    )
+    res_hold = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_existing,
+        dry_run=False,
+        embed_model="first-fp",
+    )
+    assert res_hold["pending_incomplete_qa_ids"] == [qa3]
+    assert res_hold["new_last_qa_id"] == qa2
+
+    # Simulate late assistant derivation completing qa3's answer
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "UPDATE public.qa_pairs SET answer = %s WHERE id = %s",
+            ("对象存储最终采用 MinIO-Cluster-V2。", qa3),
+        )
+        lease.connection.commit()
+
+    res_late_done = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_existing,
+        dry_run=False,
+        embed_model="first-fp",
+    )
+    assert res_late_done["pending_incomplete_qa_ids"] == []
+    assert res_late_done["processed_qas"] == 2
+    assert res_late_done["new_last_qa_id"] == qa4
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%MinIO-Cluster-V2%",),
+        )
+        assert cur.fetchone() is not None

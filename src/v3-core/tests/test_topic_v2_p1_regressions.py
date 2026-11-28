@@ -2193,3 +2193,138 @@ def test_pr71_first_boot_defaults_to_max_qa_without_backfill_and_degrades_observ
     for tbl in ("topic_claims", "topic_claim_evidence", "topic_v2_state"):
         assert tbl in checked_tables
         assert probe["required_tables"][tbl] is False
+
+
+def test_pr71_config_backfill_wiring_doctor_warning_and_incomplete_qa_guard(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Verify PrefetchConfig.topic_v2_backfill_history, doctor missing-table warning, and pending empty-answer QA guard."""
+    from types import SimpleNamespace
+    from v3core import distribution_cli as dcli
+    from v3core.config_model import PrefetchConfig, from_legacy_dict
+
+    # 1. PrefetchConfig & from_legacy_dict wiring
+    assert PrefetchConfig().topic_v2_backfill_history is False
+    assert from_legacy_dict({}).prefetch.topic_v2_backfill_history is False
+    assert (
+        from_legacy_dict({"prefetch": {"topic_v2_backfill_history": True}}).prefetch.topic_v2_backfill_history
+        is True
+    )
+    assert (
+        from_legacy_dict({"topic_v2": {"backfill_history": True}}).prefetch.topic_v2_backfill_history
+        is True
+    )
+
+    # 2. doctor --dsn promotes missing required_tables into warnings + warn exit code (rc == 1)
+    monkeypatch.setattr(dcli, "_doctor_resolve_config", lambda _p: ("cfg.yaml", {}, True, None))
+    monkeypatch.setattr(
+        dcli,
+        "_doctor_probe_database",
+        lambda _dsn: {
+            "skipped": None,
+            "target": "postgresql://127.0.0.1:5432/test",
+            "reachable": True,
+            "pgvector": {"installed": True, "version": "0.7.0"},
+            "required_tables": {
+                "qa_pairs": True,
+                "topic_claims": False,
+                "topic_claim_evidence": False,
+                "topic_v2_state": False,
+            },
+        },
+    )
+    rc = dcli._doctor(SimpleNamespace(profile="default", static=False, dsn="postgresql://127.0.0.1:5432/test"))
+    assert rc == 1
+    doc_report = json.loads(capsys.readouterr().out)
+    assert doc_report["status"] == "warn"
+    assert any("topic_claims" in w for w in doc_report["warnings"])
+
+    # 3. Pending recent empty-answer QA (id=10) halts watermark before 10 even when id=11 has an answer;
+    # once id=10 answer arrives, both 10 and 11 consolidate cleanly; stale abandoned empty row (>grace) skips.
+    now = datetime.now(timezone.utc)
+    rows = [
+        (10, now - timedelta(seconds=10), "问题 10", ""),
+        (11, now - timedelta(seconds=5), "问题 11", "使用 Kafka-V4 方案。"),
+    ]
+
+    class _PendingCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass" in q:
+                self._rows = [(None,)]
+            elif "from qa_pairs" in q and "where id > %s" in q:
+                min_id = int(params[0])
+                self._rows = [r for r in rows if r[0] > min_id]
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _PendingConn:
+        def cursor(self):
+            return _PendingCur()
+
+        def close(self):
+            pass
+
+    class _PendingPg:
+        def _connect(self):
+            return _PendingConn()
+
+    state_dir = tmp_path / "pending_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "topic_v2_state.json").write_text(json.dumps({"last_qa_id": 9}), encoding="utf-8")
+
+    r_hold = consolidate_pg_incremental(
+        _PendingPg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        pending_answer_grace_s=900.0,
+    )
+    assert r_hold["pending_incomplete_qa_ids"] == [10]
+    assert r_hold["new_last_qa_id"] == 9
+    assert r_hold["processed_qas"] == 0
+
+    # Late assistant derivation completes qa_10's answer:
+    rows[0] = (10, now - timedelta(seconds=10), "问题 10", "使用 Pulsar-V3 方案。")
+    r_done = consolidate_pg_incremental(
+        _PendingPg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        pending_answer_grace_s=900.0,
+    )
+    assert r_done["pending_incomplete_qa_ids"] == []
+    assert r_done["processed_qas"] == 2
+    assert r_done["new_last_qa_id"] == 11
+
+    # Abandoned empty row older than grace window does NOT deadlock watermark:
+    rows.append((12, now - timedelta(hours=2), "废弃空问 12", ""))
+    rows.append((13, now - timedelta(seconds=2), "问题 13", "使用 Redis-V8 方案。"))
+    r_skip_old = consolidate_pg_incremental(
+        _PendingPg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        pending_answer_grace_s=900.0,
+    )
+    assert r_skip_old["pending_incomplete_qa_ids"] == []
+    assert r_skip_old["new_last_qa_id"] == 13
+    assert r_skip_old["processed_qas"] == 1

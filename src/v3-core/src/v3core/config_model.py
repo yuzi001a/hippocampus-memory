@@ -170,6 +170,8 @@ class PrefetchConfig:
     qa_tail_quota: int = 3
     # Codex-style structured topic consolidation + freshness guard (default on).
     topic_v2_mode: bool = True
+    # Opt-in full-history QA backfill on first Topic V2 boot (default False: start from MAX completed QA ID).
+    topic_v2_backfill_history: bool = False
 
 
 @dataclass
@@ -472,6 +474,12 @@ def from_legacy_dict(src: dict | None) -> V3Config:
             else _coerce_int(prefetch_raw.get("qa_tail_quota"), 3)
         ),
         topic_v2_mode=_coerce_bool(prefetch_raw.get("topic_v2_mode"), True),
+        topic_v2_backfill_history=_coerce_bool(
+            prefetch_raw.get("topic_v2_backfill_history")
+            if "topic_v2_backfill_history" in prefetch_raw
+            else (src.get("topic_v2") or {}).get("backfill_history"),
+            False,
+        ),
     )
 
     # -- Ingest --

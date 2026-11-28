@@ -476,6 +476,16 @@ def _doctor(args: argparse.Namespace) -> int:
         db_check = report["checks"]["database"]
         if isinstance(db_check, dict) and db_check.get("error"):
             report["errors"].append(f"database: {db_check['error']}")
+        if isinstance(db_check, dict) and db_check.get("reachable") is True:
+            missing_req = sorted(
+                tbl
+                for tbl, ok in (db_check.get("required_tables") or {}).items()
+                if not ok
+            )
+            if missing_req:
+                report["warnings"].append(
+                    f"database missing required tables: {', '.join(missing_req)}"
+                )
 
     # 9. Final status / exit code.
     if report["errors"]:

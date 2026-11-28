@@ -41,7 +41,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -1927,6 +1927,125 @@ def fetch_pg_superseded_qa_ids(pg: Any, qa_ids: Sequence[int]) -> set[int]:
         return set()
 
 
+def _compute_safe_baseline_qa_id(
+    cur: Any,
+    *,
+    pending_answer_grace_s: float = 900.0,
+) -> int:
+    """Compute a first-boot baseline watermark that skips historical completed QAs
+    without swallowing any recent in-flight empty-answer QA awaiting late derivation.
+    """
+    max_completed = 0
+    try:
+        cur.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM qa_pairs "
+            "WHERE COALESCE(BTRIM(answer), '') <> '' "
+            "AND COALESCE(session_id, '') NOT LIKE '%%.trajectory%%'"
+        )
+        mrow = cur.fetchone()
+        max_completed = int(mrow[0] or 0) if mrow and mrow[0] is not None else 0
+    except Exception:
+        try:
+            cur.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM qa_pairs "
+                "WHERE answer IS NOT NULL "
+                "AND COALESCE(session_id, '') NOT LIKE '%%.trajectory%%'"
+            )
+            mrow = cur.fetchone()
+            max_completed = int(mrow[0] or 0) if mrow and mrow[0] is not None else 0
+        except Exception:
+            max_completed = 0
+
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(0.0, float(pending_answer_grace_s)))
+        cur.execute(
+            "SELECT MIN(id) FROM qa_pairs "
+            "WHERE COALESCE(BTRIM(answer), '') = '' "
+            "AND COALESCE(session_id, '') NOT LIKE '%%.trajectory%%' "
+            "AND (timestamp IS NULL OR timestamp >= %s)",
+            (cutoff,),
+        )
+        prow = cur.fetchone()
+        if prow is not None and prow[0] is not None:
+            min_pending = int(prow[0])
+            if min_pending > 0:
+                return max(0, min(max_completed, min_pending - 1))
+    except Exception:
+        pass
+    return max(0, max_completed)
+
+
+def ensure_topic_v2_baseline_watermark(
+    pg: Any,
+    *,
+    state_dir: str | Path,
+    backfill_history: bool = False,
+    pending_answer_grace_s: float = 900.0,
+) -> dict[str, Any]:
+    """Initialize Topic V2 global watermark at application startup BEFORE live ingestion starts."""
+    if pg is None:
+        return {"initialized": False, "last_qa_id": 0, "reason": "no_pg"}
+    if backfill_history:
+        return {"initialized": False, "last_qa_id": 0, "reason": "backfill_enabled"}
+
+    root = Path(state_dir)
+    state_path = root / "topic_v2_state.json"
+    dir_lock = _get_state_dir_lock(root)
+
+    with dir_lock, _state_dir_file_lock(root):
+        local_last_qa: int | None = None
+        if state_path.is_file():
+            try:
+                raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+                local_last_qa = int(raw_state.get("last_qa_id") or 0)
+            except Exception:
+                local_last_qa = None
+
+        with _pg_conn_ctx(pg) as conn:
+            if conn is None:
+                return {"initialized": False, "last_qa_id": local_last_qa or 0, "reason": "no_conn"}
+            has_pg_state = False
+            with conn.cursor() as cur:
+                has_pg_state = _has_pg_state_table(cur)
+                if has_pg_state:
+                    try:
+                        cur.execute(
+                            "SELECT last_qa_id FROM public.topic_v2_state WHERE state_key = %s",
+                            ("default",),
+                        )
+                        srow = cur.fetchone()
+                        if srow is not None and srow[0] is not None:
+                            return {"initialized": False, "last_qa_id": int(srow[0]), "reason": "pg_state_exists"}
+                    except Exception:
+                        pass
+                if local_last_qa is not None:
+                    return {"initialized": False, "last_qa_id": local_last_qa, "reason": "local_state_exists"}
+
+                baseline = _compute_safe_baseline_qa_id(
+                    cur, pending_answer_grace_s=pending_answer_grace_s
+                )
+                if has_pg_state:
+                    cur.execute(
+                        "INSERT INTO public.topic_v2_state "
+                        "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
+                        "VALUES (%s, %s, 0, '[]'::jsonb, NOW()) "
+                        "ON CONFLICT (state_key) DO NOTHING",
+                        ("default", int(baseline)),
+                    )
+            if has_pg_state and getattr(conn, "autocommit", None) is not True and callable(getattr(conn, "commit", None)):
+                conn.commit()
+        _atomic_write_json(
+            state_path,
+            {
+                "last_qa_id": int(baseline),
+                "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "topic_count": 0,
+                "failed_qa_ids": [],
+            },
+        )
+        return {"initialized": True, "last_qa_id": int(baseline), "reason": "baseline_pinned"}
+
+
 def consolidate_pg_incremental(
     pg: Any,
     *,
@@ -1937,6 +2056,7 @@ def consolidate_pg_incremental(
     batch_limit: int = 100,
     embed_model: str = "",
     backfill_history: bool = False,
+    pending_answer_grace_s: float = 900.0,
 ) -> dict[str, Any]:
     """Incrementally consolidate new PG ``qa_pairs`` into ``TopicDossier``s and PG tables.
 
@@ -2005,16 +2125,9 @@ def consolidate_pg_incremental(
 
                 has_persisted_state = pg_state_present or has_local_state
                 if not has_persisted_state and not backfill_history:
-                    try:
-                        cur.execute(
-                            "SELECT COALESCE(MAX(id), 0) FROM qa_pairs "
-                            "WHERE answer IS NOT NULL "
-                            "AND COALESCE(session_id, '') NOT LIKE '%%.trajectory%%'"
-                        )
-                        mrow = cur.fetchone()
-                        last_qa_id = int(mrow[0] or 0) if mrow and mrow[0] is not None else 0
-                    except Exception:
-                        last_qa_id = 0
+                    last_qa_id = _compute_safe_baseline_qa_id(
+                        cur, pending_answer_grace_s=pending_answer_grace_s
+                    )
                     initialized_baseline = True
 
                 if not dossiers:
@@ -2072,13 +2185,14 @@ def consolidate_pg_incremental(
 
                 cur.execute(
                     "SELECT id, timestamp, question, answer FROM qa_pairs "
-                    "WHERE id > %s AND answer IS NOT NULL "
+                    "WHERE id > %s "
                     "AND COALESCE(session_id, '') NOT LIKE '%%.trajectory%%' "
                     "ORDER BY id ASC LIMIT %s",
                     (last_qa_id, max(int(batch_limit), 1)),
                 )
+                raw_fetched_qas: list[dict[str, Any]] = []
                 for row in cur.fetchall() or []:
-                    new_qas.append(
+                    raw_fetched_qas.append(
                         {
                             "id": int(row[0]),
                             "timestamp": row[1],
@@ -2086,6 +2200,27 @@ def consolidate_pg_incremental(
                             "answer": str(row[3] or ""),
                         }
                     )
+
+        # Preserve contiguous watermark across in-flight empty-answer QAs awaiting late
+        # assistant derivation: halt the batch BEFORE any recent empty-answer QA so a
+        # subsequent completed QA cannot advance last_qa_id past it. Abandoned empty-answer
+        # QAs older than pending_answer_grace_s are skipped cleanly so they never deadlock.
+        now_utc = datetime.now(timezone.utc)
+        pending_incomplete_qa_ids: list[int] = []
+        skipped_empty_max_id = last_qa_id
+        for qa in raw_fetched_qas:
+            if str(qa.get("answer") or "").strip():
+                new_qas.append(qa)
+                continue
+            qa_dt = _parse_iso_ts(_format_iso_ts(qa.get("timestamp")))
+            is_recent_pending = (
+                qa_dt is None
+                or (now_utc - qa_dt).total_seconds() < max(0.0, float(pending_answer_grace_s))
+            )
+            if is_recent_pending:
+                pending_incomplete_qa_ids.append(int(qa["id"]))
+                break
+            skipped_empty_max_id = max(skipped_empty_max_id, int(qa["id"]))
 
         claims_store = "pg" if (has_pg_claims and has_pg_state) else "degraded"
         before_map = {d.topic_id: d.to_dict() for d in dossiers}
@@ -2101,7 +2236,12 @@ def consolidate_pg_incremental(
                         d.embed_model = eff_embed_model
                         reembedded_dossiers.add(d.topic_id)
 
-        if not new_qas and not reembedded_dossiers and not claims_backfill_ids:
+        if (
+            not new_qas
+            and not reembedded_dossiers
+            and not claims_backfill_ids
+            and skipped_empty_max_id <= last_qa_id
+        ):
             if not dry_run and (initialized_baseline or (has_pg_state and not pg_state_present)):
                 with _pg_conn_ctx(pg) as conn:
                     if conn is not None and has_pg_state:
@@ -2142,6 +2282,7 @@ def consolidate_pg_incremental(
                 "migrated_claim_topics": 0,
                 "claims_store": claims_store,
                 "initialized_baseline": initialized_baseline,
+                "pending_incomplete_qa_ids": pending_incomplete_qa_ids,
                 "failed_qa_ids": [],
             }
 
@@ -2158,7 +2299,7 @@ def consolidate_pg_incremental(
                 updated_topics=len(reembedded_dossiers),
                 superseded_claims=0,
                 skipped_qas=0,
-                max_qa_id=last_qa_id,
+                max_qa_id=max(last_qa_id, skipped_empty_max_id),
                 failed_qa_ids=(),
             )
         changed_dossiers = [
@@ -2170,8 +2311,13 @@ def consolidate_pg_incremental(
         claims_sync_dossiers = [
             d for d in updated_dossiers if d.topic_id in changed_ids or d.topic_id in claims_backfill_ids
         ]
-        # Never advance watermark beyond last succeeded/explicitly-skipped QA.
-        new_max_qa = max(last_qa_id, report.max_qa_id)
+        # Never advance watermark beyond last succeeded/explicitly-skipped QA (nor past any pending incomplete QA).
+        candidate_max_qa = max(last_qa_id, report.max_qa_id)
+        if not report.failed_qa_ids:
+            candidate_max_qa = max(candidate_max_qa, skipped_empty_max_id)
+        if pending_incomplete_qa_ids:
+            candidate_max_qa = min(candidate_max_qa, min(pending_incomplete_qa_ids) - 1)
+        new_max_qa = max(last_qa_id, candidate_max_qa)
         upserted_claims = 0
 
         if not dry_run:
@@ -2290,6 +2436,7 @@ def consolidate_pg_incremental(
             "migrated_claim_topics": 0 if dry_run else len(claims_backfill_ids),
             "claims_store": claims_store,
             "initialized_baseline": initialized_baseline,
+            "pending_incomplete_qa_ids": pending_incomplete_qa_ids,
             "failed_qa_ids": list(report.failed_qa_ids),
         }
 

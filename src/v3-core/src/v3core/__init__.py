@@ -631,6 +631,43 @@ class V3Core:
         except Exception:  # noqa: BLE001
             return None
 
+    def _ensure_topic_v2_baseline(self) -> None:
+        """Pin first-boot Topic V2 baseline watermark BEFORE LiveBuffer accepts new turns."""
+        if getattr(self, "_topic_v2_baseline_checked", False):
+            return
+        self._topic_v2_baseline_checked = True
+        try:
+            cfg = getattr(self, "_config", None) or getattr(self, "config", None)
+            if not self._is_topic_v2_enabled(cfg):
+                return
+            backfill = self._is_topic_v2_backfill_enabled(cfg)
+            if backfill:
+                return
+            pg = getattr(self, "_pg", None)
+            if pg is None:
+                try:
+                    pg = self.pg
+                except Exception:
+                    pg = None
+            if pg is None:
+                return
+            if hasattr(pg, "is_connected") and callable(pg.is_connected):
+                try:
+                    if not pg.is_connected() and getattr(self, "_pg_pool", None) is None:
+                        return
+                except Exception:
+                    pass
+            from .config import _resolve_data_dir
+            from .topic_v2 import ensure_topic_v2_baseline_watermark
+
+            ensure_topic_v2_baseline_watermark(
+                pg,
+                state_dir=_resolve_data_dir(cfg),
+                backfill_history=False,
+            )
+        except Exception as e:
+            logger.debug("_ensure_topic_v2_baseline skipped (non-blocking): %s", _safe_err(e)[:120])
+
     @property
     def live_buffer(self) -> LiveBuffer:
         if self._live_buffer is None:
@@ -638,6 +675,8 @@ class V3Core:
             if pg_connected:
                 self._pg_was_connected = True
             pg = self.pg if pg_connected or getattr(self, "_pg_pool", None) is not None else None
+            if pg is not None:
+                self._ensure_topic_v2_baseline()
             self._live_buffer = LiveBuffer(pg=pg, config=self.config)
             # Phase 6.2: PG 写成功后触发轻量主题匹配.
             # Bind the V3Core method (not LiveBuffer self) so flush invalidation
@@ -711,6 +750,9 @@ class V3Core:
 
         self._initialized = True
         logger.info("V3Core 初始化 (profile=%s)", self._profile)
+        # Pin Topic V2 baseline watermark BEFORE recovering/accepting new live QA turns so
+        # pre-existing historical QAs are not backfilled while first-session turns are never skipped.
+        self._ensure_topic_v2_baseline()
         # recover durable QA markers deterministically (sorted, dedup)
         try:
             self._recover_pending_qa()
@@ -3564,6 +3606,20 @@ class V3Core:
             return bool(getattr(pf, "topic_v2_mode", True))
         return True
 
+    @staticmethod
+    def _is_topic_v2_backfill_enabled(cfg: Any) -> bool:
+        if cfg is None:
+            return False
+        if isinstance(cfg, dict):
+            return bool(
+                (cfg.get("topic_v2") or {}).get("backfill_history")
+                or (cfg.get("prefetch") or {}).get("topic_v2_backfill_history", False)
+            )
+        pf = getattr(cfg, "prefetch", None)
+        if pf is not None:
+            return bool(getattr(pf, "topic_v2_backfill_history", False))
+        return False
+
     def consolidate_topics_v2(
         self,
         *,
@@ -3611,16 +3667,7 @@ class V3Core:
                 eff_llm_fn = None
 
         state_dir = _resolve_data_dir(cfg)
-        backfill_history = False
-        if isinstance(cfg, dict):
-            backfill_history = bool(
-                (cfg.get("topic_v2") or {}).get("backfill_history")
-                or (cfg.get("prefetch") or {}).get("topic_v2_backfill_history", False)
-            )
-        else:
-            pf = getattr(cfg, "prefetch", None)
-            if pf is not None:
-                backfill_history = bool(getattr(pf, "topic_v2_backfill_history", False))
+        backfill_history = self._is_topic_v2_backfill_enabled(cfg)
         with lock:
             result = consolidate_pg_incremental(
                 pg,
@@ -4970,6 +5017,20 @@ class V3Core:
                     return None
             if rowcount > 0:
                 remember()
+                try:
+                    cfg_v2 = getattr(self, "_config", None) or getattr(self, "config", None)
+                    if (
+                        self._is_topic_v2_enabled(cfg_v2)
+                        and not getattr(self, "_topic_v2_stop_requested", False)
+                        and (
+                            getattr(self, "_topic_v2_worker", None) is not None
+                            or getattr(self, "_live_buffer", None) is not None
+                        )
+                    ):
+                        wake_ev = self._ensure_topic_v2_worker()
+                        wake_ev.set()
+                except Exception:
+                    pass
                 return "completed_late"
             # guard says a concurrent writer already merged this event
             remember()
