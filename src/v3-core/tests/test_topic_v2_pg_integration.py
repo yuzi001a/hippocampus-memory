@@ -70,20 +70,27 @@ if str(REPO_SRC) not in sys.path:
 
 
 def _resolve_real_connect() -> Callable[..., Any]:
-    try:
-        from psycopg2._psycopg import connect as _real_connect  # type: ignore
-
-        return _real_connect
-    except Exception:
-        pass
-    try:
-        from psycopg2._psycopg import _connect as _real_connect  # type: ignore
-
-        return _real_connect
-    except Exception:
-        pass
     import psycopg2 as _psycopg2
 
+    fn = getattr(_psycopg2, "connect", None)
+    if callable(fn) and getattr(fn, "__module__", "").startswith("psycopg2"):
+        return fn
+    try:
+        from psycopg2._psycopg import _connect as _raw_connect  # type: ignore
+
+        def _compat_connect(dsn: str = "", **kwargs: Any):
+            if dsn:
+                return _raw_connect(dsn)
+            parts = []
+            for k, v in kwargs.items():
+                if v is not None and v != "":
+                    key = "dbname" if k == "database" else k
+                    parts.append(f"{key}={v}")
+            return _raw_connect(" ".join(parts))
+
+        return _compat_connect
+    except Exception:
+        pass
     return _psycopg2.connect
 
 
@@ -218,7 +225,8 @@ def pg_pool() -> PgPool:
 
 @pytest.fixture(scope="module")
 def pg_store(pg_pool: PgPool) -> PgEmbedStore:
-    return PgEmbedStore(config=None, pool=pg_pool)
+    cfg = from_legacy_dict({"storage": {"pg": _pg_kwargs_from_dsn(_DSN_PARTS)}})
+    return PgEmbedStore(config=cfg, pool=pg_pool)
 
 
 def _cleanup_pg_rows(pool: PgPool) -> None:
@@ -810,8 +818,13 @@ def test_pg_p1_cross_topic_unrelated_yin_and_failed_qa_recovery(
         max_chars=4000,
     )
     hit_map = {h["source_id"]: h for h in hits}
-    db_topics = [sid for sid in hit_map if sid.startswith("topic_") and "PgBouncer" in hit_map[sid].get("text", "")]
-    assert db_topics
+    db_topics = [
+        sid
+        for sid in hit_map
+        if sid.startswith("topic_")
+        and "PgBouncer" in (hit_map[sid].get("content") or hit_map[sid].get("content_preview") or "")
+    ]
+    assert db_topics, f"expected DB Topic V2 hit in {list(hit_map)}"
     # Topic A (last_qa == qa_db < qa_log) must NOT be demoted below stale DB note even if qa_log exists!
     stale_note_sid = f"note:{_NOTE_PREFIX}stale_db"
     if stale_note_sid in hit_map:
