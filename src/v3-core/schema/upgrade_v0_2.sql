@@ -233,6 +233,11 @@ CREATE INDEX IF NOT EXISTS conversation_stream_session_source_idx
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/assistant_deliveries.sql <<<
 
 -- -----------------------------------------------------------------------------
+-- topic_claims + topic_claim_evidence — Topic V2 relational claims & evidence.
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/topic_claims.sql <<<
+
+-- -----------------------------------------------------------------------------
 -- v0.4 — the cumulative schema revision this upgrade brings an existing
 -- install to. Recorded LAST, inside the same transaction, so the row can only
 -- exist if every statement above committed.

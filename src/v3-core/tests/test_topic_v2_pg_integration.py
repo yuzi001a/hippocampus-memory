@@ -238,6 +238,14 @@ def _cleanup_pg_rows(pool: PgPool) -> None:
             (_TOPIC_PREFIX + "%", _LEGACY_TOPIC_ID),
         )
         cur.execute("DELETE FROM public.topic_entries WHERE topic_id LIKE %s", (_TOPIC_PREFIX + "%",))
+        cur.execute(
+            "DELETE FROM public.topic_claim_evidence WHERE topic_id LIKE %s OR topic_id = %s",
+            (_TOPIC_PREFIX + "%", _LEGACY_TOPIC_ID),
+        )
+        cur.execute(
+            "DELETE FROM public.topic_claims WHERE topic_id LIKE %s OR topic_id = %s",
+            (_TOPIC_PREFIX + "%", _LEGACY_TOPIC_ID),
+        )
         cur.execute("DELETE FROM public.observation_notes WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
         cur.execute("DELETE FROM public.yin WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
         cur.execute("DELETE FROM public.yin_paragraphs WHERE yin_version LIKE %s", (_NOTE_PREFIX + "%",))
@@ -1028,3 +1036,119 @@ def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
     assert ranked_sids.index(new_yin_sid) < ranked_sids.index(old_note_sid)
     assert by_sid[new_yin_sid].rrf_score > by_sid[old_note_sid].rrf_score
     assert by_sid[new_note_sid].rrf_score > by_sid[old_note_sid].rrf_score
+
+
+def test_pg_pr70_three_layer_claims_persistence_stateless_reload_and_unbounded_recall(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    from v3core.recall_pool import recall_pool as _rp_call
+    from v3core.topic_v2 import fetch_pg_superseded_qa_ids
+
+    t0 = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(days=5)
+    t2 = t0 + timedelta(days=10)
+
+    qa1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}pr70_1",
+        session_id="sess_pr70",
+        turn_id=1,
+        question="队列系统最初选型是什么？",
+        answer="队列系统最初采用 RabbitMQ-Classic 方案。",
+        ts=t0,
+    )
+    qa2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}pr70_2",
+        session_id="sess_pr70",
+        turn_id=2,
+        question="队列系统现在用什么？",
+        answer="正式废弃 RabbitMQ-Classic，改为 NATS-JetStream 方案。",
+        ts=t1,
+    )
+
+    state_dir = tmp_path / "pr70_state"
+    res1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="pr70-fp",
+    )
+    assert res1["processed_qas"] == 2
+    assert res1["upserted_claims"] >= 2
+
+    # 1. Verify all three layers in PostgreSQL (topics, topic_claims, topic_claim_evidence) + raw qa_pairs intact
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_id, topic_id, claim_text, status, replaced_by_claim_id "
+            "FROM public.topic_claims WHERE topic_id LIKE %s ORDER BY status ASC",
+            (_TOPIC_PREFIX + "%",),
+        )
+        claim_rows = cur.fetchall()
+        cur.execute(
+            "SELECT claim_id, qa_id, relation FROM public.topic_claim_evidence WHERE topic_id LIKE %s",
+            (_TOPIC_PREFIX + "%",),
+        )
+        ev_rows = cur.fetchall()
+        cur.execute("SELECT COUNT(*) FROM public.qa_pairs WHERE id IN (%s, %s)", (qa1, qa2))
+        raw_count = int(cur.fetchone()[0])
+
+    assert raw_count == 2
+    active_rows = [r for r in claim_rows if r[3] == "active"]
+    sup_rows = [r for r in claim_rows if r[3] == "superseded"]
+    assert len(active_rows) == 1 and "NATS-JetStream" in active_rows[0][2]
+    assert len(sup_rows) == 1 and "RabbitMQ-Classic" in sup_rows[0][2]
+    assert sup_rows[0][4] == active_rows[0][0]
+    assert any(r[1] == qa1 and r[2] == "supports" for r in ev_rows)
+    assert any(r[1] == qa2 and r[2] == "supports" for r in ev_rows)
+    assert any(r[0] == sup_rows[0][0] and r[1] == qa2 and r[2] == "supersedes" for r in ev_rows)
+
+    # 2. Stateless reload: delete local topic_v2_dossiers.json and consolidate a 3rd QA -> PG restores full claims!
+    (state_dir / "topic_v2_dossiers.json").unlink()
+    qa3 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}pr70_3",
+        session_id="sess_pr70",
+        turn_id=3,
+        question="队列系统又升级了吗？",
+        answer="正式废弃 NATS-JetStream，改为 Kafka-KRaft-V4 方案。",
+        ts=t2,
+    )
+    res2 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="pr70-fp",
+    )
+    assert res2["processed_qas"] == 1
+    assert res2["superseded_claims"] >= 1
+
+    # Both qa1 and qa2 must now be superseded in PostgreSQL relational tables.
+    pg_sup = fetch_pg_superseded_qa_ids(pg_store, [qa1, qa2, qa3])
+    assert pg_sup == {qa1, qa2}
+
+    # 3. Real recall_pool with include_topic=False (NO topic header at all!) STILL demotes qa1 & qa2 via PG!
+    cfg = _default_pg_dict_config(tmp_path)
+    hits, _meta = _rp_call(
+        "队列系统现在用什么方案？",
+        pg=pg_store,
+        q_emb=_EMBED_FN("队列系统现在用什么方案"),
+        include_keyword=True,
+        include_topic=False,
+        include_yin=False,
+        include_notes=False,
+        limit=10,
+        config=cfg,
+    )
+    ranked = [h.source_id for h in hits]
+    assert f"qa_{qa3}" in ranked
+    for old_q in (qa1, qa2):
+        if f"qa_{old_q}" in ranked:
+            assert ranked.index(f"qa_{qa3}") < ranked.index(f"qa_{old_q}"), (
+                f"PG relational hydration must demote qa_{old_q} even without topic header: {ranked}"
+            )

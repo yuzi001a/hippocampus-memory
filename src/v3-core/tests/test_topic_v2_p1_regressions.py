@@ -1752,3 +1752,301 @@ def test_r5_p1_2_observation_note_not_whole_demoted_by_sparse_source_qa_range():
     )
     assert guard["demoted_sids"] == ["qa_5"]
     assert multi_topic_note.rrf_score == 0.052
+
+
+# ---------------------------------------------------------------------------
+# PR #70: Three-layer PG claims persistence, lossless JSON migration,
+# unbounded Recall hydration, relevance-ranked active_claims, and Worker recovery
+# ---------------------------------------------------------------------------
+
+def test_pr70_pg_claims_transactional_sync_and_lossless_json_migration(tmp_path: Path):
+    """Lossless JSON->PG backfill writes topic_claims & topic_claim_evidence transactionally."""
+    from v3core.topic_v2 import SupersededClaim, save_dossiers
+
+    state_dir = tmp_path / "pr70_mig"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    # Pre-PR#70 dossier JSON: SupersededClaim has no claim_id yet.
+    pre_dossier = TopicDossier(
+        topic_id="tv2_mig_1",
+        title="部署编排方案",
+        current_claims=[
+            TopicClaim(claim_id="c_2_1", text="使用 Kubernetes-V2", kind="decision", evidence_qa_ids=[2]),
+        ],
+        superseded_claims=[
+            SupersededClaim(
+                text="早期使用 Manual-Script-V0",
+                replaced_by_claim_id="c_2_1",
+                reason="自动化升级",
+                superseded_at="2026-11-20T08:00:00Z",
+                evidence_qa_ids=[1],
+                claim_id="",
+            )
+        ],
+        keywords=["部署", "Kubernetes-V2"],
+        last_evidence_qa_id=2,
+        last_evidence_at="2026-11-20T08:00:00Z",
+        embed_model="fp-1",
+        embedding=_embed("部署编排方案 Kubernetes-V2"),
+    )
+    save_dossiers(state_dir / "topic_v2_dossiers.json", [pre_dossier])
+    (state_dir / "topic_v2_state.json").write_text(
+        json.dumps({"last_qa_id": 2}), encoding="utf-8"
+    )
+
+    claims_tbl: dict[str, dict] = {}
+    evidence_tbl: set[tuple[str, str, int, str]] = set()
+    tx_events: list[str] = []
+
+    class _FakeClaimsCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass('public.topic_claims')" in q:
+                self._rows = [("public.topic_claims", "public.topic_claim_evidence")]
+            elif "select distinct topic_id from public.topic_claims" in q:
+                self._rows = [(c["topic_id"],) for c in claims_tbl.values()]
+            elif "from qa_pairs" in q:
+                self._rows = []
+            elif q == "begin":
+                tx_events.append("BEGIN")
+            elif q == "commit":
+                tx_events.append("COMMIT")
+            elif "insert into public.topic_claims" in q:
+                if "'active'" in q:
+                    cid, tid, ctext, ckind, _upd = params
+                    claims_tbl[cid] = {
+                        "topic_id": tid,
+                        "text": ctext,
+                        "kind": ckind,
+                        "status": "active",
+                        "replaced_by": "",
+                    }
+                else:
+                    scid, tid, ctext, rep_by, sreason, _upd, _sup = params
+                    claims_tbl[scid] = {
+                        "topic_id": tid,
+                        "text": ctext,
+                        "status": "superseded",
+                        "replaced_by": rep_by,
+                        "reason": sreason,
+                    }
+            elif "insert into public.topic_claim_evidence" in q:
+                cid, tid, qid = params
+                rel = "supersedes" if "'supersedes'" in q else "supports"
+                evidence_tbl.add((cid, tid, int(qid), rel))
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakeConn:
+        autocommit = True
+
+        def cursor(self):
+            return _FakeClaimsCur()
+
+        def close(self):
+            pass
+
+    class _FakePg:
+        def _connect(self):
+            return _FakeConn()
+
+    res = consolidate_pg_incremental(
+        _FakePg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="fp-1",
+    )
+    assert res["migrated_claim_topics"] == 1
+    assert res["upserted_claims"] == 2
+    assert tx_events == ["BEGIN", "COMMIT"]
+    assert "c_2_1" in claims_tbl and claims_tbl["c_2_1"]["status"] == "active"
+    sup_entries = [v for k, v in claims_tbl.items() if v["status"] == "superseded"]
+    assert len(sup_entries) == 1 and sup_entries[0]["replaced_by"] == "c_2_1"
+    sup_cid = next(k for k, v in claims_tbl.items() if v["status"] == "superseded")
+    assert ("c_2_1", "tv2_mig_1", 2, "supports") in evidence_tbl
+    assert (sup_cid, "tv2_mig_1", 1, "supports") in evidence_tbl
+    assert (sup_cid, "tv2_mig_1", 2, "supersedes") in evidence_tbl
+
+    # Second run is a clean idempotent no-op (migrated_claim_topics == 0).
+    res2 = consolidate_pg_incremental(
+        _FakePg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="fp-1",
+    )
+    assert res2["migrated_claim_topics"] == 0
+    assert res2["upserted_claims"] == 0
+
+
+def test_pr70_pg_superseded_qa_hydration_lifts_header_budget_cap(monkeypatch):
+    """Recall hydrates superseded QA IDs from PG even when truncated from the 32-item header."""
+    from v3core import topic_v2 as tv2_mod
+
+    monkeypatch.setattr(
+        tv2_mod,
+        "fetch_pg_superseded_qa_ids",
+        lambda pg, qids: {5} & set(qids),
+    )
+
+    # Header has empty superseded_qas (simulating truncation or missing parent topic in top-K).
+    header = (
+        '<!-- topic_v2:{"v":2,"last_qa":99,"last_at":"2026-11-28T08:00:00Z",'
+        '"active_qas":[99],"superseded_qas":[]} -->'
+    )
+    qa_old = rp_mod.RecallHit(
+        source_id="qa_5",
+        kind="qa",
+        title="早期方案",
+        content="使用 Legacy-Engine-V0",
+        content_preview="使用 Legacy-Engine-V0",
+        rrf_score=0.060,
+        created_at="2026-10-01T08:00:00Z",
+    )
+    qa_cur = rp_mod.RecallHit(
+        source_id="qa_99",
+        kind="qa",
+        title="当前方案",
+        content="使用 Modern-Engine-V5",
+        content_preview="使用 Modern-Engine-V5",
+        rrf_score=0.055,
+        created_at="2026-11-28T08:00:00Z",
+    )
+    topic_hit = rp_mod.RecallHit(
+        source_id="topic_tv2_eng_99",
+        kind="topic",
+        title="引擎选型",
+        content=f"{header}\n- 当前结论：使用 Modern-Engine-V5",
+        content_preview=f"{header}\n- 当前结论：使用 Modern-Engine-V5",
+        rrf_score=0.052,
+        created_at="2026-11-28T08:00:00Z",
+    )
+
+    guard = apply_topic_v2_ranking_guard(
+        [qa_old, qa_cur, topic_hit],
+        query="当前引擎选型是什么？",
+        extra_superseded_qa_ids=tv2_mod.fetch_pg_superseded_qa_ids(object(), [5, 99]),
+    )
+    assert guard["demoted_sids"] == ["qa_5"]
+    assert qa_old.rrf_score < topic_hit.rrf_score
+    assert qa_old.rrf_score < qa_cur.rrf_score
+
+
+def test_pr70_phase1_selects_relevant_active_claims_beyond_8():
+    """Topics with >16 active claims still surface relevant older claims to LLM Phase 1."""
+    claims = [
+        TopicClaim(
+            claim_id=f"c_{i}",
+            text=f"常规配置项 Alpha-{i} 保持默认参数",
+            kind="fact",
+            evidence_qa_ids=[i],
+        )
+        for i in range(1, 20)
+    ]
+    claims.insert(
+        0,
+        TopicClaim(
+            claim_id="c_target_early",
+            text="分布式缓存早期使用 Memcached-Pool-X 节点",
+            kind="decision",
+            evidence_qa_ids=[100],
+        ),
+    )
+    dossier = TopicDossier(
+        topic_id="tv2_big_1",
+        title="分布式基础设施配置",
+        current_claims=claims,
+        keywords=["分布式", "缓存", "Memcached-Pool-X"],
+        last_evidence_qa_id=100,
+    )
+    seen_payloads: list[dict] = []
+
+    def _capture_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        seen_payloads.append(payload)
+        return json.dumps(
+            {
+                "action": "attach",
+                "target_topic_id": "tv2_big_1",
+                "topic_title": "分布式基础设施配置",
+                "update_type": "evolve",
+                "claim_text": "分布式缓存改用 Redis-Cluster-V7",
+                "replaces_claim_ids": ["c_target_early"],
+                "replaces_text": "Memcached-Pool-X",
+                "reason": "持久化与集群分片",
+                "keywords": ["分布式", "缓存", "Redis-Cluster-V7"],
+            },
+            ensure_ascii=False,
+        )
+
+    consolidator = TopicConsolidatorV2(embed_fn=_embed, llm_fn=_capture_llm)
+    out, rep = consolidator.consolidate_qa_stream(
+        [
+            {
+                "id": 200,
+                "timestamp": "2026-11-28T09:00:00Z",
+                "question": "Memcached-Pool-X 缓存还用吗？",
+                "answer": "Memcached-Pool-X 已切换为 Redis-Cluster-V7。",
+            }
+        ],
+        existing_dossiers=[dossier],
+    )
+    assert len(seen_payloads) == 1
+    sent_claim_ids = [c["claim_id"] for c in seen_payloads[0]["candidate_topics"][0]["active_claims"]]
+    assert len(sent_claim_ids) == 16
+    assert "c_target_early" in sent_claim_ids
+    assert rep.superseded_claims == 1
+    assert "c_target_early" not in {c.claim_id for c in out[0].current_claims}
+
+
+def test_pr70_worker_auto_recovers_after_immediate_retry_exhaustion():
+    """Worker schedules automatic background recovery after 3 failed attempts with no new flush."""
+    from v3core import V3Core
+
+    core = V3Core.__new__(V3Core)
+    core._config = {"prefetch": {"topic_v2_mode": True}}
+    core._topic_v2_retry_base_s = 0.01
+    core._topic_v2_recovery_cooldown_s = 0.06
+    core._topic_v2_recovery_max_s = 0.2
+    core._topic_v2_stop_requested = False
+
+    attempts = {"n": 0}
+    recovered_ev = threading.Event()
+
+    def _flaky_consolidate(**kwargs):
+        attempts["n"] += 1
+        # Fail the first 3 attempts (exhausting immediate retries), then succeed on auto-recovery!
+        if attempts["n"] <= 3:
+            return {"processed_qas": 1, "failed_qa_ids": [999]}
+        recovered_ev.set()
+        return {"processed_qas": 1, "failed_qa_ids": []}
+
+    core.consolidate_topics_v2 = _flaky_consolidate  # type: ignore[method-assign]
+    try:
+        core._on_live_flush([{"id": 999}])
+        # Immediate burst finishes and wait_topic_v2_idle returns promptly (does not block on cooldown).
+        assert core.wait_topic_v2_idle(timeout=1.0)
+        assert attempts["n"] >= 3
+        # WITHOUT any second _on_live_flush, automatic recovery wakes up and clears the failure!
+        assert recovered_ev.wait(timeout=2.0), f"Worker failed to auto-recover; attempts={attempts['n']}"
+        assert core.wait_topic_v2_idle(timeout=1.0)
+        assert getattr(core, "_topic_v2_pending_recovery", False) is False
+    finally:
+        core._stop_topic_v2_worker(timeout=1.0)

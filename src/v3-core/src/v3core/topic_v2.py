@@ -32,6 +32,7 @@ Design goals (see docs/DESIGN-PHILOSOPHY.md):
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -205,15 +206,19 @@ class SupersededClaim:
     reason: str = ""
     superseded_at: str = ""
     evidence_qa_ids: list[int] = field(default_factory=list)
+    claim_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "text": self.text,
             "replaced_by_claim_id": self.replaced_by_claim_id,
             "reason": self.reason,
             "superseded_at": self.superseded_at,
             "evidence_qa_ids": list(self.evidence_qa_ids),
         }
+        if self.claim_id:
+            out["claim_id"] = self.claim_id
+        return out
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "SupersededClaim":
@@ -223,6 +228,7 @@ class SupersededClaim:
             reason=str(data.get("reason") or ""),
             superseded_at=str(data.get("superseded_at") or ""),
             evidence_qa_ids=[int(x) for x in (data.get("evidence_qa_ids") or [])],
+            claim_id=str(data.get("claim_id") or ""),
         )
 
 
@@ -798,6 +804,24 @@ class TopicConsolidatorV2:
             return (note, note is None)
         return self._distill_deterministic(qa_id, question, answer, ts, qa_text, candidates), False
 
+    def _select_active_claims_for_prompt(
+        self,
+        dossier: TopicDossier,
+        query_text: str,
+        limit: int = 16,
+    ) -> list[dict[str, str]]:
+        claims = [c for c in dossier.current_claims if c.text]
+        if len(claims) <= limit:
+            return [{"claim_id": c.claim_id, "text": c.text} for c in claims]
+        q_toks = _extract_tokens(query_text)
+        scored: list[tuple[int, int, TopicClaim]] = []
+        for idx, c in enumerate(claims):
+            overlap = len(q_toks & _extract_tokens(c.text)) if q_toks else 0
+            scored.append((overlap, idx, c))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        picked = sorted(scored[:limit], key=lambda item: item[1])
+        return [{"claim_id": c.claim_id, "text": c.text} for _, _, c in picked]
+
     def _distill_with_llm(
         self,
         qa_id: int,
@@ -806,16 +830,13 @@ class TopicConsolidatorV2:
         ts: str,
         candidates: list[tuple[float, TopicDossier]],
     ) -> Phase1Note | None:
+        qa_text = f"{question}\n{answer}"
         cand_desc = [
             {
                 "topic_id": d.topic_id,
                 "title": d.title,
                 "summary": d.summary,
-                "active_claims": [
-                    {"claim_id": c.claim_id, "text": c.text}
-                    for c in d.current_claims[:8]
-                    if c.text
-                ],
+                "active_claims": self._select_active_claims_for_prompt(d, qa_text, limit=16),
                 "keywords": d.keywords[:8],
                 "similarity": round(score, 4),
             }
@@ -1132,6 +1153,7 @@ class TopicConsolidatorV2:
                             reason=note.reason or f"被 {note.claim_text} 替代",
                             superseded_at=note.timestamp,
                             evidence_qa_ids=list(claim.evidence_qa_ids),
+                            claim_id=claim.claim_id,
                         )
                     )
                 else:
@@ -1164,6 +1186,7 @@ class TopicConsolidatorV2:
                     reason=note.reason or note.claim_text,
                     superseded_at=note.timestamp,
                     evidence_qa_ids=[note.evidence_qa_id] if note.evidence_qa_id > 0 else [],
+                    claim_id=f"hist_{note.evidence_qa_id}_{len(target.superseded_claims) + 1}",
                 )
             )
             if not target.current_claims and note.topic_title:
@@ -1326,6 +1349,7 @@ def apply_topic_v2_ranking_guard(
     query: str,
     trace: Any = None,
     probe_fn: Callable[..., Any] | None = None,
+    extra_superseded_qa_ids: Sequence[int] | set[int] | None = None,
 ) -> dict[str, Any]:
     """Enforce read-side freshness and explicit LLM-established supersession in ``scored``.
 
@@ -1380,8 +1404,14 @@ def apply_topic_v2_ranking_guard(
         if getattr(hit, "kind", "") == "topic"
     }
 
-    # Collect explicit LLM-confirmed supersession relations from Topic V2 headers.
+    # Collect explicit LLM-confirmed supersession relations from Topic V2 headers + PG claims store.
     superseded_qa_ids: set[int] = set()
+    if extra_superseded_qa_ids:
+        for qid in extra_superseded_qa_ids:
+            try:
+                superseded_qa_ids.add(int(qid))
+            except (TypeError, ValueError):
+                pass
     superseded_qa_by_topic: dict[str, set[int]] = {}
     superseded_qa_ts: dict[int, datetime | None] = {}
     topic_active_qas: dict[str, set[int]] = {}
@@ -1626,6 +1656,250 @@ def _state_dir_file_lock(state_dir: Path, timeout: float = 15.0):
             pass
 
 
+def _stable_claim_id(
+    topic_id: str,
+    existing_id: str,
+    text: str,
+    status: str,
+    qa_ids: Sequence[int],
+) -> str:
+    cid = str(existing_id or "").strip()
+    if cid:
+        return cid
+    digest = hashlib.sha1(
+        f"{topic_id}|{status}|{text}|{sorted(int(q) for q in qa_ids)}".encode("utf-8")
+    ).hexdigest()[:12]
+    prefix = "sc" if status == "superseded" else "c"
+    return f"{prefix}_{topic_id}_{digest}"
+
+
+def _has_pg_claims_tables(cur: Any) -> bool:
+    """Return True when both ``public.topic_claims`` and ``public.topic_claim_evidence`` exist."""
+    try:
+        cur.execute(
+            "SELECT to_regclass('public.topic_claims'), to_regclass('public.topic_claim_evidence')"
+        )
+        row = cur.fetchone()
+        return bool(row and len(row) >= 2 and row[0] and row[1])
+    except Exception:
+        return False
+
+
+def _sync_dossiers_to_pg_claims(cur: Any, dossiers: Sequence[TopicDossier]) -> int:
+    """Transactionally upsert ``topic_claims`` and ``topic_claim_evidence`` for ``dossiers``."""
+    upserted_claims = 0
+    for dossier in dossiers:
+        tid = dossier.topic_id
+        # Map active claim_id -> evidence_qa_ids for recording explicit 'supersedes' audit links.
+        active_ev_by_cid: dict[str, list[int]] = {}
+        for claim in dossier.current_claims:
+            cid = _stable_claim_id(tid, claim.claim_id, claim.text, "active", claim.evidence_qa_ids)
+            if not claim.claim_id:
+                claim.claim_id = cid
+            active_ev_by_cid[cid] = [int(q) for q in claim.evidence_qa_ids if int(q) > 0]
+            updated_dt = _parse_iso_ts(claim.updated_at) or _parse_iso_ts(dossier.last_evidence_at)
+            cur.execute(
+                "INSERT INTO public.topic_claims "
+                "(claim_id, topic_id, claim_text, kind, status, replaced_by_claim_id, "
+                " supersede_reason, updated_at, superseded_at) "
+                "VALUES (%s, %s, %s, %s, 'active', '', '', COALESCE(%s, NOW()), NULL) "
+                "ON CONFLICT (claim_id) DO UPDATE SET "
+                "topic_id = EXCLUDED.topic_id, claim_text = EXCLUDED.claim_text, "
+                "kind = EXCLUDED.kind, status = 'active', replaced_by_claim_id = '', "
+                "supersede_reason = '', updated_at = EXCLUDED.updated_at, superseded_at = NULL",
+                (cid, tid, claim.text, claim.kind or "fact", updated_dt),
+            )
+            upserted_claims += 1
+            for qid in active_ev_by_cid[cid]:
+                cur.execute(
+                    "INSERT INTO public.topic_claim_evidence (claim_id, topic_id, qa_id, relation) "
+                    "VALUES (%s, %s, %s, 'supports') "
+                    "ON CONFLICT (claim_id, qa_id, relation) DO NOTHING",
+                    (cid, tid, qid),
+                )
+
+        for sup in dossier.superseded_claims:
+            scid = _stable_claim_id(tid, sup.claim_id, sup.text, "superseded", sup.evidence_qa_ids)
+            if not sup.claim_id:
+                sup.claim_id = scid
+            sup_dt = _parse_iso_ts(sup.superseded_at) or _parse_iso_ts(dossier.last_evidence_at)
+            cur.execute(
+                "INSERT INTO public.topic_claims "
+                "(claim_id, topic_id, claim_text, kind, status, replaced_by_claim_id, "
+                " supersede_reason, updated_at, superseded_at) "
+                "VALUES (%s, %s, %s, 'decision', 'superseded', %s, %s, COALESCE(%s, NOW()), COALESCE(%s, NOW())) "
+                "ON CONFLICT (claim_id) DO UPDATE SET "
+                "topic_id = EXCLUDED.topic_id, claim_text = EXCLUDED.claim_text, "
+                "status = 'superseded', replaced_by_claim_id = EXCLUDED.replaced_by_claim_id, "
+                "supersede_reason = EXCLUDED.supersede_reason, "
+                "updated_at = EXCLUDED.updated_at, superseded_at = EXCLUDED.superseded_at",
+                (scid, tid, sup.text, sup.replaced_by_claim_id or "", sup.reason or "", sup_dt, sup_dt),
+            )
+            upserted_claims += 1
+            for qid in sup.evidence_qa_ids:
+                iq = int(qid)
+                if iq > 0:
+                    cur.execute(
+                        "INSERT INTO public.topic_claim_evidence (claim_id, topic_id, qa_id, relation) "
+                        "VALUES (%s, %s, %s, 'supports') "
+                        "ON CONFLICT (claim_id, qa_id, relation) DO NOTHING",
+                        (scid, tid, iq),
+                    )
+            for rep_qid in active_ev_by_cid.get(sup.replaced_by_claim_id or "", []):
+                cur.execute(
+                    "INSERT INTO public.topic_claim_evidence (claim_id, topic_id, qa_id, relation) "
+                    "VALUES (%s, %s, %s, 'supersedes') "
+                    "ON CONFLICT (claim_id, qa_id, relation) DO NOTHING",
+                    (scid, tid, rep_qid),
+                )
+    return upserted_claims
+
+
+def _load_dossiers_from_pg_claims(
+    cur: Any,
+    topic_rows: Sequence[Mapping[str, Any]],
+) -> tuple[list[TopicDossier], list[Mapping[str, Any]]]:
+    """Reconstruct TopicDossiers directly from PG ``topic_claims`` + ``topic_claim_evidence``.
+
+    Returns ``(reconstructed_dossiers, remaining_legacy_rows)`` for topics that do not yet
+    have relational claims in PG.
+    """
+    if not topic_rows:
+        return [], []
+    tids = [str(r.get("topic_id") or "") for r in topic_rows if r.get("topic_id")]
+    if not tids:
+        return [], list(topic_rows)
+    cur.execute(
+        "SELECT claim_id, topic_id, claim_text, kind, status, replaced_by_claim_id, "
+        " supersede_reason, updated_at, superseded_at "
+        "FROM public.topic_claims "
+        "WHERE topic_id = ANY(%s) "
+        "ORDER BY created_at ASC, claim_id ASC",
+        (tids,),
+    )
+    claim_rows = list(cur.fetchall() or [])
+    if not claim_rows:
+        return [], list(topic_rows)
+
+    cur.execute(
+        "SELECT claim_id, qa_id, relation FROM public.topic_claim_evidence "
+        "WHERE topic_id = ANY(%s) AND relation = 'supports' "
+        "ORDER BY qa_id ASC",
+        (tids,),
+    )
+    ev_by_claim: dict[str, list[int]] = {}
+    for cid, qid, _rel in (cur.fetchall() or []):
+        ev_by_claim.setdefault(str(cid), []).append(int(qid))
+
+    claims_by_topic: dict[str, list[tuple[Any, ...]]] = {}
+    for row in claim_rows:
+        claims_by_topic.setdefault(str(row[1]), []).append(row)
+
+    reconstructed: list[TopicDossier] = []
+    remaining_legacy: list[Mapping[str, Any]] = []
+    for trow in topic_rows:
+        tid = str(trow.get("topic_id") or "")
+        t_claims = claims_by_topic.get(tid)
+        if not t_claims:
+            remaining_legacy.append(trow)
+            continue
+        cur_claims: list[TopicClaim] = []
+        sup_claims: list[SupersededClaim] = []
+        max_qid = 0
+        latest_ts = ""
+        for cid, _tid, ctext, ckind, cstatus, rep_by, sreason, upd_at, sup_at in t_claims:
+            qids = sorted(set(ev_by_claim.get(str(cid), [])))
+            if qids:
+                max_qid = max(max_qid, max(qids))
+            upd_str = _format_iso_ts(upd_at)
+            sup_str = _format_iso_ts(sup_at)
+            if upd_str and upd_str > latest_ts:
+                latest_ts = upd_str
+            if sup_str and sup_str > latest_ts:
+                latest_ts = sup_str
+            if str(cstatus or "active") == "superseded":
+                sup_claims.append(
+                    SupersededClaim(
+                        text=str(ctext or ""),
+                        replaced_by_claim_id=str(rep_by or ""),
+                        reason=str(sreason or ""),
+                        superseded_at=sup_str,
+                        evidence_qa_ids=qids,
+                        claim_id=str(cid),
+                    )
+                )
+            else:
+                cur_claims.append(
+                    TopicClaim(
+                        claim_id=str(cid),
+                        text=str(ctext or ""),
+                        kind=str(ckind or "fact"),
+                        evidence_qa_ids=qids,
+                        updated_at=upd_str,
+                    )
+                )
+        header = parse_topic_v2_header(str(trow.get("body") or "")) or {}
+        if int(header.get("last_qa") or 0) > max_qid:
+            max_qid = int(header.get("last_qa") or 0)
+        if str(header.get("last_at") or "") > latest_ts:
+            latest_ts = str(header.get("last_at") or "")
+        reconstructed.append(
+            TopicDossier(
+                topic_id=tid,
+                title=str(trow.get("title") or tid),
+                summary=str(trow.get("summary") or ""),
+                current_claims=cur_claims,
+                superseded_claims=sup_claims,
+                keywords=list(trow.get("keywords") or []),
+                last_evidence_qa_id=max_qid,
+                last_evidence_at=latest_ts,
+                status=str(trow.get("status") or "active"),
+                embed_model=str(trow.get("embed_model") or ""),
+                embedding=trow.get("embedding"),
+            )
+        )
+    return reconstructed, remaining_legacy
+
+
+def fetch_pg_superseded_qa_ids(pg: Any, qa_ids: Sequence[int]) -> set[int]:
+    """Query PG relational claim tables for recalled QA IDs that ONLY support superseded claims.
+
+    Lifts the 32/12-item Topic V2 header budget cap so arbitrarily old superseded evidence
+    stays accurately demoted even when its parent topic is not in the top-K topic hits.
+    Fail-open (returns empty set) when PG or relational tables are unavailable.
+    """
+    clean_ids = sorted({int(q) for q in (qa_ids or []) if int(q) > 0})
+    if pg is None or not clean_ids:
+        return set()
+    try:
+        with _pg_conn_ctx(pg) as conn:
+            if conn is None:
+                return set()
+            with conn.cursor() as cur:
+                if not _has_pg_claims_tables(cur):
+                    return set()
+                cur.execute(
+                    "SELECT DISTINCT e.qa_id "
+                    "FROM public.topic_claim_evidence e "
+                    "JOIN public.topic_claims c ON c.claim_id = e.claim_id "
+                    "WHERE e.qa_id = ANY(%s) "
+                    "  AND e.relation = 'supports' "
+                    "  AND c.status = 'superseded' "
+                    "  AND NOT EXISTS ("
+                    "      SELECT 1 "
+                    "      FROM public.topic_claim_evidence e2 "
+                    "      JOIN public.topic_claims c2 ON c2.claim_id = e2.claim_id "
+                    "      WHERE e2.qa_id = e.qa_id "
+                    "        AND e2.relation = 'supports' "
+                    "        AND c2.status = 'active'"
+                    "  )",
+                    (clean_ids,),
+                )
+                return {int(row[0]) for row in (cur.fetchall() or []) if row and row[0] is not None}
+    except Exception:
+        return set()
+
+
 def consolidate_pg_incremental(
     pg: Any,
     *,
@@ -1666,12 +1940,15 @@ def consolidate_pg_incremental(
         )
         dossiers = load_dossiers(dossiers_path)
         reembedded_dossiers: set[str] = set()
+        claims_backfill_ids: set[str] = set()
+        has_pg_claims = False
 
         new_qas: list[dict[str, Any]] = []
         with _pg_conn_ctx(pg) as conn:
             if conn is None:
                 raise RuntimeError("consolidate_pg_incremental: failed to obtain PG connection")
             with conn.cursor() as cur:
+                has_pg_claims = _has_pg_claims_tables(cur)
                 if not dossiers:
                     try:
                         try:
@@ -1685,9 +1962,9 @@ def consolidate_pg_incremental(
                                 "SELECT topic_id, title, COALESCE(summary, ''), COALESCE(body, ''), "
                                 "keywords, status, embedding FROM topics WHERE status='active'"
                             )
-                        legacy_rows = []
+                        topic_rows = []
                         for row in cur.fetchall() or []:
-                            legacy_rows.append(
+                            topic_rows.append(
                                 {
                                     "topic_id": row[0],
                                     "title": row[1] or "",
@@ -1699,10 +1976,31 @@ def consolidate_pg_incremental(
                                     "embed_model": str(row[7] or "") if len(row) > 7 else "",
                                 }
                             )
-                        if legacy_rows:
-                            dossiers = consolidator.seed_from_legacy_topics(legacy_rows)
+                        if topic_rows:
+                            if has_pg_claims:
+                                pg_dossiers, rem_legacy = _load_dossiers_from_pg_claims(cur, topic_rows)
+                                dossiers = list(pg_dossiers)
+                                if rem_legacy:
+                                    seeded = consolidator.seed_from_legacy_topics(rem_legacy)
+                                    dossiers.extend(seeded)
+                                    claims_backfill_ids.update(d.topic_id for d in seeded)
+                            else:
+                                dossiers = consolidator.seed_from_legacy_topics(topic_rows)
                     except Exception:
                         dossiers = []
+                elif has_pg_claims:
+                    # Lossless JSON -> PG migration: backfill any dossier whose claims are not yet in PG.
+                    try:
+                        tids = [d.topic_id for d in dossiers if d.current_claims or d.superseded_claims]
+                        if tids:
+                            cur.execute(
+                                "SELECT DISTINCT topic_id FROM public.topic_claims WHERE topic_id = ANY(%s)",
+                                (tids,),
+                            )
+                            present = {str(r[0]) for r in (cur.fetchall() or []) if r and r[0]}
+                            claims_backfill_ids.update(tid for tid in tids if tid not in present)
+                    except Exception:
+                        pass
 
                 cur.execute(
                     "SELECT id, timestamp, question, answer FROM qa_pairs "
@@ -1734,7 +2032,7 @@ def consolidate_pg_incremental(
                         d.embed_model = eff_embed_model
                         reembedded_dossiers.add(d.topic_id)
 
-        if not new_qas and not reembedded_dossiers:
+        if not new_qas and not reembedded_dossiers and not claims_backfill_ids:
             return {
                 "dry_run": bool(dry_run),
                 "previous_last_qa_id": last_qa_id,
@@ -1745,6 +2043,8 @@ def consolidate_pg_incremental(
                 "superseded_claims": 0,
                 "skipped_qas": 0,
                 "upserted_topics": 0,
+                "upserted_claims": 0,
+                "migrated_claim_topics": 0,
                 "failed_qa_ids": [],
             }
 
@@ -1769,11 +2069,16 @@ def consolidate_pg_incremental(
             for d in updated_dossiers
             if d.topic_id in reembedded_dossiers or before_map.get(d.topic_id) != d.to_dict()
         ]
+        changed_ids = {d.topic_id for d in changed_dossiers}
+        claims_sync_dossiers = [
+            d for d in updated_dossiers if d.topic_id in changed_ids or d.topic_id in claims_backfill_ids
+        ]
         # Never advance watermark beyond last succeeded/explicitly-skipped QA.
         new_max_qa = max(last_qa_id, report.max_qa_id)
+        upserted_claims = 0
 
         if not dry_run:
-            if changed_dossiers:
+            if changed_dossiers or (has_pg_claims and claims_sync_dossiers):
                 with _pg_conn_ctx(pg) as conn:
                     if conn is None:
                         raise RuntimeError("consolidate_pg_incremental: PG connection lost before upsert")
@@ -1828,6 +2133,8 @@ def consolidate_pg_incremental(
                                             emb_str,
                                         ),
                                     )
+                            if has_pg_claims and claims_sync_dossiers:
+                                upserted_claims = _sync_dossiers_to_pg_claims(cur, claims_sync_dossiers)
                             if manual_tx:
                                 cur.execute("COMMIT")
                         except Exception:
@@ -1860,6 +2167,8 @@ def consolidate_pg_incremental(
             "superseded_claims": report.superseded_claims,
             "skipped_qas": report.skipped_qas,
             "upserted_topics": 0 if dry_run else len(changed_dossiers),
+            "upserted_claims": 0 if dry_run else upserted_claims,
+            "migrated_claim_topics": 0 if dry_run else len(claims_backfill_ids),
             "failed_qa_ids": list(report.failed_qa_ids),
         }
 

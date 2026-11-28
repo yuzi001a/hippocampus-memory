@@ -3668,31 +3668,59 @@ class V3Core:
         max_batches_per_wake = 20
         batch_size = 20
         retry_base = float(getattr(self, "_topic_v2_retry_base_s", 2.0))
+        recovery_base = float(getattr(self, "_topic_v2_recovery_cooldown_s", 30.0))
+        recovery_max = float(getattr(self, "_topic_v2_recovery_max_s", 300.0))
+        pending_retry_at: float | None = None
+        cooldown_step = 0
+        self._topic_v2_pending_recovery = False
+
         while not stop_ev.is_set():
-            if not wake_ev.wait(timeout=0.5):
-                continue
+            wait_s = 0.5
+            if pending_retry_at is not None:
+                remaining = pending_retry_at - time.monotonic()
+                if remaining <= 0.0:
+                    pending_retry_at = None
+                    wake_ev.set()
+                else:
+                    wait_s = min(0.5, remaining)
+            if not wake_ev.is_set():
+                if not wake_ev.wait(timeout=wait_s):
+                    if pending_retry_at is not None and time.monotonic() >= pending_retry_at:
+                        pending_retry_at = None
+                        wake_ev.set()
+                    continue
             while wake_ev.is_set() and not stop_ev.is_set():
                 busy_ev.set()
                 wake_ev.clear()
                 try:
                     retry_attempt = 0
                     batches = 0
+                    exhausted_failure = False
                     while not stop_ev.is_set() and not getattr(self, "_topic_v2_stop_requested", False):
                         try:
                             res = self.consolidate_topics_v2(dry_run=False, batch_limit=batch_size) or {}
                         except Exception as e:
                             logger.warning("_topic_v2_worker consolidation error: %s", _safe_err(e)[:100])
-                            if retry_attempt >= 2 or stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
+                            if retry_attempt >= 2:
+                                exhausted_failure = True
+                                break
+                            if stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
                                 break
                             retry_attempt += 1
                             continue
                         failed_qas = res.get("failed_qa_ids") or []
                         if failed_qas:
-                            if retry_attempt >= 2 or stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
+                            if retry_attempt >= 2:
+                                exhausted_failure = True
+                                break
+                            if stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
                                 break
                             retry_attempt += 1
                             continue
                         retry_attempt = 0
+                        cooldown_step = 0
+                        pending_retry_at = None
+                        self._topic_v2_pending_recovery = False
                         batches += 1
                         processed = int(res.get("processed_qas") or 0)
                         if processed >= batch_size:
@@ -3701,6 +3729,15 @@ class V3Core:
                                 break
                             continue
                         break
+                    if exhausted_failure and not stop_ev.is_set() and not getattr(self, "_topic_v2_stop_requested", False):
+                        delay = min(recovery_base * (2 ** cooldown_step), recovery_max)
+                        pending_retry_at = time.monotonic() + max(0.01, delay)
+                        cooldown_step = min(cooldown_step + 1, 6)
+                        self._topic_v2_pending_recovery = True
+                        logger.warning(
+                            "_topic_v2_worker retries exhausted; scheduled automatic recovery in %.1fs",
+                            delay,
+                        )
                 finally:
                     busy_ev.clear()
 

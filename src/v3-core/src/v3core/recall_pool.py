@@ -4211,13 +4211,30 @@ def recall_pool(
     _tv2_guard_info = None
     if _resolve_topic_v2_mode(config):
         try:
-            from .topic_v2 import apply_topic_v2_ranking_guard
+            from .topic_v2 import (
+                apply_topic_v2_ranking_guard,
+                fetch_pg_superseded_qa_ids,
+            )
+
+            _pg_sup_qas: set[int] = set()
+            if pg is not None:
+                _recalled_qids = [
+                    int(h.source_id[3:])
+                    for h in scored
+                    if getattr(h, "kind", "") == "qa"
+                    and isinstance(getattr(h, "source_id", ""), str)
+                    and h.source_id.startswith("qa_")
+                    and h.source_id[3:].isdigit()
+                ]
+                if _recalled_qids:
+                    _pg_sup_qas = fetch_pg_superseded_qa_ids(pg, _recalled_qids)
 
             _tv2_guard_info = apply_topic_v2_ranking_guard(
                 scored,
                 query=query,
                 trace=trace,
                 probe_fn=_probe,
+                extra_superseded_qa_ids=_pg_sup_qas,
             )
         except Exception as _tv2_exc:
             logger.debug("topic_v2 ranking guard failed (skipped): %s", _safe_err(_tv2_exc)[:120])

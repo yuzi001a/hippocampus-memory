@@ -475,6 +475,11 @@ CREATE INDEX IF NOT EXISTS yin_history_is_current_idx
 -- -----------------------------------------------------------------------------
 -- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/assistant_deliveries.sql <<<
 
+-- -----------------------------------------------------------------------------
+-- topic_claims + topic_claim_evidence — Topic V2 relational claims & evidence.
+-- -----------------------------------------------------------------------------
+-- >>> ALPHA_BOOTSTRAP_INCLUDE: schema/topic_claims.sql <<<
+
 COMMIT;
 
 -- =============================================================================
