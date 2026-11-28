@@ -400,9 +400,10 @@ def test_pg_observer_and_topic_v2_no_double_write_conflict(
 
     # Legacy M3 output attempts to overwrite the existing Topic V2 row and create a rogue topic.
     fake_note = (
-        f"[{_MARKER}] 本轮观察快照：用户明确确认生产定时调度方案采用 Event-Scheduler-V2，"
-        "彻底废止 Cron-Worker-V1 轮询机制以消除延迟抖动，并要求各服务配置同步切换完成验证。"
-        * 2
+        "## 关键决策（拍板的决策 + 理由）\n"
+        f"- [{_MARKER}] 生产定时调度方案确定采用 Event-Scheduler-V2，彻底废止 Cron-Worker-V1 轮询机制以消除延迟抖动 [用户]〔已验证〕[#1]\n\n"
+        "## 进行中状态（未完事项）\n"
+        f"- [{_MARKER}] 各服务配置已完成切换并与 Topic V2 保持一致性校验〔已实施〕[#1]\n"
     )
     monkeypatch.setattr(
         observer_mod,
@@ -692,9 +693,11 @@ def test_pg_full_pipeline_topic_v2_observer_e1_freshness_preserved(
     fresh_topic_id = topics_before[0][0]
 
     obs_note = (
-        f"[{_MARKER}] 观察快照：用户完成了定时任务架构改造，早期曾使用 Cron-Worker-V1，"
-        "随后决定改为 Event-Scheduler-V2 并停用旧方案。"
-        * 2
+        "## 关键决策（拍板的决策 + 理由）\n"
+        f"- [{_MARKER}] 早期曾暂定使用 Cron-Worker-V1 进行轮询调度〔已推翻〕[#1]\n"
+        f"- [{_MARKER}] 正式废弃 Cron-Worker-V1，全面升级为 Event-Scheduler-V2 并停用旧方案 [用户]〔已验证〕[#2]\n\n"
+        "## 进行中状态（未完事项）\n"
+        f"- [{_MARKER}] 定时任务架构改造与默认召回保鲜链路验证〔已验证〕[#2]\n"
     )
     monkeypatch.setattr(
         observer_mod,
