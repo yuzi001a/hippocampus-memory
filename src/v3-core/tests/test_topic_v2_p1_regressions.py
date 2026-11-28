@@ -453,6 +453,7 @@ def test_p2_null_session_id_embed_model_updated_at_and_replay_idempotency(tmp_pa
         state_dir=tmp_path,
         dry_run=False,
         embed_model="fp-v1",
+        backfill_history=True,
     )
     assert res["new_last_qa_id"] == 1
     assert res["upserted_topics"] == 1
@@ -468,6 +469,7 @@ def test_p2_null_session_id_embed_model_updated_at_and_replay_idempotency(tmp_pa
         state_dir=tmp_path,
         dry_run=False,
         embed_model="fp-v1",
+        backfill_history=True,
     )
     assert res_replay["new_last_qa_id"] == 1
     assert res_replay["upserted_topics"] == 0, "Replay must be idempotent when dossier already has qa_id=1"
@@ -820,6 +822,7 @@ def test_p1_3_first_time_legacy_migration_reembeds_before_stamping_fingerprint(t
         state_dir=tmp_path,
         dry_run=False,
         embed_model="new-model-fp-v2",
+        backfill_history=True,
     )
     assert res["upserted_topics"] == 1
     assert len(embed_calls) >= 1, "Legacy migration must recompute vector when embed_model differs"
@@ -836,6 +839,7 @@ def test_p1_3_first_time_legacy_migration_reembeds_before_stamping_fingerprint(t
         state_dir=sub_dir,
         dry_run=False,
         embed_model="new-model-fp-v2",
+        backfill_history=True,
     )
     assert res_fail["upserted_topics"] == 0
     assert pg_rows == {}
@@ -1752,3 +1756,971 @@ def test_r5_p1_2_observation_note_not_whole_demoted_by_sparse_source_qa_range():
     )
     assert guard["demoted_sids"] == ["qa_5"]
     assert multi_topic_note.rrf_score == 0.052
+
+
+# ---------------------------------------------------------------------------
+# PR #70: Three-layer PG claims persistence, lossless JSON migration,
+# unbounded Recall hydration, relevance-ranked active_claims, and Worker recovery
+# ---------------------------------------------------------------------------
+
+def test_pr70_pg_claims_transactional_sync_and_lossless_json_migration(tmp_path: Path):
+    """Lossless JSON->PG backfill writes topic_claims & topic_claim_evidence transactionally."""
+    from v3core.topic_v2 import SupersededClaim, save_dossiers
+
+    state_dir = tmp_path / "pr70_mig"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    # Pre-PR#70 dossier JSON: SupersededClaim has no claim_id yet.
+    pre_dossier = TopicDossier(
+        topic_id="tv2_mig_1",
+        title="部署编排方案",
+        current_claims=[
+            TopicClaim(claim_id="c_2_1", text="使用 Kubernetes-V2", kind="decision", evidence_qa_ids=[2]),
+        ],
+        superseded_claims=[
+            SupersededClaim(
+                text="早期使用 Manual-Script-V0",
+                replaced_by_claim_id="c_2_1",
+                reason="自动化升级",
+                superseded_at="2026-11-20T08:00:00Z",
+                evidence_qa_ids=[1],
+                claim_id="",
+            )
+        ],
+        keywords=["部署", "Kubernetes-V2"],
+        last_evidence_qa_id=2,
+        last_evidence_at="2026-11-20T08:00:00Z",
+        embed_model="fp-1",
+        embedding=_embed("部署编排方案 Kubernetes-V2"),
+    )
+    save_dossiers(state_dir / "topic_v2_dossiers.json", [pre_dossier])
+    (state_dir / "topic_v2_state.json").write_text(
+        json.dumps({"last_qa_id": 2}), encoding="utf-8"
+    )
+
+    claims_tbl: dict[str, dict] = {}
+    evidence_tbl: set[tuple[str, str, int, str]] = set()
+    tx_events: list[str] = []
+
+    class _FakeClaimsCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass('public.topic_claims')" in q:
+                self._rows = [("public.topic_claims", "public.topic_claim_evidence")]
+            elif "select distinct topic_id from public.topic_claims" in q:
+                self._rows = [(c["topic_id"],) for c in claims_tbl.values()]
+            elif "from qa_pairs" in q:
+                self._rows = []
+            elif q == "begin":
+                tx_events.append("BEGIN")
+            elif q == "commit":
+                tx_events.append("COMMIT")
+            elif "insert into public.topic_claims" in q:
+                if "'active'" in q:
+                    cid, tid, ctext, ckind, _upd = params
+                    claims_tbl[cid] = {
+                        "topic_id": tid,
+                        "text": ctext,
+                        "kind": ckind,
+                        "status": "active",
+                        "replaced_by": "",
+                    }
+                else:
+                    scid, tid, ctext, rep_by, sreason, _upd, _sup = params
+                    claims_tbl[scid] = {
+                        "topic_id": tid,
+                        "text": ctext,
+                        "status": "superseded",
+                        "replaced_by": rep_by,
+                        "reason": sreason,
+                    }
+            elif "insert into public.topic_claim_evidence" in q:
+                cid, tid, qid = params
+                rel = "supersedes" if "'supersedes'" in q else "supports"
+                evidence_tbl.add((cid, tid, int(qid), rel))
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakeConn:
+        autocommit = True
+
+        def cursor(self):
+            return _FakeClaimsCur()
+
+        def close(self):
+            pass
+
+    class _FakePg:
+        def _connect(self):
+            return _FakeConn()
+
+    res = consolidate_pg_incremental(
+        _FakePg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="fp-1",
+    )
+    assert res["migrated_claim_topics"] == 1
+    assert res["upserted_claims"] == 2
+    assert tx_events == ["BEGIN", "COMMIT"]
+    assert "c_2_1" in claims_tbl and claims_tbl["c_2_1"]["status"] == "active"
+    sup_entries = [v for k, v in claims_tbl.items() if v["status"] == "superseded"]
+    assert len(sup_entries) == 1 and sup_entries[0]["replaced_by"] == "c_2_1"
+    sup_cid = next(k for k, v in claims_tbl.items() if v["status"] == "superseded")
+    assert ("c_2_1", "tv2_mig_1", 2, "supports") in evidence_tbl
+    assert (sup_cid, "tv2_mig_1", 1, "supports") in evidence_tbl
+    assert (sup_cid, "tv2_mig_1", 2, "supersedes") in evidence_tbl
+
+    # Second run is a clean idempotent no-op (migrated_claim_topics == 0).
+    res2 = consolidate_pg_incremental(
+        _FakePg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="fp-1",
+    )
+    assert res2["migrated_claim_topics"] == 0
+    assert res2["upserted_claims"] == 0
+
+
+def test_pr70_pg_superseded_qa_hydration_lifts_header_budget_cap(monkeypatch):
+    """Recall hydrates superseded QA IDs from PG even when truncated from the 32-item header."""
+    from v3core import topic_v2 as tv2_mod
+
+    monkeypatch.setattr(
+        tv2_mod,
+        "fetch_pg_superseded_qa_ids",
+        lambda pg, qids: {5} & set(qids),
+    )
+
+    # Header has empty superseded_qas (simulating truncation or missing parent topic in top-K).
+    header = (
+        '<!-- topic_v2:{"v":2,"last_qa":99,"last_at":"2026-11-28T08:00:00Z",'
+        '"active_qas":[99],"superseded_qas":[]} -->'
+    )
+    qa_old = rp_mod.RecallHit(
+        source_id="qa_5",
+        kind="qa",
+        title="早期方案",
+        content="使用 Legacy-Engine-V0",
+        content_preview="使用 Legacy-Engine-V0",
+        rrf_score=0.060,
+        created_at="2026-10-01T08:00:00Z",
+    )
+    qa_cur = rp_mod.RecallHit(
+        source_id="qa_99",
+        kind="qa",
+        title="当前方案",
+        content="使用 Modern-Engine-V5",
+        content_preview="使用 Modern-Engine-V5",
+        rrf_score=0.055,
+        created_at="2026-11-28T08:00:00Z",
+    )
+    topic_hit = rp_mod.RecallHit(
+        source_id="topic_tv2_eng_99",
+        kind="topic",
+        title="引擎选型",
+        content=f"{header}\n- 当前结论：使用 Modern-Engine-V5",
+        content_preview=f"{header}\n- 当前结论：使用 Modern-Engine-V5",
+        rrf_score=0.052,
+        created_at="2026-11-28T08:00:00Z",
+    )
+
+    guard = apply_topic_v2_ranking_guard(
+        [qa_old, qa_cur, topic_hit],
+        query="当前引擎选型是什么？",
+        extra_superseded_qa_ids=tv2_mod.fetch_pg_superseded_qa_ids(object(), [5, 99]),
+    )
+    assert guard["demoted_sids"] == ["qa_5"]
+    assert qa_old.rrf_score < topic_hit.rrf_score
+    assert qa_old.rrf_score < qa_cur.rrf_score
+
+
+def test_pr70_phase1_selects_relevant_active_claims_beyond_8():
+    """Topics with >16 active claims still surface relevant older claims to LLM Phase 1."""
+    claims = [
+        TopicClaim(
+            claim_id=f"c_{i}",
+            text=f"常规配置项 Alpha-{i} 保持默认参数",
+            kind="fact",
+            evidence_qa_ids=[i],
+        )
+        for i in range(1, 20)
+    ]
+    claims.insert(
+        0,
+        TopicClaim(
+            claim_id="c_target_early",
+            text="分布式缓存早期使用 Memcached-Pool-X 节点",
+            kind="decision",
+            evidence_qa_ids=[100],
+        ),
+    )
+    dossier = TopicDossier(
+        topic_id="tv2_big_1",
+        title="分布式基础设施配置",
+        current_claims=claims,
+        keywords=["分布式", "缓存", "Memcached-Pool-X"],
+        last_evidence_qa_id=100,
+    )
+    seen_payloads: list[dict] = []
+
+    def _capture_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        seen_payloads.append(payload)
+        return json.dumps(
+            {
+                "action": "attach",
+                "target_topic_id": "tv2_big_1",
+                "topic_title": "分布式基础设施配置",
+                "update_type": "evolve",
+                "claim_text": "分布式缓存改用 Redis-Cluster-V7",
+                "replaces_claim_ids": ["c_target_early"],
+                "replaces_text": "Memcached-Pool-X",
+                "reason": "持久化与集群分片",
+                "keywords": ["分布式", "缓存", "Redis-Cluster-V7"],
+            },
+            ensure_ascii=False,
+        )
+
+    consolidator = TopicConsolidatorV2(embed_fn=_embed, llm_fn=_capture_llm)
+    out, rep = consolidator.consolidate_qa_stream(
+        [
+            {
+                "id": 200,
+                "timestamp": "2026-11-28T09:00:00Z",
+                "question": "Memcached-Pool-X 缓存还用吗？",
+                "answer": "Memcached-Pool-X 已切换为 Redis-Cluster-V7。",
+            }
+        ],
+        existing_dossiers=[dossier],
+    )
+    assert len(seen_payloads) == 1
+    sent_claim_ids = [c["claim_id"] for c in seen_payloads[0]["candidate_topics"][0]["active_claims"]]
+    assert len(sent_claim_ids) == 16
+    assert "c_target_early" in sent_claim_ids
+    assert rep.superseded_claims == 1
+    assert "c_target_early" not in {c.claim_id for c in out[0].current_claims}
+
+
+def test_pr70_worker_auto_recovers_after_immediate_retry_exhaustion():
+    """Worker schedules automatic background recovery after 3 failed attempts with no new flush."""
+    from v3core import V3Core
+
+    core = V3Core.__new__(V3Core)
+    core._config = {"prefetch": {"topic_v2_mode": True}}
+    core._topic_v2_retry_base_s = 0.01
+    core._topic_v2_recovery_cooldown_s = 0.06
+    core._topic_v2_recovery_max_s = 0.2
+    core._topic_v2_stop_requested = False
+
+    attempts = {"n": 0}
+    recovered_ev = threading.Event()
+
+    def _flaky_consolidate(**kwargs):
+        attempts["n"] += 1
+        # Fail the first 3 attempts (exhausting immediate retries), then succeed on auto-recovery!
+        if attempts["n"] <= 3:
+            return {"processed_qas": 1, "failed_qa_ids": [999]}
+        recovered_ev.set()
+        return {"processed_qas": 1, "failed_qa_ids": []}
+
+    core.consolidate_topics_v2 = _flaky_consolidate  # type: ignore[method-assign]
+    try:
+        core._on_live_flush([{"id": 999}])
+        # Immediate burst finishes and wait_topic_v2_idle returns promptly (does not block on cooldown).
+        assert core.wait_topic_v2_idle(timeout=1.0)
+        assert attempts["n"] >= 3
+        # WITHOUT any second _on_live_flush, automatic recovery wakes up and clears the failure!
+        assert recovered_ev.wait(timeout=2.0), f"Worker failed to auto-recover; attempts={attempts['n']}"
+        assert core.wait_topic_v2_idle(timeout=1.0)
+        assert getattr(core, "_topic_v2_pending_recovery", False) is False
+    finally:
+        core._stop_topic_v2_worker(timeout=1.0)
+
+
+def test_pr71_first_boot_defaults_to_max_qa_without_backfill_and_degrades_observably(
+    tmp_path: Path, caplog, monkeypatch
+):
+    """B2 + B4: First boot without state initializes watermark to MAX(qa_pairs.id); missing PG tables warn + degrade."""
+    import logging
+    import psycopg2
+    from v3core import distribution_cli as dcli
+    from v3core import topic_v2 as tv2_mod
+
+    # 1. Missing PG claims/state tables + pre-existing historical QAs [10, 25]
+    llm_calls: list[int] = []
+    hist_qas = [
+        (10, "2026-10-01T08:00:00Z", "历史问题 1", "历史答案 1"),
+        (25, "2026-11-01T08:00:00Z", "历史问题 2", "历史答案 2"),
+    ]
+
+    class _DegradedCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass('public.topic_claims')" in q or "to_regclass('public.topic_v2_state')" in q:
+                self._rows = [(None,)]
+            elif "coalesce(max(id), 0) from qa_pairs" in q:
+                self._rows = [(max(r[0] for r in hist_qas),)]
+            elif "from qa_pairs" in q and "where id > %s" in q:
+                min_id = int(params[0])
+                self._rows = [r for r in hist_qas if r[0] > min_id]
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _DegradedConn:
+        def cursor(self):
+            return _DegradedCur()
+
+        def close(self):
+            pass
+
+    class _DegradedPg:
+        def _connect(self):
+            return _DegradedConn()
+
+    def _counting_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        llm_calls.append(int(payload["qa_id"]))
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_title": "新主题",
+                "update_type": "add",
+                "claim_text": "新结论",
+                "keywords": ["新结论"],
+            },
+            ensure_ascii=False,
+        )
+
+    tv2_mod._WARNED_MISSING_PG_CLAIMS = False
+    state_dir = tmp_path / "first_boot_degraded"
+    with caplog.at_level(logging.WARNING, logger="v3core.topic_v2"):
+        res_init = consolidate_pg_incremental(
+            _DegradedPg(),
+            embed_fn=_embed,
+            llm_fn=_counting_llm,
+            state_dir=state_dir,
+            dry_run=False,
+            embed_model="fp-1",
+        )
+    assert res_init["previous_last_qa_id"] == 25
+    assert res_init["new_last_qa_id"] == 25
+    assert res_init["initialized_baseline"] is True
+    assert res_init["claims_store"] == "degraded"
+    assert llm_calls == [], "First boot must NOT backfill pre-existing historical QAs without backfill_history=True"
+    assert any("degraded" in rec.message.lower() for rec in caplog.records)
+
+    # New QA arriving AFTER baseline initialization IS consolidated normally.
+    hist_qas.append((26, "2026-11-28T08:00:00Z", "新问题 26", "采用 Redis-Cache-V3。"))
+    res_next = consolidate_pg_incremental(
+        _DegradedPg(),
+        embed_fn=_embed,
+        llm_fn=_counting_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="fp-1",
+    )
+    assert res_next["previous_last_qa_id"] == 25
+    assert res_next["new_last_qa_id"] == 26
+    assert res_next["claims_store"] == "degraded"
+    assert llm_calls == [26]
+
+    # 2. doctor --dsn checks topic_claims, topic_claim_evidence, topic_v2_state
+    checked_tables: list[str] = []
+
+    class _DocCur:
+        def __init__(self):
+            self._row = (1,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "information_schema.tables" in q and params:
+                checked_tables.append(str(params[0]))
+                self._row = None if str(params[0]).startswith("topic_") else (1,)
+            else:
+                self._row = (1,)
+
+        def fetchone(self):
+            return self._row
+
+    class _DocConn:
+        def cursor(self):
+            return _DocCur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(psycopg2, "connect", lambda **_kw: _DocConn())
+    probe = dcli._doctor_probe_database("postgresql://user:pass@127.0.0.1:5432/testdb")
+    for tbl in ("topic_claims", "topic_claim_evidence", "topic_v2_state"):
+        assert tbl in checked_tables
+        assert probe["required_tables"][tbl] is False
+
+
+def test_pr71_config_backfill_wiring_doctor_warning_and_incomplete_qa_guard(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Verify PrefetchConfig.topic_v2_backfill_history, doctor missing-table warning, and pending empty-answer QA guard."""
+    from types import SimpleNamespace
+    from v3core import distribution_cli as dcli
+    from v3core.config_model import PrefetchConfig, from_legacy_dict
+
+    # 1. PrefetchConfig & from_legacy_dict wiring
+    assert PrefetchConfig().topic_v2_backfill_history is False
+    assert from_legacy_dict({}).prefetch.topic_v2_backfill_history is False
+    assert (
+        from_legacy_dict({"prefetch": {"topic_v2_backfill_history": True}}).prefetch.topic_v2_backfill_history
+        is True
+    )
+    assert (
+        from_legacy_dict({"topic_v2": {"backfill_history": True}}).prefetch.topic_v2_backfill_history
+        is True
+    )
+
+    # 2. doctor --dsn promotes missing required_tables into warnings + warn exit code (rc == 1)
+    monkeypatch.setattr(dcli, "_doctor_resolve_config", lambda _p: ("cfg.yaml", {}, True, None))
+    monkeypatch.setattr(
+        dcli,
+        "_doctor_probe_database",
+        lambda _dsn: {
+            "skipped": None,
+            "target": "postgresql://127.0.0.1:5432/test",
+            "reachable": True,
+            "pgvector": {"installed": True, "version": "0.7.0"},
+            "required_tables": {
+                "qa_pairs": True,
+                "topic_claims": False,
+                "topic_claim_evidence": False,
+                "topic_v2_state": False,
+            },
+        },
+    )
+    rc = dcli._doctor(SimpleNamespace(profile="default", static=False, dsn="postgresql://127.0.0.1:5432/test"))
+    assert rc == 1
+    doc_report = json.loads(capsys.readouterr().out)
+    assert doc_report["status"] == "warn"
+    assert any("topic_claims" in w for w in doc_report["warnings"])
+
+    # 3. Pending recent empty-answer QA (id=10) halts watermark before 10 even when id=11 has an answer;
+    # once id=10 answer arrives, both 10 and 11 consolidate cleanly; stale abandoned empty row (>grace) skips.
+    now = datetime.now(timezone.utc)
+    rows = [
+        (10, now - timedelta(seconds=10), "问题 10", ""),
+        (11, now - timedelta(seconds=5), "问题 11", "使用 Kafka-V4 方案。"),
+    ]
+
+    class _PendingCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass" in q:
+                self._rows = [(None,)]
+            elif "from qa_pairs" in q and "where id > %s" in q:
+                min_id = int(params[0])
+                self._rows = [r for r in rows if r[0] > min_id]
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _PendingConn:
+        def cursor(self):
+            return _PendingCur()
+
+        def close(self):
+            pass
+
+    class _PendingPg:
+        def _connect(self):
+            return _PendingConn()
+
+    state_dir = tmp_path / "pending_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "topic_v2_state.json").write_text(json.dumps({"last_qa_id": 9}), encoding="utf-8")
+
+    r_hold = consolidate_pg_incremental(
+        _PendingPg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        pending_answer_grace_s=900.0,
+    )
+    assert r_hold["pending_incomplete_qa_ids"] == [10]
+    assert r_hold["new_last_qa_id"] == 9
+    assert r_hold["processed_qas"] == 0
+
+    # Late assistant derivation completes qa_10's answer:
+    rows[0] = (10, now - timedelta(seconds=10), "问题 10", "使用 Pulsar-V3 方案。")
+    r_done = consolidate_pg_incremental(
+        _PendingPg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        pending_answer_grace_s=900.0,
+    )
+    assert r_done["pending_incomplete_qa_ids"] == []
+    assert r_done["processed_qas"] == 2
+    assert r_done["new_last_qa_id"] == 11
+
+    # Abandoned empty row older than grace window does NOT deadlock watermark:
+    rows.append((12, now - timedelta(hours=2), "废弃空问 12", ""))
+    rows.append((13, now - timedelta(seconds=2), "问题 13", "使用 Redis-V8 方案。"))
+    r_skip_old = consolidate_pg_incremental(
+        _PendingPg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        pending_answer_grace_s=900.0,
+    )
+    assert r_skip_old["pending_incomplete_qa_ids"] == []
+    assert r_skip_old["new_last_qa_id"] == 13
+    assert r_skip_old["processed_qas"] == 1
+
+
+def test_pr71_r2_baseline_retry_after_pg_outage_and_zero_state_file(tmp_path: Path):
+    """P1-1 & P2:
+    1) _ensure_topic_v2_baseline must NOT lock _topic_v2_baseline_checked=True when PG is down;
+       once PG recovers, subsequent live_buffer / _ensure_topic_v2_baseline retries and pins baseline.
+    2) A legacy topic_v2_state.json containing {"last_qa_id": 0} without baseline_initialized=True
+       must NOT trigger full historical backfill when backfill_history=False.
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    # 1. V3Core baseline retry across transient PG outage
+    class _OutageCur:
+        def __init__(self, max_id: int):
+            self._max_id = max_id
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass" in q:
+                self._rows = [(None,)]
+            elif "coalesce(max(id), 0)" in q:
+                self._rows = [(self._max_id,)]
+            elif "coalesce(min(id), 0)" in q:
+                self._rows = [(0,)]
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _OutageConn:
+        def __init__(self, max_id: int):
+            self._max_id = max_id
+
+        def cursor(self):
+            return _OutageCur(self._max_id)
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _FlakyPg:
+        def __init__(self):
+            self.connected = False
+
+        def is_connected(self):
+            return self.connected
+
+        def _connect(self):
+            if not self.connected:
+                raise RuntimeError("pg down")
+            return _OutageConn(max_id=42)
+
+    data_dir = tmp_path / "core_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        prefetch=SimpleNamespace(
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._pg = _FlakyPg()
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is False, "PG outage must not lock baseline flag"
+    assert not (data_dir / "topic_v2_state.json").exists()
+
+    core._pg.connected = True
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is True
+    pinned = json.loads((data_dir / "topic_v2_state.json").read_text(encoding="utf-8"))
+    assert pinned["last_qa_id"] == 42
+    assert pinned["baseline_initialized"] is True
+
+    # 2. Legacy zero-watermark {"last_qa_id": 0} without baseline_initialized
+    legacy_dir = tmp_path / "legacy_zero"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    (legacy_dir / "topic_v2_state.json").write_text(json.dumps({"last_qa_id": 0}), encoding="utf-8")
+
+    now = datetime.now(timezone.utc)
+    hist_rows = [
+        (1, now - timedelta(minutes=10), "历史 1", "历史答案 1"),
+        (2, now - timedelta(minutes=8), "历史 2", "历史答案 2"),
+        (3, now - timedelta(minutes=5), "历史 3", "历史答案 3"),
+    ]
+
+    class _ZeroCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass" in q:
+                self._rows = [(None,)]
+            elif "coalesce(max(id), 0)" in q:
+                self._rows = [(3,)]
+            elif "coalesce(min(id), 0)" in q:
+                self._rows = [(0,)]
+            elif "from qa_pairs" in q and "where id > %s" in q:
+                min_id = int(params[0])
+                self._rows = [r for r in hist_rows if r[0] > min_id]
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _ZeroConn:
+        def cursor(self):
+            return _ZeroCur()
+
+        def close(self):
+            pass
+
+    class _ZeroPg:
+        def _connect(self):
+            return _ZeroConn()
+
+    res_zero = consolidate_pg_incremental(
+        _ZeroPg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=legacy_dir,
+        dry_run=False,
+        backfill_history=False,
+    )
+    assert res_zero["initialized_baseline"] is True
+    assert res_zero["processed_qas"] == 0
+    assert res_zero["new_last_qa_id"] == 3
+    saved_zero = json.loads((legacy_dir / "topic_v2_state.json").read_text(encoding="utf-8"))
+    assert saved_zero["baseline_initialized"] is True
+    assert saved_zero["last_qa_id"] == 3
+
+
+def test_pr71_r3_flush_defers_qa_when_baseline_uninitialized_and_late_merge_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """P1-1 & P1-2 unit regressions:
+    1) _flush_pending_qa must defer QA insertion (fail-closed) when Topic V2 baseline
+       watermark cannot be initialized and backfill_history=False.
+    2) _late_merge_into_qa must roll back the QA answer update and return None (not
+       'completed_late' / no remember()) if enqueueing topic_v2_state fails.
+    """
+    from types import SimpleNamespace
+    import v3core.topic_v2 as tv2_mod
+    from v3core import V3Core
+
+    data_dir = tmp_path / "r3_unit"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._fenced = False
+    core._pg_pool = None
+    core._live_buffer = None
+    core._topic_v2_baseline_checked = False
+    core._schema_readiness = lambda conn: None
+    core._is_core_fenced = lambda: False
+    core._qa_source_id = lambda s, t, m, host="": f"{s}:{t}:{m}"
+
+    inserted_qa_sqls: list[str] = []
+
+    class _FlushCur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "insert into qa_pairs" in q:
+                inserted_qa_sqls.append(q)
+
+        def fetchone(self):
+            return None
+
+    class _FlushConn:
+        def cursor(self):
+            return _FlushCur()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _FlushPg:
+        def is_connected(self):
+            return True
+
+        def _connect(self):
+            return _FlushConn()
+
+    core._pg = _FlushPg()
+    monkeypatch.setattr(
+        tv2_mod,
+        "ensure_topic_v2_baseline_watermark",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("baseline failed")),
+    )
+
+    core._flush_pending_qa(
+        "sess_r3_unit",
+        {"q": "测试问题", "a": "测试回答", "q_turn": "1", "q_msg_id": "m1"},
+    )
+    assert inserted_qa_sqls == [], "QA insert must be deferred when baseline init fails"
+    assert core._topic_v2_baseline_checked is False
+
+    # 2. _late_merge_into_qa atomic rollback when topic_v2_state UPDATE fails
+    rollback_called = {"n": 0}
+    remember_called = {"n": 0}
+
+    class _FailRequeueCur:
+        def __init__(self):
+            self._rows = []
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if q.startswith("update qa_pairs"):
+                self.rowcount = 1
+                self._rows = []
+            elif "to_regclass('public.topic_v2_state')" in q:
+                self.rowcount = 0
+                self._rows = [("public.topic_v2_state",)]
+            elif "update public.topic_v2_state" in q:
+                raise RuntimeError("simulated deadlock on topic_v2_state")
+            else:
+                self.rowcount = 0
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _FailRequeueConn:
+        autocommit = False
+
+        def cursor(self):
+            return _FailRequeueCur()
+
+        def commit(self):
+            raise AssertionError("commit must not run when requeue failed")
+
+        def rollback(self):
+            rollback_called["n"] += 1
+
+        def close(self):
+            pass
+
+    class _FailRequeuePg:
+        def _connect(self):
+            return _FailRequeueConn()
+
+    core._pg = _FailRequeuePg()
+    res_late = core._late_merge_into_qa(
+        pg=core._pg,
+        qa_row=(99, "", [], "问题 99"),
+        msg_id="msg_99",
+        content="迟到回答 99",
+        remember=lambda: remember_called.__setitem__("n", remember_called["n"] + 1),
+    )
+    assert res_late is None
+    assert rollback_called["n"] >= 1
+    assert remember_called["n"] == 0
+
+
+def test_pr71_r4_late_merge_zero_row_enqueue_rolls_back(tmp_path: Path):
+    """P1: _late_merge_into_qa must treat 0-row UPDATE on public.topic_v2_state as failure,
+    roll back qa_pairs answer, return None, and avoid calling remember().
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    data_dir = tmp_path / "r4_unit"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._topic_v2_baseline_checked = True
+
+    rollback_called = {"n": 0}
+    remember_called = {"n": 0}
+
+    class _ZeroRowCur:
+        def __init__(self):
+            self._rows = []
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if q.startswith("update qa_pairs"):
+                self.rowcount = 1
+                self._rows = []
+            elif "to_regclass('public.topic_v2_state')" in q:
+                self.rowcount = 0
+                self._rows = [("public.topic_v2_state",)]
+            elif "update public.topic_v2_state" in q:
+                self.rowcount = 0
+                self._rows = []
+            else:
+                self.rowcount = 0
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _ZeroRowConn:
+        autocommit = False
+
+        def cursor(self):
+            return _ZeroRowCur()
+
+        def commit(self):
+            raise AssertionError("commit must not run when topic_v2_state updated 0 rows")
+
+        def rollback(self):
+            rollback_called["n"] += 1
+
+        def close(self):
+            pass
+
+    class _ZeroRowPg:
+        def _connect(self):
+            return _ZeroRowConn()
+
+    core._pg = _ZeroRowPg()
+    res = core._late_merge_into_qa(
+        pg=core._pg,
+        qa_row=(101, "", [], "问题 101"),
+        msg_id="msg_101",
+        content="迟到回答 101",
+        remember=lambda: remember_called.__setitem__("n", remember_called["n"] + 1),
+    )
+    assert res is None
+    assert rollback_called["n"] >= 1
+    assert remember_called["n"] == 0

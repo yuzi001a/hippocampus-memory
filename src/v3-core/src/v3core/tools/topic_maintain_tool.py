@@ -97,6 +97,7 @@ def handle_v3_topic_maintain(args: dict, **kw) -> str:
             }, ensure_ascii=False)
 
         state_dir = _resolve_data_dir(cfg)
+        backfill_history = bool((args or {}).get("backfill_history", False))
         result = consolidate_pg_incremental(
             pg,
             embed_fn=eff_embed_fn,
@@ -104,6 +105,7 @@ def handle_v3_topic_maintain(args: dict, **kw) -> str:
             state_dir=state_dir,
             dry_run=dry_run,
             embed_model=eff_embed_model,
+            backfill_history=backfill_history,
         )
         result["engine"] = "topic_v2"
         if not dry_run and int(result.get("upserted_topics") or 0) > 0:

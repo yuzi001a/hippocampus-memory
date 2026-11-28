@@ -68,5 +68,5 @@ def test_packaged_upgrade_adds_the_same_provenance_column():
 
 def test_manual_ddl_files_ship_with_the_package():
     """运行时提示「先执行 schema/task_events.sql」——wheel 用户得能拿到这个文件。"""
-    for name in ("task_events.sql", "session_policies.sql"):
+    for name in ("task_events.sql", "session_policies.sql", "topic_claims.sql"):
         assert (PACKAGED_DIR / name).exists(), f"{name} 没有打进包, 提示里却叫用户执行它"

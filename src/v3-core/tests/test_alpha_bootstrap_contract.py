@@ -587,10 +587,11 @@ class TestBootstrapScript:
         # M03 adds derived_memory_invalidations immediately after memory_relations
         # (it references both sidecars), before the qa chunks include.
         # P0-C2 appends assistant_deliveries last (no FKs, nothing references it).
-        assert len(includes) == 7
+        assert len(includes) == 8
         assert any(p.endswith("observation_embedding_chunks.sql") for p in includes)
         assert any(p.endswith("embedding_failures.sql") for p in includes)
         assert any(p.endswith("assistant_deliveries.sql") for p in includes)
+        assert any(p.endswith("topic_claims.sql") for p in includes)
         assert includes[0].endswith("explicit_memories.sql")
         assert includes[1].endswith("memory_relations.sql")
         assert includes[2].endswith("derived_memory_invalidations.sql")

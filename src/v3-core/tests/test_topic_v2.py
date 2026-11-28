@@ -395,6 +395,7 @@ def test_consolidate_pg_incremental_dry_run_upsert_and_idempotent_cursor(tmp_pat
         embed_fn=embed_text,
         state_dir=state_dir,
         dry_run=True,
+        backfill_history=True,
     )
     assert dry["dry_run"] is True
     assert dry["processed_qas"] == 2
@@ -408,6 +409,7 @@ def test_consolidate_pg_incremental_dry_run_upsert_and_idempotent_cursor(tmp_pat
         embed_fn=embed_text,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert applied["dry_run"] is False
     assert applied["processed_qas"] == 2

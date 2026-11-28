@@ -238,6 +238,15 @@ def _cleanup_pg_rows(pool: PgPool) -> None:
             (_TOPIC_PREFIX + "%", _LEGACY_TOPIC_ID),
         )
         cur.execute("DELETE FROM public.topic_entries WHERE topic_id LIKE %s", (_TOPIC_PREFIX + "%",))
+        cur.execute(
+            "DELETE FROM public.topic_claim_evidence WHERE topic_id LIKE %s OR topic_id = %s",
+            (_TOPIC_PREFIX + "%", _LEGACY_TOPIC_ID),
+        )
+        cur.execute(
+            "DELETE FROM public.topic_claims WHERE topic_id LIKE %s OR topic_id = %s",
+            (_TOPIC_PREFIX + "%", _LEGACY_TOPIC_ID),
+        )
+        cur.execute("DELETE FROM public.topic_v2_state")
         cur.execute("DELETE FROM public.observation_notes WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
         cur.execute("DELETE FROM public.yin WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
         cur.execute("DELETE FROM public.yin_paragraphs WHERE yin_version LIKE %s", (_NOTE_PREFIX + "%",))
@@ -301,6 +310,7 @@ def test_pg_default_config_and_dry_run_makes_zero_writes(pg_pool: PgPool, pg_sto
         llm_fn=None,
         state_dir=state_dir,
         dry_run=True,
+        backfill_history=True,
     )
     assert res["dry_run"] is True
     assert res["processed_qas"] == 1
@@ -334,6 +344,7 @@ def test_pg_incremental_consolidation_idempotency_and_source_preservation(
         llm_fn=None,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert res1["processed_qas"] == 1
     assert res1["created_topics"] == 1
@@ -392,6 +403,7 @@ def test_pg_a_to_b_evolution_and_default_prefetch_freshness_guard(
         llm_fn=None,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert first["created_topics"] == 1
 
@@ -530,7 +542,7 @@ def test_pg_v3core_live_flush_and_topic_maintain_tool(
     )
 
     core = v3core.V3Core.__new__(v3core.V3Core)
-    core._config = from_legacy_dict({"basePath": str(tmp_path)})
+    core._config = from_legacy_dict({"basePath": str(tmp_path), "prefetch": {"topic_v2_backfill_history": True}})
     core._pg = pg_store
     invalidations = []
     monkeypatch.setattr(core, "_notify_topic_recall_invalidation", lambda: invalidations.append(1))
@@ -624,6 +636,7 @@ def test_pg_60qa_multi_topic_stress_no_fragmentation(
             state_dir=state_dir,
             dry_run=False,
             batch_limit=20,
+            backfill_history=True,
         )
 
     state = json.loads((state_dir / "topic_v2_state.json").read_text(encoding="utf-8"))
@@ -683,6 +696,7 @@ def test_pg_p2_null_session_id_and_embed_model_updated_at(
         state_dir=state_dir,
         dry_run=False,
         embed_model="fp-alpha-v1",
+        backfill_history=True,
     )
     assert res1["processed_qas"] == 1
     assert res1["new_last_qa_id"] == qa_null
@@ -775,6 +789,7 @@ def test_pg_p1_cross_topic_unrelated_yin_and_failed_qa_recovery(
         llm_fn=flaky_llm,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert out1["new_last_qa_id"] == qa_db
     assert out1["failed_qa_ids"] == [qa_log]
@@ -888,6 +903,7 @@ def test_pg_r2_legacy_migration_reembeds_and_missing_action_retries(
         state_dir=state_dir,
         dry_run=False,
         embed_model="r2-fp-v2",
+        backfill_history=True,
     )
     assert out1["failed_qa_ids"] == [qa1]
     assert out1["new_last_qa_id"] == 0
@@ -955,6 +971,7 @@ def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
         state_dir=tmp_path / "r3_state",
         dry_run=False,
         embed_model="r3-fp",
+        backfill_history=True,
     )
 
     emb_log = _vec_literal(_EMBED_FN("日志采集 Fluentd-Current 灰度验证"))
@@ -1028,3 +1045,1338 @@ def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
     assert ranked_sids.index(new_yin_sid) < ranked_sids.index(old_note_sid)
     assert by_sid[new_yin_sid].rrf_score > by_sid[old_note_sid].rrf_score
     assert by_sid[new_note_sid].rrf_score > by_sid[old_note_sid].rrf_score
+
+
+def test_pg_pr70_three_layer_claims_persistence_stateless_reload_and_unbounded_recall(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    from v3core.recall_pool import recall_pool as _rp_call
+    from v3core.topic_v2 import fetch_pg_superseded_qa_ids
+
+    t0 = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(days=5)
+    t2 = t0 + timedelta(days=10)
+
+    qa1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}pr70_1",
+        session_id="sess_pr70",
+        turn_id=1,
+        question="队列系统最初选型是什么？",
+        answer="队列系统最初采用 RabbitMQ-Classic 方案。",
+        ts=t0,
+    )
+    qa2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}pr70_2",
+        session_id="sess_pr70",
+        turn_id=2,
+        question="队列系统现在用什么？",
+        answer="正式废弃 RabbitMQ-Classic，改为 NATS-JetStream 方案。",
+        ts=t1,
+    )
+
+    state_dir = tmp_path / "pr70_state"
+    res1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="pr70-fp",
+        backfill_history=True,
+    )
+    assert res1["processed_qas"] == 2
+    assert res1["upserted_claims"] >= 2
+
+    # 1. Verify all three layers in PostgreSQL (topics, topic_claims, topic_claim_evidence) + raw qa_pairs intact
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_id, topic_id, claim_text, status, replaced_by_claim_id "
+            "FROM public.topic_claims WHERE topic_id LIKE %s ORDER BY status ASC",
+            (_TOPIC_PREFIX + "%",),
+        )
+        claim_rows = cur.fetchall()
+        cur.execute(
+            "SELECT claim_id, qa_id, relation FROM public.topic_claim_evidence WHERE topic_id LIKE %s",
+            (_TOPIC_PREFIX + "%",),
+        )
+        ev_rows = cur.fetchall()
+        cur.execute("SELECT COUNT(*) FROM public.qa_pairs WHERE id IN (%s, %s)", (qa1, qa2))
+        raw_count = int(cur.fetchone()[0])
+
+    assert raw_count == 2
+    active_rows = [r for r in claim_rows if r[3] == "active"]
+    sup_rows = [r for r in claim_rows if r[3] == "superseded"]
+    assert len(active_rows) == 1 and "NATS-JetStream" in active_rows[0][2]
+    assert len(sup_rows) == 1 and "RabbitMQ-Classic" in sup_rows[0][2]
+    assert sup_rows[0][4] == active_rows[0][0]
+    assert any(r[1] == qa1 and r[2] == "supports" for r in ev_rows)
+    assert any(r[1] == qa2 and r[2] == "supports" for r in ev_rows)
+    assert any(r[0] == sup_rows[0][0] and r[1] == qa2 and r[2] == "supersedes" for r in ev_rows)
+
+    # 2. Stateless reload: delete local topic_v2_dossiers.json and consolidate a 3rd QA -> PG restores full claims!
+    (state_dir / "topic_v2_dossiers.json").unlink()
+    qa3 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}pr70_3",
+        session_id="sess_pr70",
+        turn_id=3,
+        question="队列系统又升级了吗？",
+        answer="正式废弃 NATS-JetStream，改为 Kafka-KRaft-V4 方案。",
+        ts=t2,
+    )
+    res2 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="pr70-fp",
+    )
+    assert res2["processed_qas"] == 1
+    assert res2["superseded_claims"] >= 1
+
+    # Both qa1 and qa2 must now be superseded in PostgreSQL relational tables.
+    pg_sup = fetch_pg_superseded_qa_ids(pg_store, [qa1, qa2, qa3])
+    assert pg_sup == {qa1, qa2}
+
+    # 3. Real recall_pool with include_topic=False (NO topic header at all!) STILL demotes qa1 & qa2 via PG!
+    cfg = _default_pg_dict_config(tmp_path)
+    hits, _meta = _rp_call(
+        "队列系统现在用什么方案？",
+        pg=pg_store,
+        q_emb=_EMBED_FN("队列系统现在用什么方案"),
+        include_keyword=True,
+        include_topic=False,
+        include_yin=False,
+        include_notes=False,
+        limit=10,
+        config=cfg,
+    )
+    ranked = [h.source_id for h in hits]
+    assert f"qa_{qa3}" in ranked
+    for old_q in (qa1, qa2):
+        if f"qa_{old_q}" in ranked:
+            assert ranked.index(f"qa_{qa3}") < ranked.index(f"qa_{old_q}"), (
+                f"PG relational hydration must demote qa_{old_q} even without topic header: {ranked}"
+            )
+
+
+def test_pg_pr71_stateless_recovery_deletes_both_json_files_and_skips_reprocessing(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """B2 PG16 regression: deleting BOTH local JSON files restores global watermark from PG topic_v2_state."""
+    t0 = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
+
+    qa1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_1",
+        session_id="sess_b2",
+        turn_id=1,
+        question="历史旧问答 1",
+        answer="历史结论：采用 Legacy-Cache-V1。",
+        ts=t0,
+    )
+    qa2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_2",
+        session_id="sess_b2",
+        turn_id=2,
+        question="收到",
+        answer="好的",
+        ts=t0 + timedelta(minutes=1),
+    )
+
+    # 1. First boot WITHOUT backfill_history must initialize watermark to MAX(qa_pairs.id) with 0 LLM calls.
+    calls_first: list[int] = []
+
+    def _counting_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        qid = int(payload["qa_id"])
+        calls_first.append(qid)
+        if qid == qa2 or payload["question"] == "收到":
+            return json.dumps({"action": "skip", "update_type": "skip"}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_title": "缓存架构",
+                "update_type": "add",
+                "claim_text": "缓存采用 Redis-V7",
+                "keywords": ["Redis-V7"],
+            },
+            ensure_ascii=False,
+        )
+
+    state_dir = tmp_path / "b2_state"
+    boot_res = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_counting_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="b2-fp",
+    )
+    assert boot_res["claims_store"] == "pg"
+    assert boot_res["initialized_baseline"] is True
+    assert boot_res["new_last_qa_id"] == qa2
+    assert calls_first == [], "Default first boot must NOT backfill pre-existing QAs"
+
+    # 2. Insert QA3 (topic claim) + QA4 (explicitly skipped chitchat so watermark > max(claim evidence QA IDs)).
+    qa3 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_3",
+        session_id="sess_b2",
+        turn_id=3,
+        question="缓存架构用什么？",
+        answer="缓存采用 Redis-V7。",
+        ts=t0 + timedelta(minutes=2),
+    )
+    qa4 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_4",
+        session_id="sess_b2",
+        turn_id=4,
+        question="收到",
+        answer="谢谢",
+        ts=t0 + timedelta(minutes=3),
+    )
+    res_inc = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_counting_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="b2-fp",
+    )
+    assert res_inc["new_last_qa_id"] == qa4
+    assert calls_first == [qa3, qa4]
+
+    # 3. Delete BOTH local JSON files (topic_v2_dossiers.json AND topic_v2_state.json).
+    (state_dir / "topic_v2_dossiers.json").unlink()
+    (state_dir / "topic_v2_state.json").unlink()
+
+    calls_after_wipe: list[int] = []
+
+    def _after_wipe_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        calls_after_wipe.append(int(payload["qa_id"]))
+        return json.dumps({"action": "skip", "update_type": "skip"}, ensure_ascii=False)
+
+    res_reload = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_after_wipe_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="b2-fp",
+    )
+    assert res_reload["previous_last_qa_id"] == qa4
+    assert res_reload["new_last_qa_id"] == qa4
+    assert res_reload["claims_store"] == "pg"
+    assert calls_after_wipe == [], "Deleting BOTH JSON files must restore watermark from PG without re-calling LLM"
+    # Also verify reconstructed claims/topics from PG retained Redis-V7 cleanly after JSON wipe.
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%Redis-V7%",),
+        )
+        assert cur.fetchone() is not None
+
+    # 4. Insert QA5 -> only QA5 is processed.
+    qa5 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_5",
+        session_id="sess_b2",
+        turn_id=5,
+        question="收到",
+        answer="明白",
+        ts=t0 + timedelta(minutes=4),
+    )
+    res_next = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_after_wipe_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="b2-fp",
+    )
+    assert res_next["previous_last_qa_id"] == qa4
+    assert res_next["new_last_qa_id"] == qa5
+    assert calls_after_wipe == [qa5]
+
+
+def test_pg_pr71_fresh_install_first_conversation_and_late_answer_never_lost(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """P1 PG16 regression:
+    1) Fresh install (0 rows): startup baseline=0 so turn #1 is NEVER swallowed.
+    2) Existing install: startup baseline=MAX(completed) skips history while live turns after boot process.
+    3) In-flight empty-answer QA + later completed QA: watermark halts before empty QA until late answer fills.
+    """
+    from v3core.topic_v2 import ensure_topic_v2_baseline_watermark
+
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    # Ensure clean qa_pairs table state for the fresh-install baseline check
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    # 1. Fresh install: startup pins baseline BEFORE turn #1 arrives
+    state_fresh = tmp_path / "fresh_state"
+    boot_fresh = ensure_topic_v2_baseline_watermark(pg_store, state_dir=state_fresh)
+    assert boot_fresh["initialized"] is True
+
+    qa1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}first_conv_1",
+        session_id="sess_first",
+        turn_id=1,
+        question="新库首次真实对话：队列选什么？",
+        answer="新库首次真实对话决定采用 NATS-JetStream-V1。",
+        ts=t0,
+    )
+    res_fresh = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_fresh,
+        dry_run=False,
+        embed_model="first-fp",
+    )
+    assert res_fresh["processed_qas"] == 1
+    assert res_fresh["new_last_qa_id"] == qa1
+
+    # 2. Existing install with pre-existing qa1: new state_dir2 pins baseline at qa1 BEFORE qa2 arrives
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+    state_existing = tmp_path / "existing_state"
+    boot_existing = ensure_topic_v2_baseline_watermark(pg_store, state_dir=state_existing)
+    assert boot_existing["initialized"] is True
+    assert boot_existing["last_qa_id"] == qa1
+
+    qa2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}existing_live_2",
+        session_id="sess_live",
+        turn_id=1,
+        question="上线后首条对话：缓存用什么？",
+        answer="上线后首条对话决定采用 Valkey-V8。",
+        ts=t0 + timedelta(seconds=30),
+    )
+    res_live = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_existing,
+        dry_run=False,
+        embed_model="first-fp",
+    )
+    assert res_live["previous_last_qa_id"] == qa1
+    assert res_live["processed_qas"] == 1
+    assert res_live["new_last_qa_id"] == qa2
+
+    # 3. In-flight empty-answer qa3 + later completed qa4 -> watermark holds at qa2 until qa3 gets late answer
+    qa3 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}late_3",
+        session_id="sess_late",
+        turn_id=1,
+        question="对象存储用什么方案？",
+        answer="",
+        ts=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+    qa4 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}late_4",
+        session_id="sess_late",
+        turn_id=2,
+        question="监控告警用什么？",
+        answer="监控告警采用 Prometheus-Alertmanager。",
+        ts=datetime.now(timezone.utc) - timedelta(seconds=2),
+    )
+    res_hold = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_existing,
+        dry_run=False,
+        embed_model="first-fp",
+    )
+    assert res_hold["pending_incomplete_qa_ids"] == [qa3]
+    assert res_hold["new_last_qa_id"] == qa2
+
+    # Simulate late assistant derivation completing qa3's answer
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "UPDATE public.qa_pairs SET answer = %s WHERE id = %s",
+            ("对象存储最终采用 MinIO-Cluster-V2。", qa3),
+        )
+        lease.connection.commit()
+
+    res_late_done = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=state_existing,
+        dry_run=False,
+        embed_model="first-fp",
+    )
+    assert res_late_done["pending_incomplete_qa_ids"] == []
+    assert res_late_done["processed_qas"] == 2
+    assert res_late_done["new_last_qa_id"] == qa4
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%MinIO-Cluster-V2%",),
+        )
+        assert cur.fetchone() is not None
+
+
+def test_pg_pr71_r2_v3core_pg_recovery_and_late_merge_past_grace_window(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """PG16 integration regression for PR #71 round-2 review fixes:
+    1) V3Core._ensure_topic_v2_baseline() recovers cleanly after a transient PG outage
+       so baseline is pinned before turn #1 and turn #1 is consolidated.
+    2) Late assistant derivation arriving PAST the 900s grace window atomically queues
+       reprocess_qa_ids via V3Core._late_merge_into_qa() and consolidates ONLY that QA
+       without regressing last_qa_id or duplicating LLM calls on intermediate QAs.
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    # 1. V3Core transient PG outage during init -> recovers before turn #1
+    data_dir = tmp_path / "r2_core"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+
+    class _TogglePg:
+        def __init__(self, inner):
+            self._inner = inner
+            self.online = False
+
+        def is_connected(self):
+            return self.online
+
+        def lease(self, timeout: float = 10.0):
+            if not self.online:
+                raise RuntimeError("pg temporarily down")
+            return self._inner.lease(timeout=timeout)
+
+        def _connect(self):
+            if not self.online:
+                raise RuntimeError("pg temporarily down")
+            return self._inner._connect()
+
+    toggle_pg = _TogglePg(pg_store)
+    core._pg = toggle_pg
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+    core._topic_v2_worker = None
+    core._topic_v2_stop_requested = True
+
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is False
+
+    toggle_pg.online = True
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is True
+
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=1)
+    qa_turn1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r2_turn1",
+        session_id="sess_r2",
+        turn_id=1,
+        question="PG 恢复后的首轮对话：搜索引擎选型？",
+        answer="PG 恢复后决定采用 Meilisearch-V1。",
+        ts=t0,
+    )
+    res_turn1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r2-fp",
+    )
+    assert res_turn1["processed_qas"] == 1
+    assert res_turn1["new_last_qa_id"] == qa_turn1
+
+    # 2. Abandoned empty QA past 15-minute grace window + later completed QA
+    qa_old_empty = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r2_old_empty",
+        session_id="sess_r2",
+        turn_id=2,
+        question="分析引擎选型是什么？",
+        answer="",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r2_after",
+        session_id="sess_r2",
+        turn_id=3,
+        question="日志采集用什么？",
+        answer="日志采集采用 Vector-V0。",
+        ts=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+    res_skip = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r2-fp",
+        pending_answer_grace_s=900.0,
+    )
+    assert res_skip["pending_incomplete_qa_ids"] == []
+    assert res_skip["new_last_qa_id"] == qa_after
+    assert res_skip["processed_qas"] == 1
+
+    # Late assistant derivation arrives AFTER watermark passed qa_old_empty
+    core._pg = pg_store
+    merge_res = core._late_merge_into_qa(
+        pg=pg_store,
+        qa_row=(qa_old_empty, "", [], "分析引擎选型是什么？"),
+        msg_id="late_r2_msg_1",
+        content="分析引擎最终采用 ClickHouse-V24。",
+        remember=lambda: None,
+    )
+    assert merge_res == "completed_late"
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'")
+        queued = cur.fetchone()[0]
+        assert qa_old_empty in list(queued)
+
+    llm_calls: list[str] = []
+
+    def _counting_llm(messages: list[dict[str, str]]) -> str:
+        user_msg = messages[-1]["content"] if messages else ""
+        llm_calls.append(user_msg)
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "分析引擎选型",
+                "summary": "分析引擎最终采用 ClickHouse-V24。",
+                "keywords": ["ClickHouse-V24", "分析引擎"],
+                "update_type": "add",
+                "claim_text": "分析引擎最终采用 ClickHouse-V24。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.92,
+                "reason": "explicit decision",
+            },
+            ensure_ascii=False,
+        )
+
+    res_reprocess = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_counting_llm,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r2-fp",
+        pending_answer_grace_s=900.0,
+    )
+    assert len(llm_calls) == 1
+    assert "ClickHouse-V24" in llm_calls[0]
+    assert res_reprocess["processed_qas"] == 1
+    assert res_reprocess["new_last_qa_id"] == qa_after
+    assert res_reprocess["reprocessed_qa_ids"] == [qa_old_empty]
+    assert res_reprocess["remaining_reprocess_qa_ids"] == []
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'")
+        assert list(cur.fetchone()[0]) == []
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%ClickHouse-V24%",),
+        )
+        assert cur.fetchone() is not None
+
+
+def test_pg_pr71_r3_races_baseline_before_flush_and_concurrent_late_merge(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """PG16 integration tests for PR #71 round-3 race & atomicity fixes:
+    1) P1-1: Baseline fails during init, PG recovers right before _flush_pending_qa's PG
+       write -> baseline pins BEFORE turn #1 is inserted; if baseline still fails,
+       _flush_pending_qa defers QA insertion (fail-closed).
+    2) P1-2a: Worker reads old empty QA & has NOT committed watermark yet when
+       _late_merge_into_qa arrives -> unconditional enqueue + GREATEST(last_qa_id)
+       preserves reprocess_qa_ids even though DB last_qa_id was still behind.
+    3) P1-2b: 2nd late merge arrives DURING reprocessing of version 1 -> version guard
+       prevents cycle 2 from consuming version 2, so cycle 3 processes the 2nd merge.
+    4) P1-2c: Real PG16 autocommit=True PgPool rollback when topic_v2_state UPDATE fails.
+    """
+    from types import SimpleNamespace
+    import v3core.topic_v2 as tv2_mod
+    from v3core import V3Core
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    qa_hist = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r3_hist",
+        session_id="sess_r3_hist",
+        turn_id=1,
+        question="历史对话：旧配置？",
+        answer="历史对话采用 Legacy-V0。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=3),
+    )
+
+    data_dir = tmp_path / "r3_pg_core"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._fenced = False
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+    core._topic_v2_worker = None
+    core._topic_v2_stop_requested = True
+    core._is_core_fenced = lambda: False
+    core._schema_readiness = lambda conn: None
+    core._qa_source_id = lambda s, t, m, host="": f"{_QA_PREFIX}r3_{s}_{t}_{m}"
+    core._ack_qa_pending = lambda *a, **k: None
+    core._mark_qa_embedding_failure = lambda *a, **k: None
+    core._mark_qa_embedding_success_pending_db = lambda *a, **k: None
+    core._on_live_flush = lambda *a, **k: None
+
+    class _DownPg:
+        def is_connected(self):
+            return False
+
+        def lease(self, timeout: float = 10.0):
+            raise RuntimeError("pg down")
+
+    core._pg = _DownPg()
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is False
+
+    # PG recovers right before _flush_pending_qa writes turn #1
+    core._pg = pg_store
+    core._flush_pending_qa(
+        "sess_r3_live",
+        {"q": "新库核心账本用什么？", "a": "新库核心账本采用 TigerBeetle-V1。", "q_turn": "1", "q_msg_id": "m1"},
+    )
+    assert core._topic_v2_baseline_checked is True
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT last_qa_id FROM public.topic_v2_state WHERE state_key = 'default'")
+        assert int(cur.fetchone()[0]) == qa_hist
+
+    res_live1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r3-fp",
+    )
+    assert res_live1["processed_qas"] == 1
+    assert res_live1["new_last_qa_id"] > qa_hist
+
+    # Fail-closed: if baseline still fails, _flush_pending_qa must NOT insert QA
+    core._topic_v2_baseline_checked = False
+    orig_ensure_baseline = tv2_mod.ensure_topic_v2_baseline_watermark
+    monkeypatch.setattr(
+        tv2_mod,
+        "ensure_topic_v2_baseline_watermark",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("baseline forced failure")),
+    )
+    core._flush_pending_qa(
+        "sess_r3_live",
+        {"q": "不该写入的问题？", "a": "不该写入的答案。", "q_turn": "2", "q_msg_id": "m2"},
+    )
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM public.qa_pairs WHERE source_id = %s",
+            (f"{_QA_PREFIX}r3_sess_r3_live_2_m2",),
+        )
+        assert int(cur.fetchone()[0]) == 0
+    monkeypatch.setattr(tv2_mod, "ensure_topic_v2_baseline_watermark", orig_ensure_baseline)
+    core._topic_v2_baseline_checked = True
+
+    # Race 2: Worker reads old empty QA and has NOT committed watermark yet when _late_merge_into_qa arrives
+    qa_old_empty = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r3_old_empty",
+        session_id="sess_r3_race",
+        turn_id=1,
+        question="分析库与计算引擎选型？",
+        answer="",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r3_after",
+        session_id="sess_r3_race",
+        turn_id=2,
+        question="网关用什么？",
+        answer="网关采用 Envoy-V2。",
+        ts=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+
+    fired_late_1 = {"done": False}
+
+    def _cycle1_llm(messages: list[dict[str, str]]) -> str:
+        if not fired_late_1["done"]:
+            fired_late_1["done"] = True
+            # DB last_qa_id is STILL < qa_old_empty right now!
+            r_late1 = core._late_merge_into_qa(
+                pg=pg_store,
+                qa_row=(qa_old_empty, "", [], "分析库与计算引擎选型？"),
+                msg_id="r3_late_1",
+                content="分析库采用 DuckDB-V1。",
+                remember=lambda: None,
+            )
+            assert r_late1 == "completed_late"
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "网关选型",
+                "summary": "网关采用 Envoy-V2。",
+                "keywords": ["Envoy-V2"],
+                "update_type": "add",
+                "claim_text": "网关采用 Envoy-V2。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "decision",
+            },
+            ensure_ascii=False,
+        )
+
+    res_c1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_cycle1_llm,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r3-fp",
+        pending_answer_grace_s=900.0,
+    )
+    assert res_c1["new_last_qa_id"] == qa_after
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT reprocess_qa_ids, reprocess_qa_versions FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        q_ids, q_vers = cur.fetchone()
+        assert qa_old_empty in list(q_ids)
+        assert int(q_vers[str(qa_old_empty)]) == 1
+
+    # Cycle 2: 2nd late merge arrives DURING reprocessing of version 1
+    fired_late_2 = {"done": False}
+    c2_prompts: list[str] = []
+
+    def _cycle2_llm(messages: list[dict[str, str]]) -> str:
+        c2_prompts.append(messages[-1]["content"])
+        if not fired_late_2["done"]:
+            fired_late_2["done"] = True
+            r_late2 = core._late_merge_into_qa(
+                pg=pg_store,
+                qa_row=(qa_old_empty, "分析库采用 DuckDB-V1。", ["r3_late_1"], "分析库与计算引擎选型？"),
+                msg_id="r3_late_2",
+                content="计算引擎补充采用 Polars-V1。",
+                remember=lambda: None,
+            )
+            assert r_late2 == "completed_late"
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "分析库选型",
+                "summary": "分析库采用 DuckDB-V1。",
+                "keywords": ["DuckDB-V1"],
+                "update_type": "add",
+                "claim_text": "分析库采用 DuckDB-V1。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "decision",
+            },
+            ensure_ascii=False,
+        )
+
+    res_c2 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_cycle2_llm,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r3-fp",
+        pending_answer_grace_s=900.0,
+    )
+    assert len(c2_prompts) == 1
+    assert "DuckDB-V1" in c2_prompts[0]
+    assert res_c2["reprocessed_qa_ids"] == [qa_old_empty]
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT reprocess_qa_ids, reprocess_qa_versions FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        q_ids2, q_vers2 = cur.fetchone()
+        assert qa_old_empty in list(q_ids2), "Version 2 must NOT be consumed by Cycle 2!"
+        assert int(q_vers2[str(qa_old_empty)]) == 2
+
+    # Cycle 3: drains version 2 cleanly and adds Polars-V1 claim
+    c3_prompts: list[str] = []
+
+    def _cycle3_llm(messages: list[dict[str, str]]) -> str:
+        c3_prompts.append(messages[-1]["content"])
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "计算引擎选型",
+                "summary": "计算引擎补充采用 Polars-V1。",
+                "keywords": ["DuckDB-V1", "Polars-V1"],
+                "update_type": "add",
+                "claim_text": "计算引擎补充采用 Polars-V1。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "late second merge",
+            },
+            ensure_ascii=False,
+        )
+
+    res_c3 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_cycle3_llm,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r3-fp",
+        pending_answer_grace_s=900.0,
+    )
+    assert len(c3_prompts) == 1
+    assert "Polars-V1" in c3_prompts[0]
+    assert res_c3["reprocessed_qa_ids"] == [qa_old_empty]
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT reprocess_qa_ids, reprocess_qa_versions FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        q_ids3, q_vers3 = cur.fetchone()
+        assert list(q_ids3) == []
+        assert dict(q_vers3 or {}) == {}
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%Polars-V1%",),
+        )
+        assert cur.fetchone() is not None
+
+    # Atomicity on real PG16 autocommit=True connection: failure in topic_v2_state rolls back qa_pairs
+    class _BoomCur:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self._inner.__exit__(*a)
+
+        def execute(self, sql, params=None):
+            if "update public.topic_v2_state" in " ".join(str(sql).split()).lower():
+                raise RuntimeError("boom on topic_v2_state")
+            return self._inner.execute(sql, params)
+
+        def fetchone(self):
+            return self._inner.fetchone()
+
+        @property
+        def rowcount(self):
+            return self._inner.rowcount
+
+    class _BoomConn:
+        def __init__(self, inner):
+            self._inner = inner
+            self.autocommit = getattr(inner, "autocommit", True)
+
+        def cursor(self):
+            return _BoomCur(self._inner.cursor())
+
+        def commit(self):
+            return self._inner.commit()
+
+        def rollback(self):
+            return self._inner.rollback()
+
+    from contextlib import contextmanager
+
+    class _BoomPg:
+        @contextmanager
+        def lease(self, timeout: float = 10.0):
+            with pg_store.lease(timeout=timeout) as c:
+                yield _BoomConn(getattr(c, "connection", c))
+
+    remember_boom = {"n": 0}
+    res_boom = core._late_merge_into_qa(
+        pg=_BoomPg(),
+        qa_row=(qa_after, "网关采用 Envoy-V2。", [], "网关用什么？"),
+        msg_id="r3_boom_msg",
+        content="SHOULD_ROLL_BACK",
+        remember=lambda: remember_boom.__setitem__("n", remember_boom["n"] + 1),
+    )
+    assert res_boom is None
+    assert remember_boom["n"] == 0
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT answer, merged_event_ids FROM public.qa_pairs WHERE id = %s", (qa_after,))
+        ans_after, mev_after = cur.fetchone()
+        assert "SHOULD_ROLL_BACK" not in str(ans_after)
+        assert "r3_boom_msg" not in list(mev_after or [])
+
+
+def test_pg_pr71_r4_local_state_migrated_to_pg_and_late_merge_persists(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """PG16 integration test for PR #71 round-4 state migration & zero-row guard:
+    1) Local valid topic_v2_state.json exists while PG topic_v2_state table is empty:
+       _ensure_topic_v2_baseline() migrates local_last_qa into PG topic_v2_state.
+    2) Subsequent _late_merge_into_qa() on an older empty QA persists into reprocess_qa_ids
+       and consolidates into topic_claims.
+    3) If PG topic_v2_state row is missing while _topic_v2_baseline_checked is stale True,
+       0-row enqueue rolls back qa_pairs answer and returns None.
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    qa_old_empty = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r4_old_empty",
+        session_id="sess_r4",
+        turn_id=1,
+        question="分布式存储引擎选型？",
+        answer="",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r4_after",
+        session_id="sess_r4",
+        turn_id=2,
+        question="网关用什么？",
+        answer="网关采用 Kong-V3。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    data_dir = tmp_path
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "topic_v2_state.json").write_text(
+        json.dumps({"last_qa_id": qa_after, "baseline_initialized": True}),
+        encoding="utf-8",
+    )
+
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._fenced = False
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+    core._topic_v2_worker = None
+    core._topic_v2_stop_requested = True
+    core._pg = pg_store
+
+    ok = core._ensure_topic_v2_baseline()
+    assert ok is True
+    assert core._topic_v2_baseline_checked is True
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT last_qa_id FROM public.topic_v2_state WHERE state_key = 'default'")
+        row = cur.fetchone()
+        assert row is not None and int(row[0]) == qa_after
+
+    remember_ok = {"n": 0}
+    merge_res = core._late_merge_into_qa(
+        pg=pg_store,
+        qa_row=(qa_old_empty, "", [], "分布式存储引擎选型？"),
+        msg_id="r4_late_1",
+        content="迁移后迟到回答采用 ScyllaDB-V5。",
+        remember=lambda: remember_ok.__setitem__("n", remember_ok["n"] + 1),
+    )
+    assert merge_res == "completed_late"
+    assert remember_ok["n"] == 1
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT reprocess_qa_ids, reprocess_qa_versions FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        q_ids, q_vers = cur.fetchone()
+        assert qa_old_empty in list(q_ids)
+        assert int(q_vers[str(qa_old_empty)]) == 1
+
+    llm_calls: list[str] = []
+
+    def _r4_llm(messages: list[dict[str, str]]) -> str:
+        llm_calls.append(messages[-1]["content"])
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "分布式存储引擎选型",
+                "summary": "迁移后迟到回答采用 ScyllaDB-V5。",
+                "keywords": ["ScyllaDB-V5"],
+                "update_type": "add",
+                "claim_text": "迁移后迟到回答采用 ScyllaDB-V5。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "migrated local state late merge",
+            },
+            ensure_ascii=False,
+        )
+
+    res_rep = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_r4_llm,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r4-fp",
+    )
+    assert len(llm_calls) == 1
+    assert "ScyllaDB-V5" in llm_calls[0]
+    assert res_rep["new_last_qa_id"] == qa_after
+    assert res_rep["reprocessed_qa_ids"] == [qa_old_empty]
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%ScyllaDB-V5%",),
+        )
+        assert cur.fetchone() is not None
+        cur.execute("SELECT reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'")
+        assert list(cur.fetchone()[0]) == []
+
+        # Zero-row safety on real PG when default row is deleted while baseline_checked is stale True
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    remember_zero = {"n": 0}
+    res_zero = core._late_merge_into_qa(
+        pg=pg_store,
+        qa_row=(qa_after, "网关采用 Kong-V3。", [], "网关用什么？"),
+        msg_id="r4_zero_row",
+        content="SHOULD_ROLL_BACK_R4",
+        remember=lambda: remember_zero.__setitem__("n", remember_zero["n"] + 1),
+    )
+    assert res_zero is None
+    assert remember_zero["n"] == 0
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT answer, merged_event_ids FROM public.qa_pairs WHERE id = %s", (qa_after,))
+        ans_z, mev_z = cur.fetchone()
+        assert "SHOULD_ROLL_BACK_R4" not in str(ans_z)
+        assert "r4_zero_row" not in list(mev_z or [])
+
+
+def test_pg_pr71_r5_local_reprocess_queue_migrated_to_pg(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """PG16 integration test for PR #71 round-5:
+    Local topic_v2_state.json reprocess_qa_ids queue is migrated into empty PG
+    public.topic_v2_state both via _ensure_topic_v2_baseline() and directly via
+    consolidate_pg_incremental(), then consolidated into topic_claims and cleared.
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    # Part A: migration via _ensure_topic_v2_baseline()
+    qa_pending = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r5_pending_a",
+        session_id="sess_r5_a",
+        turn_id=1,
+        question="流计算引擎选型？",
+        answer="本地遗留队列采用 RisingWave-V2。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r5_after_a",
+        session_id="sess_r5_a",
+        turn_id=2,
+        question="网关用什么？",
+        answer="网关采用 APISIX-V3。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    data_dir = tmp_path
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "topic_v2_state.json").write_text(
+        json.dumps(
+            {
+                "last_qa_id": qa_after,
+                "baseline_initialized": True,
+                "reprocess_qa_ids": [qa_pending],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._fenced = False
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+    core._topic_v2_worker = None
+    core._topic_v2_stop_requested = True
+    core._pg = pg_store
+
+    assert core._ensure_topic_v2_baseline() is True
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT last_qa_id, reprocess_qa_ids, reprocess_qa_versions "
+            "FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        lqa, rids, rvers = cur.fetchone()
+        assert int(lqa) == qa_after
+        assert qa_pending in list(rids)
+        assert dict(rvers or {}) == {}
+
+    llm_calls_a: list[str] = []
+
+    def _r5_llm_a(messages: list[dict[str, str]]) -> str:
+        llm_calls_a.append(messages[-1]["content"])
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "流计算引擎选型",
+                "summary": "本地遗留队列采用 RisingWave-V2。",
+                "keywords": ["RisingWave-V2"],
+                "update_type": "add",
+                "claim_text": "本地遗留队列采用 RisingWave-V2。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "migrated local reprocess queue",
+            },
+            ensure_ascii=False,
+        )
+
+    res_a = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_r5_llm_a,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r5-fp",
+    )
+    assert len(llm_calls_a) == 1
+    assert "RisingWave-V2" in llm_calls_a[0]
+    assert res_a["reprocessed_qa_ids"] == [qa_pending]
+    assert res_a["new_last_qa_id"] == qa_after
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%RisingWave-V2%",),
+        )
+        assert cur.fetchone() is not None
+        cur.execute("SELECT reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'")
+        assert list(cur.fetchone()[0]) == []
+
+    # Part B: direct consolidate_pg_incremental() without prior baseline call
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    qa_pending2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r5_pending_b",
+        session_id="sess_r5_b",
+        turn_id=1,
+        question="增量物化视图引擎选型？",
+        answer="本地遗留队列二采用 Materialize-V1。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r5_after_b",
+        session_id="sess_r5_b",
+        turn_id=2,
+        question="服务发现用什么？",
+        answer="服务发现采用 Consul-V1。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    data_dir2 = tmp_path / "r5_pg_b"
+    data_dir2.mkdir(parents=True, exist_ok=True)
+    (data_dir2 / "topic_v2_state.json").write_text(
+        json.dumps(
+            {
+                "last_qa_id": qa_after2,
+                "baseline_initialized": True,
+                "reprocess_qa_ids": [qa_pending2],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    llm_calls_b: list[str] = []
+
+    def _r5_llm_b(messages: list[dict[str, str]]) -> str:
+        llm_calls_b.append(messages[-1]["content"])
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "增量物化视图引擎选型",
+                "summary": "本地遗留队列二采用 Materialize-V1。",
+                "keywords": ["Materialize-V1"],
+                "update_type": "add",
+                "claim_text": "本地遗留队列二采用 Materialize-V1。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "direct consolidate migrated queue",
+            },
+            ensure_ascii=False,
+        )
+
+    res_b = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_r5_llm_b,
+        state_dir=data_dir2,
+        dry_run=False,
+        embed_model="r5-fp",
+    )
+    assert len(llm_calls_b) == 1
+    assert "Materialize-V1" in llm_calls_b[0]
+    assert res_b["reprocessed_qa_ids"] == [qa_pending2]
+    assert res_b["new_last_qa_id"] == qa_after2
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%Materialize-V1%",),
+        )
+        assert cur.fetchone() is not None
+        cur.execute(
+            "SELECT last_qa_id, reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        lqa2, rids2 = cur.fetchone()
+        assert int(lqa2) == qa_after2
+        assert list(rids2) == []

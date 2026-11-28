@@ -631,6 +631,56 @@ class V3Core:
         except Exception:  # noqa: BLE001
             return None
 
+    def _ensure_topic_v2_baseline(self, pg_override: Any = None) -> bool:
+        """Pin first-boot Topic V2 baseline watermark BEFORE LiveBuffer accepts new turns."""
+        if getattr(self, "_topic_v2_baseline_checked", False):
+            return True
+        try:
+            cfg = getattr(self, "_config", None) or getattr(self, "config", None)
+            if not self._is_topic_v2_enabled(cfg):
+                self._topic_v2_baseline_checked = True
+                return True
+            backfill = self._is_topic_v2_backfill_enabled(cfg)
+            if backfill:
+                self._topic_v2_baseline_checked = True
+                return True
+            pg = pg_override
+            if pg is None:
+                pg = getattr(self, "_pg", None)
+                if pg is None:
+                    try:
+                        pg = self.pg
+                    except Exception:
+                        pg = None
+                if pg is None:
+                    return False
+                if hasattr(pg, "is_connected") and callable(pg.is_connected):
+                    try:
+                        if not pg.is_connected() and getattr(self, "_pg_pool", None) is None:
+                            return False
+                    except Exception:
+                        return False
+            from .config import _resolve_data_dir
+            from .topic_v2 import ensure_topic_v2_baseline_watermark
+
+            res = ensure_topic_v2_baseline_watermark(
+                pg,
+                state_dir=_resolve_data_dir(cfg),
+                backfill_history=False,
+            )
+            if isinstance(res, dict) and res.get("reason") in (
+                "baseline_pinned",
+                "pg_state_exists",
+                "local_state_exists",
+                "local_state_migrated",
+                "backfill_enabled",
+            ):
+                self._topic_v2_baseline_checked = True
+                return True
+        except Exception as e:
+            logger.debug("_ensure_topic_v2_baseline skipped (non-blocking): %s", _safe_err(e)[:120])
+        return bool(getattr(self, "_topic_v2_baseline_checked", False))
+
     @property
     def live_buffer(self) -> LiveBuffer:
         if self._live_buffer is None:
@@ -638,11 +688,15 @@ class V3Core:
             if pg_connected:
                 self._pg_was_connected = True
             pg = self.pg if pg_connected or getattr(self, "_pg_pool", None) is not None else None
+            if pg is not None:
+                self._ensure_topic_v2_baseline()
             self._live_buffer = LiveBuffer(pg=pg, config=self.config)
             # Phase 6.2: PG 写成功后触发轻量主题匹配.
             # Bind the V3Core method (not LiveBuffer self) so flush invalidation
             # can reach runtime.topic_recall_cache after the lease is released.
             self._live_buffer._post_flush = self._on_live_flush
+        elif not getattr(self, "_topic_v2_baseline_checked", False):
+            self._ensure_topic_v2_baseline()
         return self._live_buffer
 
     @property
@@ -711,6 +765,9 @@ class V3Core:
 
         self._initialized = True
         logger.info("V3Core 初始化 (profile=%s)", self._profile)
+        # Pin Topic V2 baseline watermark BEFORE recovering/accepting new live QA turns so
+        # pre-existing historical QAs are not backfilled while first-session turns are never skipped.
+        self._ensure_topic_v2_baseline()
         # recover durable QA markers deterministically (sorted, dedup)
         try:
             self._recover_pending_qa()
@@ -3564,6 +3621,20 @@ class V3Core:
             return bool(getattr(pf, "topic_v2_mode", True))
         return True
 
+    @staticmethod
+    def _is_topic_v2_backfill_enabled(cfg: Any) -> bool:
+        if cfg is None:
+            return False
+        if isinstance(cfg, dict):
+            return bool(
+                (cfg.get("topic_v2") or {}).get("backfill_history")
+                or (cfg.get("prefetch") or {}).get("topic_v2_backfill_history", False)
+            )
+        pf = getattr(cfg, "prefetch", None)
+        if pf is not None:
+            return bool(getattr(pf, "topic_v2_backfill_history", False))
+        return False
+
     def consolidate_topics_v2(
         self,
         *,
@@ -3611,6 +3682,7 @@ class V3Core:
                 eff_llm_fn = None
 
         state_dir = _resolve_data_dir(cfg)
+        backfill_history = self._is_topic_v2_backfill_enabled(cfg)
         with lock:
             result = consolidate_pg_incremental(
                 pg,
@@ -3620,6 +3692,7 @@ class V3Core:
                 dry_run=bool(dry_run),
                 batch_limit=max(int(batch_limit or 100), 1),
                 embed_model=eff_embed_model,
+                backfill_history=backfill_history,
             )
         if not dry_run and int(result.get("upserted_topics") or 0) > 0:
             try:
@@ -3668,31 +3741,59 @@ class V3Core:
         max_batches_per_wake = 20
         batch_size = 20
         retry_base = float(getattr(self, "_topic_v2_retry_base_s", 2.0))
+        recovery_base = float(getattr(self, "_topic_v2_recovery_cooldown_s", 30.0))
+        recovery_max = float(getattr(self, "_topic_v2_recovery_max_s", 300.0))
+        pending_retry_at: float | None = None
+        cooldown_step = 0
+        self._topic_v2_pending_recovery = False
+
         while not stop_ev.is_set():
-            if not wake_ev.wait(timeout=0.5):
-                continue
+            wait_s = 0.5
+            if pending_retry_at is not None:
+                remaining = pending_retry_at - time.monotonic()
+                if remaining <= 0.0:
+                    pending_retry_at = None
+                    wake_ev.set()
+                else:
+                    wait_s = min(0.5, remaining)
+            if not wake_ev.is_set():
+                if not wake_ev.wait(timeout=wait_s):
+                    if pending_retry_at is not None and time.monotonic() >= pending_retry_at:
+                        pending_retry_at = None
+                        wake_ev.set()
+                    continue
             while wake_ev.is_set() and not stop_ev.is_set():
                 busy_ev.set()
                 wake_ev.clear()
                 try:
                     retry_attempt = 0
                     batches = 0
+                    exhausted_failure = False
                     while not stop_ev.is_set() and not getattr(self, "_topic_v2_stop_requested", False):
                         try:
                             res = self.consolidate_topics_v2(dry_run=False, batch_limit=batch_size) or {}
                         except Exception as e:
                             logger.warning("_topic_v2_worker consolidation error: %s", _safe_err(e)[:100])
-                            if retry_attempt >= 2 or stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
+                            if retry_attempt >= 2:
+                                exhausted_failure = True
+                                break
+                            if stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
                                 break
                             retry_attempt += 1
                             continue
                         failed_qas = res.get("failed_qa_ids") or []
                         if failed_qas:
-                            if retry_attempt >= 2 or stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
+                            if retry_attempt >= 2:
+                                exhausted_failure = True
+                                break
+                            if stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
                                 break
                             retry_attempt += 1
                             continue
                         retry_attempt = 0
+                        cooldown_step = 0
+                        pending_retry_at = None
+                        self._topic_v2_pending_recovery = False
                         batches += 1
                         processed = int(res.get("processed_qas") or 0)
                         if processed >= batch_size:
@@ -3701,6 +3802,15 @@ class V3Core:
                                 break
                             continue
                         break
+                    if exhausted_failure and not stop_ev.is_set() and not getattr(self, "_topic_v2_stop_requested", False):
+                        delay = min(recovery_base * (2 ** cooldown_step), recovery_max)
+                        pending_retry_at = time.monotonic() + max(0.01, delay)
+                        cooldown_step = min(cooldown_step + 1, 6)
+                        self._topic_v2_pending_recovery = True
+                        logger.warning(
+                            "_topic_v2_worker retries exhausted; scheduled automatic recovery in %.1fs",
+                            delay,
+                        )
                 finally:
                     busy_ev.clear()
 
@@ -4865,12 +4975,25 @@ class V3Core:
                     fp = ""
                     pending_long_chunks = []
 
+            cfg_v2_pre = getattr(self, "_config", None) or getattr(self, "config", None)
+            if (
+                self._is_topic_v2_enabled(cfg_v2_pre)
+                and not getattr(self, "_topic_v2_baseline_checked", False)
+            ):
+                try:
+                    self._ensure_topic_v2_baseline()
+                except Exception:
+                    pass
+
             rowcount = 0
             with _lease_pg_store(pg) as conn:
                 if not conn:
                     return None
+                manual_tx = getattr(conn, "autocommit", None) is True
                 try:
                     with conn.cursor() as cur:
+                        if manual_tx:
+                            cur.execute("BEGIN")
                         if emb_str:
                             cur.execute(
                                 "UPDATE qa_pairs "
@@ -4909,12 +5032,56 @@ class V3Core:
                                 )
                             except Exception:
                                 pass
-                    conn.commit()
+                        cfg_v2_late = getattr(self, "_config", None) or getattr(self, "config", None)
+                        if rowcount > 0 and qa_id and self._is_topic_v2_enabled(cfg_v2_late):
+                            has_tv2_state = False
+                            try:
+                                cur.execute("SELECT to_regclass('public.topic_v2_state')")
+                                trow = cur.fetchone()
+                                has_tv2_state = bool(trow and trow[0])
+                            except Exception as probe_err:
+                                if "unmodelled sql" not in str(probe_err).lower():
+                                    raise
+                            if has_tv2_state:
+                                cur.execute(
+                                    "UPDATE public.topic_v2_state "
+                                    "SET reprocess_qa_ids = CASE "
+                                    "    WHEN COALESCE(reprocess_qa_ids, '[]'::jsonb) @> to_jsonb(ARRAY[%s::bigint]) "
+                                    "        THEN reprocess_qa_ids "
+                                    "    ELSE COALESCE(reprocess_qa_ids, '[]'::jsonb) || to_jsonb(%s::bigint) "
+                                    "END, "
+                                    "reprocess_qa_versions = COALESCE(reprocess_qa_versions, '{}'::jsonb) || jsonb_build_object("
+                                    "    %s::text, "
+                                    "    COALESCE((reprocess_qa_versions ->> %s::text)::bigint, 0) + 1"
+                                    "), "
+                                    "updated_at = NOW() "
+                                    "WHERE state_key = 'default'",
+                                    (int(qa_id), int(qa_id), str(int(qa_id)), str(int(qa_id))),
+                                )
+                                try:
+                                    _rq_rows = int(getattr(cur, "rowcount", 0) or 0)
+                                except Exception:
+                                    _rq_rows = 0
+                                if _rq_rows <= 0:
+                                    raise RuntimeError(
+                                        "topic_v2_state default row missing; late-merge reprocess enqueue not persisted"
+                                    )
+                        if manual_tx:
+                            cur.execute("COMMIT")
+                    if not manual_tx:
+                        conn.commit()
                 except Exception as e:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
+                    if manual_tx:
+                        try:
+                            with conn.cursor() as rcur:
+                                rcur.execute("ROLLBACK")
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
                     logger.warning(
                         "_late_merge_into_qa UPDATE 失败 (非阻塞): %s",
                         _safe_err(e)[:120],
@@ -4922,6 +5089,20 @@ class V3Core:
                     return None
             if rowcount > 0:
                 remember()
+                try:
+                    cfg_v2 = getattr(self, "_config", None) or getattr(self, "config", None)
+                    if (
+                        self._is_topic_v2_enabled(cfg_v2)
+                        and not getattr(self, "_topic_v2_stop_requested", False)
+                        and (
+                            getattr(self, "_topic_v2_worker", None) is not None
+                            or getattr(self, "_live_buffer", None) is not None
+                        )
+                    ):
+                        wake_ev = self._ensure_topic_v2_worker()
+                        wake_ev.set()
+                except Exception:
+                    pass
                 return "completed_late"
             # guard says a concurrent writer already merged this event
             remember()
@@ -5004,6 +5185,9 @@ class V3Core:
         if pre_status is not None and getattr(pre_status, "write_blocked", False):
             self._log_schema_blocked(pre_status)
             return
+
+        if not getattr(self, "_topic_v2_baseline_checked", False):
+            self._ensure_topic_v2_baseline()
 
         # 1. 算 embedding — short path unchanged, long path via v3core.embed_chunks
             # (v0.2 closing round, docs/QA-EMBEDDING-INDEX-DESIGN.md §2, §3).
@@ -5148,6 +5332,20 @@ class V3Core:
                 schema_status = self._schema_readiness(conn)
                 if schema_status is not None and schema_status.write_blocked:
                     self._log_schema_blocked(schema_status)
+                    should_ack = False
+                    return
+                if not getattr(self, "_topic_v2_baseline_checked", False):
+                    self._ensure_topic_v2_baseline(pg_override=conn)
+                cfg_v2_gate = getattr(self, "_config", None) or getattr(self, "config", None)
+                if (
+                    self._is_topic_v2_enabled(cfg_v2_gate)
+                    and not self._is_topic_v2_backfill_enabled(cfg_v2_gate)
+                    and not getattr(self, "_topic_v2_baseline_checked", False)
+                ):
+                    logger.warning(
+                        "_flush_pending_qa deferred: Topic V2 baseline watermark not initialized (q_turn=%s)",
+                        q_turn,
+                    )
                     should_ack = False
                     return
                 with conn.cursor() as cur:

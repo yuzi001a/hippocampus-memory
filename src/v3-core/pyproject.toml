@@ -101,6 +101,7 @@ packages = {find = {where = ["src"]}}
     "schema/memory_relations.sql",
     "schema/derived_memory_invalidations.sql",
     "schema/assistant_deliveries.sql",
+    "schema/topic_claims.sql",
     "schema/upgrade_v0_2.sql",
     # Manual DDL: not auto-applied by bootstrap, but the runtime tells users
     # "先执行 schema/task_events.sql" — a wheel install has to ship it.

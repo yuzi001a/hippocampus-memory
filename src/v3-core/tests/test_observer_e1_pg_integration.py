@@ -385,6 +385,7 @@ def test_pg_observer_and_topic_v2_no_double_write_conflict(
         llm_fn=None,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert tv2_res["processed_qas"] == 1
 
@@ -682,6 +683,7 @@ def test_pg_full_pipeline_topic_v2_observer_e1_freshness_preserved(
         llm_fn=None,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert tv2_out["processed_qas"] == 2
 

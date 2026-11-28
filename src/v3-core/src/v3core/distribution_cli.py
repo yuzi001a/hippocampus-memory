@@ -327,6 +327,7 @@ def _doctor(args: argparse.Namespace) -> int:
                  "memory_relations.sql",
                  "derived_memory_invalidations.sql",
                  "assistant_deliveries.sql",
+                 "topic_claims.sql",
                  "upgrade_v0_2.sql"):
         try:
             text = _package_sql(name)
@@ -475,6 +476,16 @@ def _doctor(args: argparse.Namespace) -> int:
         db_check = report["checks"]["database"]
         if isinstance(db_check, dict) and db_check.get("error"):
             report["errors"].append(f"database: {db_check['error']}")
+        if isinstance(db_check, dict) and db_check.get("reachable") is True:
+            missing_req = sorted(
+                tbl
+                for tbl, ok in (db_check.get("required_tables") or {}).items()
+                if not ok
+            )
+            if missing_req:
+                report["warnings"].append(
+                    f"database missing required tables: {', '.join(missing_req)}"
+                )
 
     # 9. Final status / exit code.
     if report["errors"]:
@@ -610,7 +621,10 @@ def _doctor_probe_database(explicit_dsn: str | None) -> dict[str, Any]:
                           "conversation_stream", "yin_paragraphs",
                           "embedding_failures", "memory_relations",
                           "derived_memory_invalidations",
-                          "assistant_deliveries"):
+                          "assistant_deliveries",
+                          "topic_claims",
+                          "topic_claim_evidence",
+                          "topic_v2_state"):
                 try:
                     cur.execute(
                         "SELECT 1 FROM information_schema.tables "
