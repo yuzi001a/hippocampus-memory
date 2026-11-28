@@ -246,6 +246,7 @@ def _cleanup_pg_rows(pool: PgPool) -> None:
             "DELETE FROM public.topic_claims WHERE topic_id LIKE %s OR topic_id = %s",
             (_TOPIC_PREFIX + "%", _LEGACY_TOPIC_ID),
         )
+        cur.execute("DELETE FROM public.topic_v2_state")
         cur.execute("DELETE FROM public.observation_notes WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
         cur.execute("DELETE FROM public.yin WHERE version LIKE %s", (_NOTE_PREFIX + "%",))
         cur.execute("DELETE FROM public.yin_paragraphs WHERE yin_version LIKE %s", (_NOTE_PREFIX + "%",))
@@ -309,6 +310,7 @@ def test_pg_default_config_and_dry_run_makes_zero_writes(pg_pool: PgPool, pg_sto
         llm_fn=None,
         state_dir=state_dir,
         dry_run=True,
+        backfill_history=True,
     )
     assert res["dry_run"] is True
     assert res["processed_qas"] == 1
@@ -342,6 +344,7 @@ def test_pg_incremental_consolidation_idempotency_and_source_preservation(
         llm_fn=None,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert res1["processed_qas"] == 1
     assert res1["created_topics"] == 1
@@ -400,6 +403,7 @@ def test_pg_a_to_b_evolution_and_default_prefetch_freshness_guard(
         llm_fn=None,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert first["created_topics"] == 1
 
@@ -632,6 +636,7 @@ def test_pg_60qa_multi_topic_stress_no_fragmentation(
             state_dir=state_dir,
             dry_run=False,
             batch_limit=20,
+            backfill_history=True,
         )
 
     state = json.loads((state_dir / "topic_v2_state.json").read_text(encoding="utf-8"))
@@ -691,6 +696,7 @@ def test_pg_p2_null_session_id_and_embed_model_updated_at(
         state_dir=state_dir,
         dry_run=False,
         embed_model="fp-alpha-v1",
+        backfill_history=True,
     )
     assert res1["processed_qas"] == 1
     assert res1["new_last_qa_id"] == qa_null
@@ -783,6 +789,7 @@ def test_pg_p1_cross_topic_unrelated_yin_and_failed_qa_recovery(
         llm_fn=flaky_llm,
         state_dir=state_dir,
         dry_run=False,
+        backfill_history=True,
     )
     assert out1["new_last_qa_id"] == qa_db
     assert out1["failed_qa_ids"] == [qa_log]
@@ -896,6 +903,7 @@ def test_pg_r2_legacy_migration_reembeds_and_missing_action_retries(
         state_dir=state_dir,
         dry_run=False,
         embed_model="r2-fp-v2",
+        backfill_history=True,
     )
     assert out1["failed_qa_ids"] == [qa1]
     assert out1["new_last_qa_id"] == 0
@@ -963,6 +971,7 @@ def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
         state_dir=tmp_path / "r3_state",
         dry_run=False,
         embed_model="r3-fp",
+        backfill_history=True,
     )
 
     emb_log = _vec_literal(_EMBED_FN("日志采集 Fluentd-Current 灰度验证"))
@@ -1075,6 +1084,7 @@ def test_pg_pr70_three_layer_claims_persistence_stateless_reload_and_unbounded_r
         state_dir=state_dir,
         dry_run=False,
         embed_model="pr70-fp",
+        backfill_history=True,
     )
     assert res1["processed_qas"] == 2
     assert res1["upserted_claims"] >= 2
@@ -1152,3 +1162,139 @@ def test_pg_pr70_three_layer_claims_persistence_stateless_reload_and_unbounded_r
             assert ranked.index(f"qa_{qa3}") < ranked.index(f"qa_{old_q}"), (
                 f"PG relational hydration must demote qa_{old_q} even without topic header: {ranked}"
             )
+
+
+def test_pg_pr71_stateless_recovery_deletes_both_json_files_and_skips_reprocessing(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """B2 PG16 regression: deleting BOTH local JSON files restores global watermark from PG topic_v2_state."""
+    t0 = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
+
+    qa1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_1",
+        session_id="sess_b2",
+        turn_id=1,
+        question="历史旧问答 1",
+        answer="历史结论：采用 Legacy-Cache-V1。",
+        ts=t0,
+    )
+    qa2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_2",
+        session_id="sess_b2",
+        turn_id=2,
+        question="收到",
+        answer="好的",
+        ts=t0 + timedelta(minutes=1),
+    )
+
+    # 1. First boot WITHOUT backfill_history must initialize watermark to MAX(qa_pairs.id) with 0 LLM calls.
+    calls_first: list[int] = []
+
+    def _counting_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        qid = int(payload["qa_id"])
+        calls_first.append(qid)
+        if qid == qa2 or payload["question"] == "收到":
+            return json.dumps({"action": "skip", "update_type": "skip"}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_title": "缓存架构",
+                "update_type": "add",
+                "claim_text": "缓存采用 Redis-V7",
+                "keywords": ["Redis-V7"],
+            },
+            ensure_ascii=False,
+        )
+
+    state_dir = tmp_path / "b2_state"
+    boot_res = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_counting_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="b2-fp",
+    )
+    assert boot_res["claims_store"] == "pg"
+    assert boot_res["initialized_baseline"] is True
+    assert boot_res["new_last_qa_id"] == qa2
+    assert calls_first == [], "Default first boot must NOT backfill pre-existing QAs"
+
+    # 2. Insert QA3 (topic claim) + QA4 (explicitly skipped chitchat so watermark > max(claim evidence QA IDs)).
+    qa3 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_3",
+        session_id="sess_b2",
+        turn_id=3,
+        question="缓存架构用什么？",
+        answer="缓存采用 Redis-V7。",
+        ts=t0 + timedelta(minutes=2),
+    )
+    qa4 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_4",
+        session_id="sess_b2",
+        turn_id=4,
+        question="收到",
+        answer="谢谢",
+        ts=t0 + timedelta(minutes=3),
+    )
+    res_inc = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_counting_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="b2-fp",
+    )
+    assert res_inc["new_last_qa_id"] == qa4
+    assert calls_first == [qa3, qa4]
+
+    # 3. Delete BOTH local JSON files (topic_v2_dossiers.json AND topic_v2_state.json).
+    (state_dir / "topic_v2_dossiers.json").unlink()
+    (state_dir / "topic_v2_state.json").unlink()
+
+    calls_after_wipe: list[int] = []
+
+    def _after_wipe_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        calls_after_wipe.append(int(payload["qa_id"]))
+        return json.dumps({"action": "skip", "update_type": "skip"}, ensure_ascii=False)
+
+    res_reload = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_after_wipe_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="b2-fp",
+    )
+    assert res_reload["previous_last_qa_id"] == qa4
+    assert res_reload["new_last_qa_id"] == qa4
+    assert res_reload["claims_store"] == "pg"
+    assert calls_after_wipe == [], "Deleting BOTH JSON files must restore watermark from PG without re-calling LLM"
+
+    # 4. Insert QA5 -> only QA5 is processed.
+    qa5 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}b2_5",
+        session_id="sess_b2",
+        turn_id=5,
+        question="收到",
+        answer="明白",
+        ts=t0 + timedelta(minutes=4),
+    )
+    res_next = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_after_wipe_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="b2-fp",
+    )
+    assert res_next["previous_last_qa_id"] == qa4
+    assert res_next["new_last_qa_id"] == qa5
+    assert calls_after_wipe == [qa5]

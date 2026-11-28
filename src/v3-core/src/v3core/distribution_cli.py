@@ -611,7 +611,10 @@ def _doctor_probe_database(explicit_dsn: str | None) -> dict[str, Any]:
                           "conversation_stream", "yin_paragraphs",
                           "embedding_failures", "memory_relations",
                           "derived_memory_invalidations",
-                          "assistant_deliveries"):
+                          "assistant_deliveries",
+                          "topic_claims",
+                          "topic_claim_evidence",
+                          "topic_v2_state"):
                 try:
                     cur.execute(
                         "SELECT 1 FROM information_schema.tables "

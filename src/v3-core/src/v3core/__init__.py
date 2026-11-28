@@ -3611,6 +3611,16 @@ class V3Core:
                 eff_llm_fn = None
 
         state_dir = _resolve_data_dir(cfg)
+        backfill_history = False
+        if isinstance(cfg, dict):
+            backfill_history = bool(
+                (cfg.get("topic_v2") or {}).get("backfill_history")
+                or (cfg.get("prefetch") or {}).get("topic_v2_backfill_history", False)
+            )
+        else:
+            pf = getattr(cfg, "prefetch", None)
+            if pf is not None:
+                backfill_history = bool(getattr(pf, "topic_v2_backfill_history", False))
         with lock:
             result = consolidate_pg_incremental(
                 pg,
@@ -3620,6 +3630,7 @@ class V3Core:
                 dry_run=bool(dry_run),
                 batch_limit=max(int(batch_limit or 100), 1),
                 embed_model=eff_embed_model,
+                backfill_history=backfill_history,
             )
         if not dry_run and int(result.get("upserted_topics") or 0) > 0:
             try:

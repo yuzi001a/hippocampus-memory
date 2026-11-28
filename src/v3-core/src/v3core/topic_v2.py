@@ -1673,6 +1673,22 @@ def _stable_claim_id(
     return f"{prefix}_{topic_id}_{digest}"
 
 
+_WARNED_MISSING_PG_CLAIMS = False
+
+
+def _warn_missing_pg_claims_once(context: str) -> None:
+    """Emit one clear warning when Topic V2 relational PG tables are absent."""
+    global _WARNED_MISSING_PG_CLAIMS
+    if not _WARNED_MISSING_PG_CLAIMS:
+        _WARNED_MISSING_PG_CLAIMS = True
+        logger.warning(
+            "topic_v2: PG relational tables (topic_claims / topic_claim_evidence / topic_v2_state) "
+            "unavailable during %s; operating in degraded JSON/header fallback mode. "
+            "Run schema bootstrap/upgrade (schema/topic_claims.sql) and verify health ST04.",
+            context,
+        )
+
+
 def _has_pg_claims_tables(cur: Any) -> bool:
     """Return True when both ``public.topic_claims`` and ``public.topic_claim_evidence`` exist."""
     try:
@@ -1681,6 +1697,16 @@ def _has_pg_claims_tables(cur: Any) -> bool:
         )
         row = cur.fetchone()
         return bool(row and len(row) >= 2 and row[0] and row[1])
+    except Exception:
+        return False
+
+
+def _has_pg_state_table(cur: Any) -> bool:
+    """Return True when ``public.topic_v2_state`` exists."""
+    try:
+        cur.execute("SELECT to_regclass('public.topic_v2_state')")
+        row = cur.fetchone()
+        return bool(row and row[0])
     except Exception:
         return False
 
@@ -1877,6 +1903,7 @@ def fetch_pg_superseded_qa_ids(pg: Any, qa_ids: Sequence[int]) -> set[int]:
                 return set()
             with conn.cursor() as cur:
                 if not _has_pg_claims_tables(cur):
+                    _warn_missing_pg_claims_once("recall_hydration")
                     return set()
                 cur.execute(
                     "SELECT DISTINCT e.qa_id "
@@ -1909,11 +1936,16 @@ def consolidate_pg_incremental(
     dry_run: bool = False,
     batch_limit: int = 100,
     embed_model: str = "",
+    backfill_history: bool = False,
 ) -> dict[str, Any]:
-    """Incrementally consolidate new PG ``qa_pairs`` into ``TopicDossier``s and PG ``topics``.
+    """Incrementally consolidate new PG ``qa_pairs`` into ``TopicDossier``s and PG tables.
 
-    Maintains a crash-safe watermark in ``<state_dir>/topic_v2_state.json`` and full lineage
-    dossiers in ``<state_dir>/topic_v2_dossiers.json``. Never mutates or deletes ``qa_pairs``.
+    Persists global watermark in ``public.topic_v2_state`` (mirrored to
+    ``<state_dir>/topic_v2_state.json``) and full relational claims/evidence in
+    ``public.topic_claims`` / ``public.topic_claim_evidence`` in the same PG
+    transaction. When no watermark exists yet, ``backfill_history=False`` (default)
+    initializes ``last_qa_id`` to ``MAX(qa_pairs.id)`` so existing deployments do not
+    trigger an unexpected full-history LLM backfill on first boot.
     """
     if pg is None:
         raise ValueError("consolidate_pg_incremental requires a non-None PG store")
@@ -1925,10 +1957,12 @@ def consolidate_pg_incremental(
 
     with dir_lock, _state_dir_file_lock(root):
         last_qa_id = 0
+        has_local_state = False
         if state_path.is_file():
             try:
                 raw_state = json.loads(state_path.read_text(encoding="utf-8"))
                 last_qa_id = int(raw_state.get("last_qa_id") or 0)
+                has_local_state = True
             except Exception:
                 last_qa_id = 0
 
@@ -1942,6 +1976,9 @@ def consolidate_pg_incremental(
         reembedded_dossiers: set[str] = set()
         claims_backfill_ids: set[str] = set()
         has_pg_claims = False
+        has_pg_state = False
+        pg_state_present = False
+        initialized_baseline = False
 
         new_qas: list[dict[str, Any]] = []
         with _pg_conn_ctx(pg) as conn:
@@ -1949,6 +1986,37 @@ def consolidate_pg_incremental(
                 raise RuntimeError("consolidate_pg_incremental: failed to obtain PG connection")
             with conn.cursor() as cur:
                 has_pg_claims = _has_pg_claims_tables(cur)
+                has_pg_state = _has_pg_state_table(cur)
+                if not has_pg_claims or not has_pg_state:
+                    _warn_missing_pg_claims_once("consolidate_pg_incremental")
+
+                if has_pg_state:
+                    try:
+                        cur.execute(
+                            "SELECT last_qa_id FROM public.topic_v2_state WHERE state_key = %s",
+                            ("default",),
+                        )
+                        srow = cur.fetchone()
+                        if srow is not None and srow[0] is not None:
+                            last_qa_id = int(srow[0])
+                            pg_state_present = True
+                    except Exception:
+                        pg_state_present = False
+
+                has_persisted_state = pg_state_present or has_local_state
+                if not has_persisted_state and not backfill_history:
+                    try:
+                        cur.execute(
+                            "SELECT COALESCE(MAX(id), 0) FROM qa_pairs "
+                            "WHERE answer IS NOT NULL "
+                            "AND COALESCE(session_id, '') NOT LIKE '%%.trajectory%%'"
+                        )
+                        mrow = cur.fetchone()
+                        last_qa_id = int(mrow[0] or 0) if mrow and mrow[0] is not None else 0
+                    except Exception:
+                        last_qa_id = 0
+                    initialized_baseline = True
+
                 if not dossiers:
                     try:
                         try:
@@ -2019,6 +2087,7 @@ def consolidate_pg_incremental(
                         }
                     )
 
+        claims_store = "pg" if (has_pg_claims and has_pg_state) else "degraded"
         before_map = {d.topic_id: d.to_dict() for d in dossiers}
 
         # Re-embed ALL loaded or freshly migrated legacy dossiers whose model fingerprint does
@@ -2033,6 +2102,32 @@ def consolidate_pg_incremental(
                         reembedded_dossiers.add(d.topic_id)
 
         if not new_qas and not reembedded_dossiers and not claims_backfill_ids:
+            if not dry_run and (initialized_baseline or (has_pg_state and not pg_state_present)):
+                with _pg_conn_ctx(pg) as conn:
+                    if conn is not None and has_pg_state:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "INSERT INTO public.topic_v2_state "
+                                "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
+                                "VALUES (%s, %s, %s, %s::jsonb, NOW()) "
+                                "ON CONFLICT (state_key) DO UPDATE SET "
+                                "last_qa_id = EXCLUDED.last_qa_id, "
+                                "topic_count = EXCLUDED.topic_count, "
+                                "failed_qa_ids = EXCLUDED.failed_qa_ids, "
+                                "updated_at = NOW()",
+                                ("default", int(last_qa_id), len(dossiers), "[]"),
+                            )
+                        if getattr(conn, "autocommit", None) is not True and callable(getattr(conn, "commit", None)):
+                            conn.commit()
+                _atomic_write_json(
+                    state_path,
+                    {
+                        "last_qa_id": int(last_qa_id),
+                        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "topic_count": len(dossiers),
+                        "failed_qa_ids": [],
+                    },
+                )
             return {
                 "dry_run": bool(dry_run),
                 "previous_last_qa_id": last_qa_id,
@@ -2045,6 +2140,8 @@ def consolidate_pg_incremental(
                 "upserted_topics": 0,
                 "upserted_claims": 0,
                 "migrated_claim_topics": 0,
+                "claims_store": claims_store,
+                "initialized_baseline": initialized_baseline,
                 "failed_qa_ids": [],
             }
 
@@ -2078,7 +2175,12 @@ def consolidate_pg_incremental(
         upserted_claims = 0
 
         if not dry_run:
-            if changed_dossiers or (has_pg_claims and claims_sync_dossiers):
+            need_pg_tx = bool(
+                changed_dossiers
+                or (has_pg_claims and claims_sync_dossiers)
+                or (has_pg_state and (not pg_state_present or new_max_qa > last_qa_id or report.failed_qa_ids))
+            )
+            if need_pg_tx:
                 with _pg_conn_ctx(pg) as conn:
                     if conn is None:
                         raise RuntimeError("consolidate_pg_incremental: PG connection lost before upsert")
@@ -2135,6 +2237,23 @@ def consolidate_pg_incremental(
                                     )
                             if has_pg_claims and claims_sync_dossiers:
                                 upserted_claims = _sync_dossiers_to_pg_claims(cur, claims_sync_dossiers)
+                            if has_pg_state:
+                                cur.execute(
+                                    "INSERT INTO public.topic_v2_state "
+                                    "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
+                                    "VALUES (%s, %s, %s, %s::jsonb, NOW()) "
+                                    "ON CONFLICT (state_key) DO UPDATE SET "
+                                    "last_qa_id = EXCLUDED.last_qa_id, "
+                                    "topic_count = EXCLUDED.topic_count, "
+                                    "failed_qa_ids = EXCLUDED.failed_qa_ids, "
+                                    "updated_at = NOW()",
+                                    (
+                                        "default",
+                                        int(new_max_qa),
+                                        len(updated_dossiers),
+                                        json.dumps(list(report.failed_qa_ids)),
+                                    ),
+                                )
                             if manual_tx:
                                 cur.execute("COMMIT")
                         except Exception:
@@ -2169,6 +2288,8 @@ def consolidate_pg_incremental(
             "upserted_topics": 0 if dry_run else len(changed_dossiers),
             "upserted_claims": 0 if dry_run else upserted_claims,
             "migrated_claim_topics": 0 if dry_run else len(claims_backfill_ids),
+            "claims_store": claims_store,
+            "initialized_baseline": initialized_baseline,
             "failed_qa_ids": list(report.failed_qa_ids),
         }
 

@@ -453,6 +453,7 @@ def test_p2_null_session_id_embed_model_updated_at_and_replay_idempotency(tmp_pa
         state_dir=tmp_path,
         dry_run=False,
         embed_model="fp-v1",
+        backfill_history=True,
     )
     assert res["new_last_qa_id"] == 1
     assert res["upserted_topics"] == 1
@@ -820,6 +821,7 @@ def test_p1_3_first_time_legacy_migration_reembeds_before_stamping_fingerprint(t
         state_dir=tmp_path,
         dry_run=False,
         embed_model="new-model-fp-v2",
+        backfill_history=True,
     )
     assert res["upserted_topics"] == 1
     assert len(embed_calls) >= 1, "Legacy migration must recompute vector when embed_model differs"
@@ -836,6 +838,7 @@ def test_p1_3_first_time_legacy_migration_reembeds_before_stamping_fingerprint(t
         state_dir=sub_dir,
         dry_run=False,
         embed_model="new-model-fp-v2",
+        backfill_history=True,
     )
     assert res_fail["upserted_topics"] == 0
     assert pg_rows == {}
@@ -2050,3 +2053,143 @@ def test_pr70_worker_auto_recovers_after_immediate_retry_exhaustion():
         assert getattr(core, "_topic_v2_pending_recovery", False) is False
     finally:
         core._stop_topic_v2_worker(timeout=1.0)
+
+
+def test_pr71_first_boot_defaults_to_max_qa_without_backfill_and_degrades_observably(
+    tmp_path: Path, caplog, monkeypatch
+):
+    """B2 + B4: First boot without state initializes watermark to MAX(qa_pairs.id); missing PG tables warn + degrade."""
+    import logging
+    import psycopg2
+    from v3core import distribution_cli as dcli
+    from v3core import topic_v2 as tv2_mod
+
+    # 1. Missing PG claims/state tables + pre-existing historical QAs [10, 25]
+    llm_calls: list[int] = []
+    hist_qas = [
+        (10, "2026-10-01T08:00:00Z", "历史问题 1", "历史答案 1"),
+        (25, "2026-11-01T08:00:00Z", "历史问题 2", "历史答案 2"),
+    ]
+
+    class _DegradedCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass('public.topic_claims')" in q or "to_regclass('public.topic_v2_state')" in q:
+                self._rows = [(None,)]
+            elif "coalesce(max(id), 0) from qa_pairs" in q:
+                self._rows = [(max(r[0] for r in hist_qas),)]
+            elif "from qa_pairs" in q and "where id > %s" in q:
+                min_id = int(params[0])
+                self._rows = [r for r in hist_qas if r[0] > min_id]
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _DegradedConn:
+        def cursor(self):
+            return _DegradedCur()
+
+        def close(self):
+            pass
+
+    class _DegradedPg:
+        def _connect(self):
+            return _DegradedConn()
+
+    def _counting_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        llm_calls.append(int(payload["qa_id"]))
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_title": "新主题",
+                "update_type": "add",
+                "claim_text": "新结论",
+                "keywords": ["新结论"],
+            },
+            ensure_ascii=False,
+        )
+
+    tv2_mod._WARNED_MISSING_PG_CLAIMS = False
+    state_dir = tmp_path / "first_boot_degraded"
+    with caplog.at_level(logging.WARNING, logger="v3core.topic_v2"):
+        res_init = consolidate_pg_incremental(
+            _DegradedPg(),
+            embed_fn=_embed,
+            llm_fn=_counting_llm,
+            state_dir=state_dir,
+            dry_run=False,
+            embed_model="fp-1",
+        )
+    assert res_init["previous_last_qa_id"] == 25
+    assert res_init["new_last_qa_id"] == 25
+    assert res_init["initialized_baseline"] is True
+    assert res_init["claims_store"] == "degraded"
+    assert llm_calls == [], "First boot must NOT backfill pre-existing historical QAs without backfill_history=True"
+    assert any("degraded" in rec.message.lower() for rec in caplog.records)
+
+    # New QA arriving AFTER baseline initialization IS consolidated normally.
+    hist_qas.append((26, "2026-11-28T08:00:00Z", "新问题 26", "采用 Redis-Cache-V3。"))
+    res_next = consolidate_pg_incremental(
+        _DegradedPg(),
+        embed_fn=_embed,
+        llm_fn=_counting_llm,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="fp-1",
+    )
+    assert res_next["previous_last_qa_id"] == 25
+    assert res_next["new_last_qa_id"] == 26
+    assert res_next["claims_store"] == "degraded"
+    assert llm_calls == [26]
+
+    # 2. doctor --dsn checks topic_claims, topic_claim_evidence, topic_v2_state
+    checked_tables: list[str] = []
+
+    class _DocCur:
+        def __init__(self):
+            self._row = (1,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "information_schema.tables" in q and params:
+                checked_tables.append(str(params[0]))
+                self._row = None if str(params[0]).startswith("topic_") else (1,)
+            else:
+                self._row = (1,)
+
+        def fetchone(self):
+            return self._row
+
+    class _DocConn:
+        def cursor(self):
+            return _DocCur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(psycopg2, "connect", lambda **_kw: _DocConn())
+    probe = dcli._doctor_probe_database("postgresql://user:pass@127.0.0.1:5432/testdb")
+    for tbl in ("topic_claims", "topic_claim_evidence", "topic_v2_state"):
+        assert tbl in checked_tables
+        assert probe["required_tables"][tbl] is False
