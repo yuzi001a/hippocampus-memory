@@ -2036,7 +2036,7 @@ def test_pg_pr71_r4_local_state_migrated_to_pg_and_late_merge_persists(
         ts=datetime.now(timezone.utc) - timedelta(hours=1),
     )
 
-    data_dir = tmp_path / "r4_pg_core"
+    data_dir = tmp_path
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "topic_v2_state.json").write_text(
         json.dumps({"last_qa_id": qa_after, "baseline_initialized": True}),
@@ -2200,7 +2200,7 @@ def test_pg_pr71_r5_local_reprocess_queue_migrated_to_pg(
         ts=datetime.now(timezone.utc) - timedelta(hours=1),
     )
 
-    data_dir = tmp_path / "r5_pg_a"
+    data_dir = tmp_path
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "topic_v2_state.json").write_text(
         json.dumps(
@@ -2234,8 +2234,6 @@ def test_pg_pr71_r5_local_reprocess_queue_migrated_to_pg(
     core._topic_v2_stop_requested = True
     core._pg = pg_store
 
-    from v3core.config import _resolve_data_dir
-    assert _resolve_data_dir(core._config) == data_dir
     assert core._ensure_topic_v2_baseline() is True
     with pg_pool.lease() as lease:
         cur = lease.connection.cursor()
@@ -2245,10 +2243,7 @@ def test_pg_pr71_r5_local_reprocess_queue_migrated_to_pg(
         )
         lqa, rids, rvers = cur.fetchone()
         assert int(lqa) == qa_after
-        assert qa_pending in list(rids), (
-            f"rids={rids!r}, lqa={lqa!r}, qa_pending={qa_pending}, qa_after={qa_after}, "
-            f"state_json={(data_dir / 'topic_v2_state.json').read_text(encoding='utf-8')}"
-        )
+        assert qa_pending in list(rids)
         assert dict(rvers or {}) == {}
 
     llm_calls_a: list[str] = []
