@@ -469,6 +469,7 @@ def test_p2_null_session_id_embed_model_updated_at_and_replay_idempotency(tmp_pa
         state_dir=tmp_path,
         dry_run=False,
         embed_model="fp-v1",
+        backfill_history=True,
     )
     assert res_replay["new_last_qa_id"] == 1
     assert res_replay["upserted_topics"] == 0, "Replay must be idempotent when dossier already has qa_id=1"
@@ -2328,3 +2329,161 @@ def test_pr71_config_backfill_wiring_doctor_warning_and_incomplete_qa_guard(
     assert r_skip_old["pending_incomplete_qa_ids"] == []
     assert r_skip_old["new_last_qa_id"] == 13
     assert r_skip_old["processed_qas"] == 1
+
+
+def test_pr71_r2_baseline_retry_after_pg_outage_and_zero_state_file(tmp_path: Path):
+    """P1-1 & P2:
+    1) _ensure_topic_v2_baseline must NOT lock _topic_v2_baseline_checked=True when PG is down;
+       once PG recovers, subsequent live_buffer / _ensure_topic_v2_baseline retries and pins baseline.
+    2) A legacy topic_v2_state.json containing {"last_qa_id": 0} without baseline_initialized=True
+       must NOT trigger full historical backfill when backfill_history=False.
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    # 1. V3Core baseline retry across transient PG outage
+    class _OutageCur:
+        def __init__(self, max_id: int):
+            self._max_id = max_id
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass" in q:
+                self._rows = [(None,)]
+            elif "coalesce(max(id), 0)" in q:
+                self._rows = [(self._max_id,)]
+            elif "coalesce(min(id), 0)" in q:
+                self._rows = [(0,)]
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _OutageConn:
+        def __init__(self, max_id: int):
+            self._max_id = max_id
+
+        def cursor(self):
+            return _OutageCur(self._max_id)
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    class _FlakyPg:
+        def __init__(self):
+            self.connected = False
+
+        def is_connected(self):
+            return self.connected
+
+        def _connect(self):
+            if not self.connected:
+                raise RuntimeError("pg down")
+            return _OutageConn(max_id=42)
+
+    data_dir = tmp_path / "core_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        prefetch=SimpleNamespace(
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._pg = _FlakyPg()
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is False, "PG outage must not lock baseline flag"
+    assert not (data_dir / "topic_v2_state.json").exists()
+
+    core._pg.connected = True
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is True
+    pinned = json.loads((data_dir / "topic_v2_state.json").read_text(encoding="utf-8"))
+    assert pinned["last_qa_id"] == 42
+    assert pinned["baseline_initialized"] is True
+
+    # 2. Legacy zero-watermark {"last_qa_id": 0} without baseline_initialized
+    legacy_dir = tmp_path / "legacy_zero"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    (legacy_dir / "topic_v2_state.json").write_text(json.dumps({"last_qa_id": 0}), encoding="utf-8")
+
+    now = datetime.now(timezone.utc)
+    hist_rows = [
+        (1, now - timedelta(minutes=10), "历史 1", "历史答案 1"),
+        (2, now - timedelta(minutes=8), "历史 2", "历史答案 2"),
+        (3, now - timedelta(minutes=5), "历史 3", "历史答案 3"),
+    ]
+
+    class _ZeroCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "to_regclass" in q:
+                self._rows = [(None,)]
+            elif "coalesce(max(id), 0)" in q:
+                self._rows = [(3,)]
+            elif "coalesce(min(id), 0)" in q:
+                self._rows = [(0,)]
+            elif "from qa_pairs" in q and "where id > %s" in q:
+                min_id = int(params[0])
+                self._rows = [r for r in hist_rows if r[0] > min_id]
+            else:
+                self._rows = []
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _ZeroConn:
+        def cursor(self):
+            return _ZeroCur()
+
+        def close(self):
+            pass
+
+    class _ZeroPg:
+        def _connect(self):
+            return _ZeroConn()
+
+    res_zero = consolidate_pg_incremental(
+        _ZeroPg(),
+        embed_fn=_embed,
+        llm_fn=None,
+        state_dir=legacy_dir,
+        dry_run=False,
+        backfill_history=False,
+    )
+    assert res_zero["initialized_baseline"] is True
+    assert res_zero["processed_qas"] == 0
+    assert res_zero["new_last_qa_id"] == 3
+    saved_zero = json.loads((legacy_dir / "topic_v2_state.json").read_text(encoding="utf-8"))
+    assert saved_zero["baseline_initialized"] is True
+    assert saved_zero["last_qa_id"] == 3

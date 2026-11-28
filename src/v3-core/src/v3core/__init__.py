@@ -635,13 +635,14 @@ class V3Core:
         """Pin first-boot Topic V2 baseline watermark BEFORE LiveBuffer accepts new turns."""
         if getattr(self, "_topic_v2_baseline_checked", False):
             return
-        self._topic_v2_baseline_checked = True
         try:
             cfg = getattr(self, "_config", None) or getattr(self, "config", None)
             if not self._is_topic_v2_enabled(cfg):
+                self._topic_v2_baseline_checked = True
                 return
             backfill = self._is_topic_v2_backfill_enabled(cfg)
             if backfill:
+                self._topic_v2_baseline_checked = True
                 return
             pg = getattr(self, "_pg", None)
             if pg is None:
@@ -656,15 +657,22 @@ class V3Core:
                     if not pg.is_connected() and getattr(self, "_pg_pool", None) is None:
                         return
                 except Exception:
-                    pass
+                    return
             from .config import _resolve_data_dir
             from .topic_v2 import ensure_topic_v2_baseline_watermark
 
-            ensure_topic_v2_baseline_watermark(
+            res = ensure_topic_v2_baseline_watermark(
                 pg,
                 state_dir=_resolve_data_dir(cfg),
                 backfill_history=False,
             )
+            if isinstance(res, dict) and res.get("reason") in (
+                "baseline_pinned",
+                "pg_state_exists",
+                "local_state_exists",
+                "backfill_enabled",
+            ):
+                self._topic_v2_baseline_checked = True
         except Exception as e:
             logger.debug("_ensure_topic_v2_baseline skipped (non-blocking): %s", _safe_err(e)[:120])
 
@@ -682,6 +690,8 @@ class V3Core:
             # Bind the V3Core method (not LiveBuffer self) so flush invalidation
             # can reach runtime.topic_recall_cache after the lease is released.
             self._live_buffer._post_flush = self._on_live_flush
+        elif not getattr(self, "_topic_v2_baseline_checked", False):
+            self._ensure_topic_v2_baseline()
         return self._live_buffer
 
     @property
@@ -5004,6 +5014,30 @@ class V3Core:
                                 )
                             except Exception:
                                 pass
+                        if rowcount > 0 and qa_id:
+                            _sp_created = False
+                            try:
+                                cur.execute("SAVEPOINT tv2_late_requeue")
+                                _sp_created = True
+                                cur.execute(
+                                    "UPDATE public.topic_v2_state "
+                                    "SET reprocess_qa_ids = CASE "
+                                    "    WHEN COALESCE(reprocess_qa_ids, '[]'::jsonb) @> to_jsonb(ARRAY[%s::bigint]) "
+                                    "        THEN reprocess_qa_ids "
+                                    "    ELSE COALESCE(reprocess_qa_ids, '[]'::jsonb) || to_jsonb(%s::bigint) "
+                                    "END, "
+                                    "updated_at = NOW() "
+                                    "WHERE state_key = 'default' AND last_qa_id >= %s",
+                                    (int(qa_id), int(qa_id), int(qa_id)),
+                                )
+                                cur.execute("RELEASE SAVEPOINT tv2_late_requeue")
+                            except Exception:
+                                if _sp_created:
+                                    try:
+                                        cur.execute("ROLLBACK TO SAVEPOINT tv2_late_requeue")
+                                        cur.execute("RELEASE SAVEPOINT tv2_late_requeue")
+                                    except Exception:
+                                        pass
                     conn.commit()
                 except Exception as e:
                     try:
@@ -5113,6 +5147,9 @@ class V3Core:
         if pre_status is not None and getattr(pre_status, "write_blocked", False):
             self._log_schema_blocked(pre_status)
             return
+
+        if not getattr(self, "_topic_v2_baseline_checked", False):
+            self._ensure_topic_v2_baseline()
 
         # 1. 算 embedding — short path unchanged, long path via v3core.embed_chunks
             # (v0.2 closing round, docs/QA-EMBEDDING-INDEX-DESIGN.md §2, §3).

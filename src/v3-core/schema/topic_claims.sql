@@ -50,9 +50,13 @@ CREATE INDEX IF NOT EXISTS topic_claim_evidence_topic_idx
     ON public.topic_claim_evidence (topic_id, relation);
 
 CREATE TABLE IF NOT EXISTS public.topic_v2_state (
-    state_key      TEXT         PRIMARY KEY,
-    last_qa_id     BIGINT       NOT NULL DEFAULT 0,
-    topic_count    INTEGER      NOT NULL DEFAULT 0,
-    failed_qa_ids  JSONB        NOT NULL DEFAULT '[]'::jsonb,
-    updated_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    state_key         TEXT         PRIMARY KEY,
+    last_qa_id        BIGINT       NOT NULL DEFAULT 0,
+    topic_count       INTEGER      NOT NULL DEFAULT 0,
+    failed_qa_ids     JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    reprocess_qa_ids  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.topic_v2_state
+    ADD COLUMN IF NOT EXISTS reprocess_qa_ids JSONB NOT NULL DEFAULT '[]'::jsonb;

@@ -1975,6 +1975,48 @@ def _compute_safe_baseline_qa_id(
     return max(0, max_completed)
 
 
+def _parse_local_topic_v2_state(state_path: Path) -> tuple[int, bool]:
+    """Read local ``topic_v2_state.json`` and distinguish legacy zero-watermark files.
+
+    A legacy file containing only ``{"last_qa_id": 0}`` without
+    ``"baseline_initialized": true`` is treated as uninitialized so first-boot
+    baseline protection still pins ``MAX(completed)`` when ``backfill_history=False``.
+    """
+    if not state_path.is_file():
+        return 0, False
+    try:
+        raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(raw_state, dict):
+            return 0, False
+        last_qa_id = max(0, int(raw_state.get("last_qa_id") or 0))
+        has_valid = last_qa_id > 0 or bool(raw_state.get("baseline_initialized"))
+        return last_qa_id, has_valid
+    except Exception:
+        return 0, False
+
+
+def _parse_reprocess_qa_ids(raw_val: Any) -> list[int]:
+    """Normalize a JSONB/list ``reprocess_qa_ids`` payload into sorted positive ints."""
+    if raw_val is None:
+        return []
+    if isinstance(raw_val, str):
+        try:
+            raw_val = json.loads(raw_val)
+        except Exception:
+            return []
+    if not isinstance(raw_val, (list, tuple)):
+        return []
+    out: set[int] = set()
+    for item in raw_val:
+        try:
+            qid = int(item)
+            if qid > 0:
+                out.add(qid)
+        except Exception:
+            continue
+    return sorted(out)
+
+
 def ensure_topic_v2_baseline_watermark(
     pg: Any,
     *,
@@ -1993,17 +2035,11 @@ def ensure_topic_v2_baseline_watermark(
     dir_lock = _get_state_dir_lock(root)
 
     with dir_lock, _state_dir_file_lock(root):
-        local_last_qa: int | None = None
-        if state_path.is_file():
-            try:
-                raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-                local_last_qa = int(raw_state.get("last_qa_id") or 0)
-            except Exception:
-                local_last_qa = None
+        local_last_qa, has_valid_local = _parse_local_topic_v2_state(state_path)
 
         with _pg_conn_ctx(pg) as conn:
             if conn is None:
-                return {"initialized": False, "last_qa_id": local_last_qa or 0, "reason": "no_conn"}
+                return {"initialized": False, "last_qa_id": local_last_qa, "reason": "no_conn"}
             has_pg_state = False
             with conn.cursor() as cur:
                 has_pg_state = _has_pg_state_table(cur)
@@ -2018,7 +2054,7 @@ def ensure_topic_v2_baseline_watermark(
                             return {"initialized": False, "last_qa_id": int(srow[0]), "reason": "pg_state_exists"}
                     except Exception:
                         pass
-                if local_last_qa is not None:
+                if has_valid_local:
                     return {"initialized": False, "last_qa_id": local_last_qa, "reason": "local_state_exists"}
 
                 baseline = _compute_safe_baseline_qa_id(
@@ -2038,9 +2074,11 @@ def ensure_topic_v2_baseline_watermark(
             state_path,
             {
                 "last_qa_id": int(baseline),
+                "baseline_initialized": True,
                 "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "topic_count": 0,
                 "failed_qa_ids": [],
+                "reprocess_qa_ids": [],
             },
         )
         return {"initialized": True, "last_qa_id": int(baseline), "reason": "baseline_pinned"}
@@ -2076,15 +2114,7 @@ def consolidate_pg_incremental(
     dir_lock = _get_state_dir_lock(root)
 
     with dir_lock, _state_dir_file_lock(root):
-        last_qa_id = 0
-        has_local_state = False
-        if state_path.is_file():
-            try:
-                raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-                last_qa_id = int(raw_state.get("last_qa_id") or 0)
-                has_local_state = True
-            except Exception:
-                last_qa_id = 0
+        last_qa_id, has_local_state = _parse_local_topic_v2_state(state_path)
 
         eff_embed_model = str(embed_model or "").strip()
         consolidator = TopicConsolidatorV2(
@@ -2097,8 +2127,13 @@ def consolidate_pg_incremental(
         claims_backfill_ids: set[str] = set()
         has_pg_claims = False
         has_pg_state = False
+        has_pg_reprocess_col = False
         pg_state_present = False
         initialized_baseline = False
+        reprocess_qa_ids: list[int] = []
+        reprocess_qas: list[dict[str, Any]] = []
+        pre_consumed_reprocess_ids: list[int] = []
+        now_utc = datetime.now(timezone.utc)
 
         new_qas: list[dict[str, Any]] = []
         with _pg_conn_ctx(pg) as conn:
@@ -2113,15 +2148,34 @@ def consolidate_pg_incremental(
                 if has_pg_state:
                     try:
                         cur.execute(
-                            "SELECT last_qa_id FROM public.topic_v2_state WHERE state_key = %s",
+                            "SELECT last_qa_id, COALESCE(reprocess_qa_ids, '[]'::jsonb) "
+                            "FROM public.topic_v2_state WHERE state_key = %s",
                             ("default",),
                         )
                         srow = cur.fetchone()
+                        has_pg_reprocess_col = True
                         if srow is not None and srow[0] is not None:
                             last_qa_id = int(srow[0])
+                            reprocess_qa_ids = _parse_reprocess_qa_ids(srow[1] if len(srow) > 1 else [])
                             pg_state_present = True
                     except Exception:
-                        pg_state_present = False
+                        has_pg_reprocess_col = False
+                        if getattr(conn, "autocommit", None) is not True and callable(getattr(conn, "rollback", None)):
+                            try:
+                                conn.rollback()
+                            except Exception:
+                                pass
+                        try:
+                            cur.execute(
+                                "SELECT last_qa_id FROM public.topic_v2_state WHERE state_key = %s",
+                                ("default",),
+                            )
+                            srow = cur.fetchone()
+                            if srow is not None and srow[0] is not None:
+                                last_qa_id = int(srow[0])
+                                pg_state_present = True
+                        except Exception:
+                            pg_state_present = False
 
                 has_persisted_state = pg_state_present or has_local_state
                 if not has_persisted_state and not backfill_history:
@@ -2183,6 +2237,35 @@ def consolidate_pg_incremental(
                     except Exception:
                         pass
 
+                due_reprocess_ids = [rid for rid in reprocess_qa_ids if rid <= last_qa_id][: max(int(batch_limit), 1)]
+                if due_reprocess_ids:
+                    cur.execute(
+                        "SELECT id, timestamp, question, answer FROM qa_pairs "
+                        "WHERE id = ANY(%s) "
+                        "AND COALESCE(session_id, '') NOT LIKE '%%.trajectory%%' "
+                        "ORDER BY id ASC",
+                        (due_reprocess_ids,),
+                    )
+                    found_rep: dict[int, dict[str, Any]] = {}
+                    for row in cur.fetchall() or []:
+                        qid = int(row[0])
+                        found_rep[qid] = {
+                            "id": qid,
+                            "timestamp": row[1],
+                            "question": str(row[2] or ""),
+                            "answer": str(row[3] or ""),
+                        }
+                    for rid in due_reprocess_ids:
+                        qa_item = found_rep.get(rid)
+                        if qa_item is None:
+                            pre_consumed_reprocess_ids.append(rid)
+                        elif str(qa_item.get("answer") or "").strip():
+                            reprocess_qas.append(qa_item)
+                        else:
+                            qa_dt = _parse_iso_ts(_format_iso_ts(qa_item.get("timestamp")))
+                            if qa_dt is not None and (now_utc - qa_dt).total_seconds() >= max(0.0, float(pending_answer_grace_s)):
+                                pre_consumed_reprocess_ids.append(rid)
+
                 cur.execute(
                     "SELECT id, timestamp, question, answer FROM qa_pairs "
                     "WHERE id > %s "
@@ -2205,7 +2288,6 @@ def consolidate_pg_incremental(
         # assistant derivation: halt the batch BEFORE any recent empty-answer QA so a
         # subsequent completed QA cannot advance last_qa_id past it. Abandoned empty-answer
         # QAs older than pending_answer_grace_s are skipped cleanly so they never deadlock.
-        now_utc = datetime.now(timezone.utc)
         pending_incomplete_qa_ids: list[int] = []
         skipped_empty_max_id = last_qa_id
         for qa in raw_fetched_qas:
@@ -2238,6 +2320,8 @@ def consolidate_pg_incremental(
 
         if (
             not new_qas
+            and not reprocess_qas
+            and not pre_consumed_reprocess_ids
             and not reembedded_dossiers
             and not claims_backfill_ids
             and skipped_empty_max_id <= last_qa_id
@@ -2263,9 +2347,11 @@ def consolidate_pg_incremental(
                     state_path,
                     {
                         "last_qa_id": int(last_qa_id),
+                        "baseline_initialized": True,
                         "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                         "topic_count": len(dossiers),
                         "failed_qa_ids": [],
+                        "reprocess_qa_ids": reprocess_qa_ids,
                     },
                 )
             return {
@@ -2284,24 +2370,60 @@ def consolidate_pg_incremental(
                 "initialized_baseline": initialized_baseline,
                 "pending_incomplete_qa_ids": pending_incomplete_qa_ids,
                 "failed_qa_ids": [],
+                "reprocessed_qa_ids": [],
+                "remaining_reprocess_qa_ids": reprocess_qa_ids,
             }
 
-        if new_qas:
-            updated_dossiers, report = consolidator.consolidate_qa_stream(
+        updated_dossiers = dossiers
+        rep_report: ConsolidationReport | None = None
+        new_report: ConsolidationReport | None = None
+        succeeded_reprocess_ids: list[int] = []
+
+        if reprocess_qas:
+            updated_dossiers, rep_report = consolidator.consolidate_qa_stream(
+                reprocess_qas,
+                existing_dossiers=updated_dossiers,
+            )
+            if not rep_report.failed_qa_ids:
+                succeeded_reprocess_ids = [int(q["id"]) for q in reprocess_qas]
+            else:
+                rep_failed = set(rep_report.failed_qa_ids)
+                rep_ordered = sorted(
+                    reprocess_qas,
+                    key=lambda q: (_format_iso_ts(q.get("timestamp")), int(q.get("id") or 0)),
+                )
+                for q in rep_ordered:
+                    qid = int(q.get("id") or 0)
+                    if qid in rep_failed:
+                        break
+                    succeeded_reprocess_ids.append(qid)
+
+        if new_qas and not (rep_report and rep_report.failed_qa_ids):
+            updated_dossiers, new_report = consolidator.consolidate_qa_stream(
                 new_qas,
-                existing_dossiers=dossiers,
+                existing_dossiers=updated_dossiers,
             )
-        else:
-            updated_dossiers = dossiers
-            report = ConsolidationReport(
-                processed_qas=0,
-                created_topics=0,
-                updated_topics=len(reembedded_dossiers),
-                superseded_claims=0,
-                skipped_qas=0,
-                max_qa_id=max(last_qa_id, skipped_empty_max_id),
-                failed_qa_ids=(),
-            )
+            inc_failed = set(new_report.failed_qa_ids)
+            for rid in reprocess_qa_ids:
+                if rid > last_qa_id and rid <= new_report.max_qa_id and rid not in inc_failed:
+                    succeeded_reprocess_ids.append(rid)
+
+        combined_failed = list(rep_report.failed_qa_ids if rep_report else ()) + list(
+            new_report.failed_qa_ids if new_report else ()
+        )
+        report = ConsolidationReport(
+            processed_qas=(rep_report.processed_qas if rep_report else 0) + (new_report.processed_qas if new_report else 0),
+            created_topics=(rep_report.created_topics if rep_report else 0) + (new_report.created_topics if new_report else 0),
+            updated_topics=(
+                (rep_report.updated_topics if rep_report else 0)
+                + (new_report.updated_topics if new_report else 0)
+                + (len(reembedded_dossiers) if (rep_report is None and new_report is None) else 0)
+            ),
+            superseded_claims=(rep_report.superseded_claims if rep_report else 0) + (new_report.superseded_claims if new_report else 0),
+            skipped_qas=(rep_report.skipped_qas if rep_report else 0) + (new_report.skipped_qas if new_report else 0),
+            max_qa_id=new_report.max_qa_id if new_report is not None else max(last_qa_id, skipped_empty_max_id),
+            failed_qa_ids=tuple(combined_failed),
+        )
         changed_dossiers = [
             d
             for d in updated_dossiers
@@ -2318,13 +2440,23 @@ def consolidate_pg_incremental(
         if pending_incomplete_qa_ids:
             candidate_max_qa = min(candidate_max_qa, min(pending_incomplete_qa_ids) - 1)
         new_max_qa = max(last_qa_id, candidate_max_qa)
+        consumed_reprocess_qa_ids = sorted(set(pre_consumed_reprocess_ids) | set(succeeded_reprocess_ids))
+        remaining_reprocess_qa_ids = [rid for rid in reprocess_qa_ids if rid not in set(consumed_reprocess_qa_ids)]
         upserted_claims = 0
 
         if not dry_run:
             need_pg_tx = bool(
                 changed_dossiers
                 or (has_pg_claims and claims_sync_dossiers)
-                or (has_pg_state and (not pg_state_present or new_max_qa > last_qa_id or report.failed_qa_ids))
+                or (
+                    has_pg_state
+                    and (
+                        not pg_state_present
+                        or new_max_qa > last_qa_id
+                        or report.failed_qa_ids
+                        or consumed_reprocess_qa_ids
+                    )
+                )
             )
             if need_pg_tx:
                 with _pg_conn_ctx(pg) as conn:
@@ -2384,22 +2516,48 @@ def consolidate_pg_incremental(
                             if has_pg_claims and claims_sync_dossiers:
                                 upserted_claims = _sync_dossiers_to_pg_claims(cur, claims_sync_dossiers)
                             if has_pg_state:
-                                cur.execute(
-                                    "INSERT INTO public.topic_v2_state "
-                                    "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
-                                    "VALUES (%s, %s, %s, %s::jsonb, NOW()) "
-                                    "ON CONFLICT (state_key) DO UPDATE SET "
-                                    "last_qa_id = EXCLUDED.last_qa_id, "
-                                    "topic_count = EXCLUDED.topic_count, "
-                                    "failed_qa_ids = EXCLUDED.failed_qa_ids, "
-                                    "updated_at = NOW()",
-                                    (
-                                        "default",
-                                        int(new_max_qa),
-                                        len(updated_dossiers),
-                                        json.dumps(list(report.failed_qa_ids)),
-                                    ),
-                                )
+                                if has_pg_reprocess_col:
+                                    cur.execute(
+                                        "INSERT INTO public.topic_v2_state "
+                                        "(state_key, last_qa_id, topic_count, failed_qa_ids, reprocess_qa_ids, updated_at) "
+                                        "VALUES (%s, %s, %s, %s::jsonb, '[]'::jsonb, NOW()) "
+                                        "ON CONFLICT (state_key) DO UPDATE SET "
+                                        "last_qa_id = GREATEST(public.topic_v2_state.last_qa_id, EXCLUDED.last_qa_id), "
+                                        "topic_count = EXCLUDED.topic_count, "
+                                        "failed_qa_ids = EXCLUDED.failed_qa_ids, "
+                                        "reprocess_qa_ids = COALESCE(("
+                                        "    SELECT jsonb_agg(elem) "
+                                        "    FROM jsonb_array_elements("
+                                        "        COALESCE(public.topic_v2_state.reprocess_qa_ids, '[]'::jsonb)"
+                                        "    ) AS elem "
+                                        "    WHERE NOT (elem::text::bigint = ANY(%s::bigint[]))"
+                                        "), '[]'::jsonb), "
+                                        "updated_at = NOW()",
+                                        (
+                                            "default",
+                                            int(new_max_qa),
+                                            len(updated_dossiers),
+                                            json.dumps(list(report.failed_qa_ids)),
+                                            list(consumed_reprocess_qa_ids),
+                                        ),
+                                    )
+                                else:
+                                    cur.execute(
+                                        "INSERT INTO public.topic_v2_state "
+                                        "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
+                                        "VALUES (%s, %s, %s, %s::jsonb, NOW()) "
+                                        "ON CONFLICT (state_key) DO UPDATE SET "
+                                        "last_qa_id = EXCLUDED.last_qa_id, "
+                                        "topic_count = EXCLUDED.topic_count, "
+                                        "failed_qa_ids = EXCLUDED.failed_qa_ids, "
+                                        "updated_at = NOW()",
+                                        (
+                                            "default",
+                                            int(new_max_qa),
+                                            len(updated_dossiers),
+                                            json.dumps(list(report.failed_qa_ids)),
+                                        ),
+                                    )
                             if manual_tx:
                                 cur.execute("COMMIT")
                         except Exception:
@@ -2416,9 +2574,11 @@ def consolidate_pg_incremental(
                 state_path,
                 {
                     "last_qa_id": int(new_max_qa),
+                    "baseline_initialized": True,
                     "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "topic_count": len(updated_dossiers),
                     "failed_qa_ids": list(report.failed_qa_ids),
+                    "reprocess_qa_ids": remaining_reprocess_qa_ids,
                 },
             )
 
@@ -2438,6 +2598,8 @@ def consolidate_pg_incremental(
             "initialized_baseline": initialized_baseline,
             "pending_incomplete_qa_ids": pending_incomplete_qa_ids,
             "failed_qa_ids": list(report.failed_qa_ids),
+            "reprocessed_qa_ids": sorted(set(succeeded_reprocess_ids)),
+            "remaining_reprocess_qa_ids": remaining_reprocess_qa_ids,
         }
 
 

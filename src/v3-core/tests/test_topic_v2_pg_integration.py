@@ -1440,3 +1440,188 @@ def test_pg_pr71_fresh_install_first_conversation_and_late_answer_never_lost(
             ("%MinIO-Cluster-V2%",),
         )
         assert cur.fetchone() is not None
+
+
+def test_pg_pr71_r2_v3core_pg_recovery_and_late_merge_past_grace_window(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """PG16 integration regression for PR #71 round-2 review fixes:
+    1) V3Core._ensure_topic_v2_baseline() recovers cleanly after a transient PG outage
+       so baseline is pinned before turn #1 and turn #1 is consolidated.
+    2) Late assistant derivation arriving PAST the 900s grace window atomically queues
+       reprocess_qa_ids via V3Core._late_merge_into_qa() and consolidates ONLY that QA
+       without regressing last_qa_id or duplicating LLM calls on intermediate QAs.
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    # 1. V3Core transient PG outage during init -> recovers before turn #1
+    data_dir = tmp_path / "r2_core"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+
+    class _TogglePg:
+        def __init__(self, inner):
+            self._inner = inner
+            self.online = False
+
+        def is_connected(self):
+            return self.online
+
+        def _connect(self):
+            if not self.online:
+                raise RuntimeError("pg temporarily down")
+            return self._inner._connect()
+
+    toggle_pg = _TogglePg(pg_store)
+    core._pg = toggle_pg
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+    core._topic_v2_worker = None
+    core._topic_v2_stop_requested = True
+
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is False
+
+    toggle_pg.online = True
+    core._ensure_topic_v2_baseline()
+    assert core._topic_v2_baseline_checked is True
+
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=1)
+    qa_turn1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r2_turn1",
+        session_id="sess_r2",
+        turn_id=1,
+        question="PG 恢复后的首轮对话：搜索引擎选型？",
+        answer="PG 恢复后决定采用 Meilisearch-V1。",
+        ts=t0,
+    )
+    res_turn1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r2-fp",
+    )
+    assert res_turn1["processed_qas"] == 1
+    assert res_turn1["new_last_qa_id"] == qa_turn1
+
+    # 2. Abandoned empty QA past 15-minute grace window + later completed QA
+    qa_old_empty = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r2_old_empty",
+        session_id="sess_r2",
+        turn_id=2,
+        question="分析引擎选型是什么？",
+        answer="",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r2_after",
+        session_id="sess_r2",
+        turn_id=3,
+        question="日志采集用什么？",
+        answer="日志采集采用 Vector-V0。",
+        ts=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+    res_skip = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=None,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r2-fp",
+        pending_answer_grace_s=900.0,
+    )
+    assert res_skip["pending_incomplete_qa_ids"] == []
+    assert res_skip["new_last_qa_id"] == qa_after
+    assert res_skip["processed_qas"] == 1
+
+    # Late assistant derivation arrives AFTER watermark passed qa_old_empty
+    core._pg = pg_store
+    merge_res = core._late_merge_into_qa(
+        pg=pg_store,
+        qa_row=(qa_old_empty, "", [], "分析引擎选型是什么？"),
+        msg_id="late_r2_msg_1",
+        content="分析引擎最终采用 ClickHouse-V24。",
+        remember=lambda: None,
+    )
+    assert merge_res == "completed_late"
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'")
+        queued = cur.fetchone()[0]
+        assert qa_old_empty in list(queued)
+
+    llm_calls: list[str] = []
+
+    def _counting_llm(messages: list[dict[str, str]]) -> str:
+        user_msg = messages[-1]["content"] if messages else ""
+        llm_calls.append(user_msg)
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "分析引擎选型",
+                "summary": "分析引擎最终采用 ClickHouse-V24。",
+                "keywords": ["ClickHouse-V24", "分析引擎"],
+                "update_type": "add",
+                "claims": ["分析引擎最终采用 ClickHouse-V24。"],
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.92,
+                "reason": "explicit decision",
+            },
+            ensure_ascii=False,
+        )
+
+    res_reprocess = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_counting_llm,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r2-fp",
+        pending_answer_grace_s=900.0,
+    )
+    assert len(llm_calls) == 1
+    assert "ClickHouse-V24" in llm_calls[0]
+    assert res_reprocess["processed_qas"] == 1
+    assert res_reprocess["new_last_qa_id"] == qa_after
+    assert res_reprocess["reprocessed_qa_ids"] == [qa_old_empty]
+    assert res_reprocess["remaining_reprocess_qa_ids"] == []
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'")
+        assert list(cur.fetchone()[0]) == []
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%ClickHouse-V24%",),
+        )
+        assert cur.fetchone() is not None
