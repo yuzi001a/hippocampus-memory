@@ -2056,6 +2056,19 @@ def _parse_reprocess_qa_versions(raw_val: Any) -> dict[int, int]:
     return out
 
 
+def _read_local_reprocess_qa_ids(state_path: Path) -> list[int]:
+    """Read persisted ``reprocess_qa_ids`` from local ``topic_v2_state.json`` if present."""
+    if not state_path.is_file():
+        return []
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    return _parse_reprocess_qa_ids(raw.get("reprocess_qa_ids"))
+
+
 def ensure_topic_v2_baseline_watermark(
     pg: Any,
     *,
@@ -2097,12 +2110,13 @@ def ensure_topic_v2_baseline_watermark(
                         pass
                 if has_valid_local:
                     if has_pg_state:
+                        local_reprocess = _read_local_reprocess_qa_ids(state_path)
                         cur.execute(
                             "INSERT INTO public.topic_v2_state "
-                            "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
-                            "VALUES (%s, %s, 0, '[]'::jsonb, NOW()) "
+                            "(state_key, last_qa_id, topic_count, failed_qa_ids, reprocess_qa_ids, reprocess_qa_versions, updated_at) "
+                            "VALUES (%s, %s, 0, '[]'::jsonb, %s::jsonb, '{}'::jsonb, NOW()) "
                             "ON CONFLICT (state_key) DO NOTHING",
-                            ("default", int(local_last_qa)),
+                            ("default", int(local_last_qa), json.dumps(local_reprocess)),
                         )
                         migrated_local = True
                     else:
@@ -2254,6 +2268,9 @@ def consolidate_pg_incremental(
                                     pg_state_present = True
                             except Exception:
                                 pg_state_present = False
+
+                if not pg_state_present and has_local_state:
+                    reprocess_qa_ids = sorted(set(reprocess_qa_ids) | set(_read_local_reprocess_qa_ids(state_path)))
 
                 has_persisted_state = pg_state_present or has_local_state
                 if not has_persisted_state and not backfill_history:
@@ -2408,17 +2425,30 @@ def consolidate_pg_incremental(
                 with _pg_conn_ctx(pg) as conn:
                     if conn is not None and has_pg_state:
                         with conn.cursor() as cur:
-                            cur.execute(
-                                "INSERT INTO public.topic_v2_state "
-                                "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
-                                "VALUES (%s, %s, %s, %s::jsonb, NOW()) "
-                                "ON CONFLICT (state_key) DO UPDATE SET "
-                                "last_qa_id = GREATEST(public.topic_v2_state.last_qa_id, EXCLUDED.last_qa_id), "
-                                "topic_count = EXCLUDED.topic_count, "
-                                "failed_qa_ids = EXCLUDED.failed_qa_ids, "
-                                "updated_at = NOW()",
-                                ("default", int(last_qa_id), len(dossiers), "[]"),
-                            )
+                            if has_pg_reprocess_col:
+                                cur.execute(
+                                    "INSERT INTO public.topic_v2_state "
+                                    "(state_key, last_qa_id, topic_count, failed_qa_ids, reprocess_qa_ids, updated_at) "
+                                    "VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, NOW()) "
+                                    "ON CONFLICT (state_key) DO UPDATE SET "
+                                    "last_qa_id = GREATEST(public.topic_v2_state.last_qa_id, EXCLUDED.last_qa_id), "
+                                    "topic_count = EXCLUDED.topic_count, "
+                                    "failed_qa_ids = EXCLUDED.failed_qa_ids, "
+                                    "updated_at = NOW()",
+                                    ("default", int(last_qa_id), len(dossiers), "[]", json.dumps(reprocess_qa_ids)),
+                                )
+                            else:
+                                cur.execute(
+                                    "INSERT INTO public.topic_v2_state "
+                                    "(state_key, last_qa_id, topic_count, failed_qa_ids, updated_at) "
+                                    "VALUES (%s, %s, %s, %s::jsonb, NOW()) "
+                                    "ON CONFLICT (state_key) DO UPDATE SET "
+                                    "last_qa_id = GREATEST(public.topic_v2_state.last_qa_id, EXCLUDED.last_qa_id), "
+                                    "topic_count = EXCLUDED.topic_count, "
+                                    "failed_qa_ids = EXCLUDED.failed_qa_ids, "
+                                    "updated_at = NOW()",
+                                    ("default", int(last_qa_id), len(dossiers), "[]"),
+                                )
                         if getattr(conn, "autocommit", None) is not True and callable(getattr(conn, "commit", None)):
                             conn.commit()
                 _atomic_write_json(
@@ -2605,7 +2635,7 @@ def consolidate_pg_incremental(
                                     cur.execute(
                                         "INSERT INTO public.topic_v2_state "
                                         "(state_key, last_qa_id, topic_count, failed_qa_ids, reprocess_qa_ids, reprocess_qa_versions, updated_at) "
-                                        "VALUES (%s, %s, %s, %s::jsonb, '[]'::jsonb, '{}'::jsonb, NOW()) "
+                                        "VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, '{}'::jsonb, NOW()) "
                                         "ON CONFLICT (state_key) DO UPDATE SET "
                                         "last_qa_id = GREATEST(public.topic_v2_state.last_qa_id, EXCLUDED.last_qa_id), "
                                         "topic_count = EXCLUDED.topic_count, "
@@ -2638,6 +2668,7 @@ def consolidate_pg_incremental(
                                             int(new_max_qa),
                                             len(updated_dossiers),
                                             json.dumps(list(report.failed_qa_ids)),
+                                            json.dumps(remaining_reprocess_qa_ids),
                                             consumed_versions_json,
                                             consumed_versions_json,
                                             consumed_versions_json,
@@ -2648,7 +2679,7 @@ def consolidate_pg_incremental(
                                     cur.execute(
                                         "INSERT INTO public.topic_v2_state "
                                         "(state_key, last_qa_id, topic_count, failed_qa_ids, reprocess_qa_ids, updated_at) "
-                                        "VALUES (%s, %s, %s, %s::jsonb, '[]'::jsonb, NOW()) "
+                                        "VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, NOW()) "
                                         "ON CONFLICT (state_key) DO UPDATE SET "
                                         "last_qa_id = GREATEST(public.topic_v2_state.last_qa_id, EXCLUDED.last_qa_id), "
                                         "topic_count = EXCLUDED.topic_count, "
@@ -2666,6 +2697,7 @@ def consolidate_pg_incremental(
                                             int(new_max_qa),
                                             len(updated_dossiers),
                                             json.dumps(list(report.failed_qa_ids)),
+                                            json.dumps(remaining_reprocess_qa_ids),
                                             list(consumed_reprocess_qa_ids),
                                         ),
                                     )

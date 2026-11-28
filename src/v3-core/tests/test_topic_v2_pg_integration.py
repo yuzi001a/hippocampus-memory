@@ -2158,3 +2158,225 @@ def test_pg_pr71_r4_local_state_migrated_to_pg_and_late_merge_persists(
         ans_z, mev_z = cur.fetchone()
         assert "SHOULD_ROLL_BACK_R4" not in str(ans_z)
         assert "r4_zero_row" not in list(mev_z or [])
+
+
+def test_pg_pr71_r5_local_reprocess_queue_migrated_to_pg(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    """PG16 integration test for PR #71 round-5:
+    Local topic_v2_state.json reprocess_qa_ids queue is migrated into empty PG
+    public.topic_v2_state both via _ensure_topic_v2_baseline() and directly via
+    consolidate_pg_incremental(), then consolidated into topic_claims and cleared.
+    """
+    from types import SimpleNamespace
+    from v3core import V3Core
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.qa_pairs WHERE source_id LIKE %s", (_QA_PREFIX + "%",))
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    # Part A: migration via _ensure_topic_v2_baseline()
+    qa_pending = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r5_pending_a",
+        session_id="sess_r5_a",
+        turn_id=1,
+        question="流计算引擎选型？",
+        answer="本地遗留队列采用 RisingWave-V2。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r5_after_a",
+        session_id="sess_r5_a",
+        turn_id=2,
+        question="网关用什么？",
+        answer="网关采用 APISIX-V3。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    data_dir = tmp_path / "r5_pg_a"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "topic_v2_state.json").write_text(
+        json.dumps(
+            {
+                "last_qa_id": qa_after,
+                "baseline_initialized": True,
+                "reprocess_qa_ids": [qa_pending],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    core = V3Core.__new__(V3Core)
+    core._config = SimpleNamespace(
+        base_path=str(data_dir),
+        data_dir=str(data_dir),
+        embed=None,
+        embedding=None,
+        prefetch=SimpleNamespace(
+            topic_v2_mode=True,
+            topic_v2_enabled=True,
+            topic_v2_backfill_history=False,
+        ),
+    )
+    core._fenced = False
+    core._pg_pool = None
+    core._live_buffer = None
+    core._pg_was_connected = False
+    core._topic_v2_baseline_checked = False
+    core._topic_v2_worker = None
+    core._topic_v2_stop_requested = True
+    core._pg = pg_store
+
+    assert core._ensure_topic_v2_baseline() is True
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT last_qa_id, reprocess_qa_ids, reprocess_qa_versions "
+            "FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        lqa, rids, rvers = cur.fetchone()
+        assert int(lqa) == qa_after
+        assert qa_pending in list(rids)
+        assert dict(rvers or {}) == {}
+
+    llm_calls_a: list[str] = []
+
+    def _r5_llm_a(messages: list[dict[str, str]]) -> str:
+        llm_calls_a.append(messages[-1]["content"])
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "流计算引擎选型",
+                "summary": "本地遗留队列采用 RisingWave-V2。",
+                "keywords": ["RisingWave-V2"],
+                "update_type": "add",
+                "claim_text": "本地遗留队列采用 RisingWave-V2。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "migrated local reprocess queue",
+            },
+            ensure_ascii=False,
+        )
+
+    res_a = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_r5_llm_a,
+        state_dir=data_dir,
+        dry_run=False,
+        embed_model="r5-fp",
+    )
+    assert len(llm_calls_a) == 1
+    assert "RisingWave-V2" in llm_calls_a[0]
+    assert res_a["reprocessed_qa_ids"] == [qa_pending]
+    assert res_a["new_last_qa_id"] == qa_after
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%RisingWave-V2%",),
+        )
+        assert cur.fetchone() is not None
+        cur.execute("SELECT reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'")
+        assert list(cur.fetchone()[0]) == []
+
+    # Part B: direct consolidate_pg_incremental() without prior baseline call
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("DELETE FROM public.topic_claims")
+        cur.execute("DELETE FROM public.topic_claim_evidence")
+        cur.execute("DELETE FROM public.topics")
+        cur.execute("DELETE FROM public.topic_v2_state")
+        lease.connection.commit()
+
+    qa_pending2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r5_pending_b",
+        session_id="sess_r5_b",
+        turn_id=1,
+        question="增量物化视图引擎选型？",
+        answer="本地遗留队列二采用 Materialize-V1。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    qa_after2 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r5_after_b",
+        session_id="sess_r5_b",
+        turn_id=2,
+        question="服务发现用什么？",
+        answer="服务发现采用 Consul-V1。",
+        ts=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    data_dir2 = tmp_path / "r5_pg_b"
+    data_dir2.mkdir(parents=True, exist_ok=True)
+    (data_dir2 / "topic_v2_state.json").write_text(
+        json.dumps(
+            {
+                "last_qa_id": qa_after2,
+                "baseline_initialized": True,
+                "reprocess_qa_ids": [qa_pending2],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    llm_calls_b: list[str] = []
+
+    def _r5_llm_b(messages: list[dict[str, str]]) -> str:
+        llm_calls_b.append(messages[-1]["content"])
+        return json.dumps(
+            {
+                "action": "create",
+                "topic_id": "",
+                "title": "增量物化视图引擎选型",
+                "summary": "本地遗留队列二采用 Materialize-V1。",
+                "keywords": ["Materialize-V1"],
+                "update_type": "add",
+                "claim_text": "本地遗留队列二采用 Materialize-V1。",
+                "claim_kind": "decision",
+                "replaces_claim_ids": [],
+                "supersede_reason": "",
+                "confidence": 0.9,
+                "reason": "direct consolidate migrated queue",
+            },
+            ensure_ascii=False,
+        )
+
+    res_b = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=_r5_llm_b,
+        state_dir=data_dir2,
+        dry_run=False,
+        embed_model="r5-fp",
+    )
+    assert len(llm_calls_b) == 1
+    assert "Materialize-V1" in llm_calls_b[0]
+    assert res_b["reprocessed_qa_ids"] == [qa_pending2]
+    assert res_b["new_last_qa_id"] == qa_after2
+
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT claim_text FROM public.topic_claims WHERE status = 'active' AND claim_text LIKE %s",
+            ("%Materialize-V1%",),
+        )
+        assert cur.fetchone() is not None
+        cur.execute(
+            "SELECT last_qa_id, reprocess_qa_ids FROM public.topic_v2_state WHERE state_key = 'default'"
+        )
+        lqa2, rids2 = cur.fetchone()
+        assert int(lqa2) == qa_after2
+        assert list(rids2) == []
