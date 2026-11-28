@@ -619,6 +619,8 @@ def test_v3core_on_live_flush_routes_topic_v2_and_respects_toggle(tmp_path, monk
     monkeypatch.setattr(v3core, "call_embedding", lambda text, cfg, **kw: embed_text(text))
 
     core_on._on_live_flush([("sess1", "m1", "msg", "user")])
+    assert core_on.wait_topic_v2_idle(timeout=5.0)
+    core_on._stop_topic_v2_worker(timeout=1.0)
     assert len(core_on._pg.topics) == 1
     assert len(invalidations) == 1
     assert any("gRPC-Stream-V2" in body for body in core_on._pg.topics.values())

@@ -201,7 +201,7 @@ def search_yin(query_emb: list[float] | None, keyword: str = "", pg=None, limit:
                 rows, _ = query_with_exact_fallback(
                     cur,
                     "SELECT yin_version, section, content, "
-                    " 1 - (embedding <=> %s::vector) AS cosine "
+                    " 1 - (embedding <=> %s::vector) AS cosine, created_at "
                     " FROM yin_paragraphs WHERE embedding IS NOT NULL "
                     " ORDER BY embedding <=> %s::vector LIMIT %s",
                     (emb_str, emb_str, limit),
@@ -209,23 +209,37 @@ def search_yin(query_emb: list[float] | None, keyword: str = "", pg=None, limit:
                     context="yin_pool.search_yin",
                 )
                 for row in rows:
+                    _ts_raw = row[4] if len(row) > 4 else None
+                    _ts_str = (
+                        _ts_raw.isoformat()
+                        if hasattr(_ts_raw, "isoformat")
+                        else (str(_ts_raw) if _ts_raw else "")
+                    )
                     out.append({
                         "yin_version": row[0], "section": row[1],
                         "content": row[2], "score": round(float(row[3] or 0), 4),
                         "matched_by": "vector",
+                        "created_at": _ts_str,
                     })
         if keyword and len(out) < limit:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT yin_version, section, content FROM yin_paragraphs "
+                    "SELECT yin_version, section, content, created_at FROM yin_paragraphs "
                     "WHERE content ILIKE %s LIMIT %s",
                     (f"%{keyword}%", limit - len(out)),
                 )
                 for row in cur.fetchall():
+                    _ts_raw = row[3] if len(row) > 3 else None
+                    _ts_str = (
+                        _ts_raw.isoformat()
+                        if hasattr(_ts_raw, "isoformat")
+                        else (str(_ts_raw) if _ts_raw else "")
+                    )
                     out.append({
                         "yin_version": row[0], "section": row[1],
                         "content": row[2], "score": 1.0,
                         "matched_by": "keyword",
+                        "created_at": _ts_str,
                     })
     except PrefetchDeadlineExceeded:
         raise

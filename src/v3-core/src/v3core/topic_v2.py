@@ -18,9 +18,14 @@ Design goals (see docs/DESIGN-PHILOSOPHY.md):
          embeddings are recomputed from active state only.
   4. Read-side freshness & supersession guard (``apply_topic_v2_ranking_guard``):
        - Parses and strips ``<!-- topic_v2:... -->`` metadata before prompt injection.
-       - Demotes legacy/stale topics whose ``last_qa`` trails recalled raw QA IDs.
-       - On current-state queries, demotes ``superseded_qas``, stale ``note``/``yin``,
-         and breaks stale-vs-current QA ties via recency without hiding unique old facts.
+       - Enforces LLM-established explicit relations ONLY (zero read-side keyword or
+         bigram topic-overlap guessing):
+           * On current-state queries, demotes ``qa`` hits in persisted ``superseded_qas``
+             and Topic V2 dossiers whose ``active_qas`` were superseded by another dossier.
+           * Preserves derived ``note``/``yin`` hits (fail-safe: whole multi-topic notes
+             are never demoted merely from coarse ``source_qa_range`` intervals; they rely
+             on UTC half-life decay until paragraph-level provenance lands).
+           * Breaks non-superseded QA ties via recency without hiding unique old facts.
        - On retrospective ``why did we drop X`` queries, preserves raw historical QA
          evidence and suppresses recency decay.
 """
@@ -32,6 +37,8 @@ import logging
 import math
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,20 +97,29 @@ _PROBLEM_HINT_RE = re.compile(
 _ASCII_CODE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+|[A-Za-z0-9_]{3,}")
 _ZH_WORD_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 
+_TRIVIAL_NOISE_WORD = (
+    r"(?:好的|收到|谢谢|感谢|明白(?:了)?|了解(?:了)?|嗯嗯?|哈哈+|哦哦?|行|没问题|ok|okay|thanks|thank you|thx|got it|cool|nice|hi|hello|你好)"
+)
+_TRIVIAL_NOISE_RE = re.compile(
+    rf"^{_TRIVIAL_NOISE_WORD}(?:[!！。.,，~～\s]+{_TRIVIAL_NOISE_WORD})*[!！。.,，~～\s]*$",
+    re.I,
+)
+
 _PHASE1_SYSTEM_PROMPT = (
     "你是长期记忆系统中的两阶段主题整理器（Phase 1）。\n"
-    "给定一条新对话 QA 与向量检索得到的 Top-K 候选主题摘要，请输出严格 JSON（不要 Markdown 代码块）：\n"
+    "给定一条新对话 QA 与向量检索得到的 Top-K 候选主题摘要（含 active_claims），请输出严格 JSON（不要 Markdown 代码块）：\n"
     "{\n"
     '  "action": "attach" | "create" | "skip",\n'
     '  "target_topic_id": "若 attach 填候选 topic_id，否则留空",\n'
     '  "topic_title": "简短主题名",\n'
     '  "update_type": "add" | "problem" | "evolve" | "correct" | "historical_note",\n'
     '  "claim_text": "当前生效的简洁结论，仅写新状态，不要把已废弃旧方案写进来",\n'
+    '  "replaces_claim_ids": ["若 evolve/correct，可选填被替代的旧 claim_id 列表"],\n'
     '  "replaces_text": "若 update_type 为 evolve/correct/historical_note，填写被替代或已下线的旧方案标识",\n'
     '  "reason": "变更/替代/下线原因",\n'
     '  "keywords": ["关键词1", "关键词2"]\n'
     "}\n"
-    "规则：1) 发生 A->B 演进或纠正时必须标为 evolve/correct 并填 replaces_text；\n"
+    "规则：1) 发生 A->B 演进或纠正时必须标为 evolve/correct，优先填写 replaces_claim_ids 并填 replaces_text；\n"
     "2) 回溯历史下线原因时标为 historical_note，不得污染当前结论；\n"
     "3) claim_text 只陈述真实明确信息，不杜撰；\n"
     "4) 若当前 QA 只是零碎上下文或子模块代号、缺乏独立主题价值，优先 attach 到最相关的候选主题或 skip，避免拆出碎小主题。"
@@ -221,6 +237,7 @@ class TopicDossier:
     last_evidence_qa_id: int = 0
     last_evidence_at: str = ""
     status: str = "active"
+    embed_model: str = ""
     embedding: list[float] | None = None
 
     def active_qa_ids(self) -> list[int]:
@@ -292,6 +309,7 @@ class TopicDossier:
             "body": self.render_current_body(include_header=True),
             "keywords": list(self.keywords),
             "status": self.status,
+            "embed_model": self.embed_model,
             "embedding": emb,
         }
 
@@ -306,6 +324,7 @@ class TopicDossier:
             "last_evidence_qa_id": int(self.last_evidence_qa_id),
             "last_evidence_at": self.last_evidence_at,
             "status": self.status,
+            "embed_model": self.embed_model,
             "embedding": list(self.embedding) if self.embedding is not None else None,
         }
 
@@ -322,6 +341,7 @@ class TopicDossier:
             last_evidence_qa_id=int(data.get("last_evidence_qa_id") or 0),
             last_evidence_at=str(data.get("last_evidence_at") or ""),
             status=str(data.get("status") or "active"),
+            embed_model=str(data.get("embed_model") or ""),
             embedding=[float(x) for x in raw_emb] if raw_emb is not None else None,
         )
 
@@ -338,6 +358,7 @@ class Phase1Note:
     keywords: list[str]
     evidence_qa_id: int
     timestamp: str
+    replaces_claim_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -348,18 +369,24 @@ class ConsolidationReport:
     superseded_claims: int
     skipped_qas: int
     max_qa_id: int
+    failed_qa_ids: tuple[int, ...] = ()
 
 
 def encode_topic_v2_header(dossier: TopicDossier) -> str:
-    """Encode compact freshness + lineage metadata under ``TopicRecall``'s 500-char slice."""
-    payload = {
+    """Encode compact freshness + explicit lineage metadata under ``TopicRecall``'s 500-char slice."""
+    sup_all = dossier.superseded_qa_ids()[-32:]
+    payload: dict[str, Any] = {
         "v": 2,
         "last_qa": int(dossier.last_evidence_qa_id),
         "last_at": str(dossier.last_evidence_at or "")[:32],
         "active_qas": dossier.active_qa_ids()[-8:],
-        "superseded_qas": dossier.superseded_qa_ids()[-12:],
+        "superseded_qas": sup_all,
     }
-    return f"<!-- topic_v2:{json.dumps(payload, separators=(',', ':'), ensure_ascii=False)} -->"
+    encoded = f"<!-- topic_v2:{json.dumps(payload, separators=(',', ':'), ensure_ascii=False)} -->"
+    while len(encoded) > 460 and len(payload["superseded_qas"]) > 12:
+        payload["superseded_qas"] = payload["superseded_qas"][-max(12, len(payload["superseded_qas"]) // 2):]
+        encoded = f"<!-- topic_v2:{json.dumps(payload, separators=(',', ':'), ensure_ascii=False)} -->"
+    return encoded
 
 
 def parse_topic_v2_header(text: str) -> dict[str, Any] | None:
@@ -614,17 +641,19 @@ class TopicConsolidatorV2:
         embed_fn: Callable[[str], list[float]],
         llm_fn: Callable[[list[dict[str, str]]], str] | None = None,
         top_k_candidates: int = 5,
+        embed_model: str = "",
     ) -> None:
         self.embed_fn = embed_fn
         self.llm_fn = llm_fn
         self.top_k_candidates = max(int(top_k_candidates), 1)
+        self.embed_model = str(embed_model or "").strip()
 
     def seed_from_legacy_topics(self, legacy_topics: Sequence[Mapping[str, Any]]) -> list[TopicDossier]:
         """Convert legacy ``topics`` rows into initial ``TopicDossier`` instances.
 
         Preserves legacy vocabulary bridges (``summary`` / ``body`` / ``keywords``) at
-        watermark ``last_evidence_qa_id=0`` so subsequent ``evolve`` / ``correct`` notes cleanly
-        supersede obsolete legacy claims while uncontradicted synthesis topics remain intact.
+        watermark ``last_evidence_qa_id=0`` so subsequent ``evolve`` / ``correct`` notes
+        selectively supersede matching claims while preserving unrelated legacy facts.
         """
         dossiers: list[TopicDossier] = []
         for t in legacy_topics:
@@ -634,33 +663,68 @@ class TopicConsolidatorV2:
             title = str(t.get("title") or "")
             summary = str(t.get("summary") or "").strip()
             body = strip_topic_v2_header(str(t.get("body") or "")).strip()
-            seed_text = summary or body
+            # Keep detailed body clauses alongside summary without dropping facts.
+            combined_parts: list[str] = []
+            if summary and summary not in body:
+                combined_parts.append(summary)
+            if body:
+                combined_parts.append(body)
+            raw_seed_text = "\n".join(combined_parts) or summary
+            clauses: list[str] = []
+            seen_clauses: set[str] = set()
+            for part in re.split(r"[\n。；;]+", raw_seed_text):
+                cleaned = re.sub(r"^\s*[-*•]\s*", "", part).strip()
+                cleaned = re.sub(r"^当前结论[：:]\s*", "", cleaned).strip()
+                cleaned = re.sub(r"\s*\[证据:[^\]]+\]\s*$", "", cleaned).strip()
+                if len(cleaned) < 3:
+                    continue
+                low = cleaned.lower()
+                if low not in seen_clauses:
+                    seen_clauses.add(low)
+                    clauses.append(cleaned)
             claims: list[TopicClaim] = []
-            if seed_text:
+            if clauses:
+                for idx, clause in enumerate(clauses[:12], start=1):
+                    cid = f"c_seed_{tid}" if idx == 1 and len(clauses) == 1 else f"c_seed_{tid}_{idx}"
+                    claims.append(
+                        TopicClaim(
+                            claim_id=cid,
+                            text=clause,
+                            kind="legacy_seed",
+                            evidence_qa_ids=[],
+                        )
+                    )
+            elif raw_seed_text:
                 claims.append(
                     TopicClaim(
                         claim_id=f"c_seed_{tid}",
-                        text=seed_text,
+                        text=raw_seed_text,
                         kind="legacy_seed",
                         evidence_qa_ids=[],
                     )
                 )
+            seed_summary = summary or (clauses[0][:240] if clauses else raw_seed_text[:240])
             raw_emb = t.get("embedding")
             emb = [float(x) for x in raw_emb] if raw_emb is not None else None
             dossier = TopicDossier(
                 topic_id=tid,
                 title=title,
-                summary=seed_text,
+                summary=seed_summary,
                 current_claims=claims,
                 superseded_claims=[],
                 keywords=[str(k) for k in (t.get("keywords") or [])],
                 last_evidence_qa_id=0,
                 last_evidence_at="",
                 status=str(t.get("status") or "active"),
+                embed_model=str(t.get("embed_model") or ""),
                 embedding=emb,
             )
             if dossier.embedding is None and self.embed_fn is not None:
-                dossier.embedding = self.embed_fn(dossier.embedding_text())
+                new_emb = self.embed_fn(dossier.embedding_text())
+                if new_emb:
+                    dossier.embedding = new_emb
+                    if self.embed_model:
+                        dossier.embed_model = self.embed_model
             dossiers.append(dossier)
         return dossiers
 
@@ -705,12 +769,21 @@ class TopicConsolidatorV2:
         dossiers: Sequence[TopicDossier],
     ) -> Phase1Note | None:
         """Phase 1: Distill one QA pair against Top-K candidate topic dossiers."""
+        note, _failed = self._distill_qa_with_status(qa, dossiers)
+        return note
+
+    def _distill_qa_with_status(
+        self,
+        qa: Mapping[str, Any],
+        dossiers: Sequence[TopicDossier],
+    ) -> tuple[Phase1Note | None, bool]:
+        """Distill one QA and return ``(note, failed)`` where ``failed=True`` blocks watermark advance."""
         qa_id = int(qa.get("id") or 0)
         question = str(qa.get("question") or "").strip()
         answer = str(qa.get("answer") or "").strip()
         ts = _format_iso_ts(qa.get("timestamp"))
         if not question and not answer:
-            return None
+            return None, False
 
         qa_text = f"{question}\n{answer}".strip()
         qa_emb = qa.get("embedding")
@@ -721,8 +794,9 @@ class TopicConsolidatorV2:
         )
 
         if self.llm_fn is not None:
-            return self._distill_with_llm(qa_id, question, answer, ts, candidates)
-        return self._distill_deterministic(qa_id, question, answer, ts, qa_text, candidates)
+            note = self._distill_with_llm(qa_id, question, answer, ts, candidates)
+            return (note, note is None)
+        return self._distill_deterministic(qa_id, question, answer, ts, qa_text, candidates), False
 
     def _distill_with_llm(
         self,
@@ -737,6 +811,11 @@ class TopicConsolidatorV2:
                 "topic_id": d.topic_id,
                 "title": d.title,
                 "summary": d.summary,
+                "active_claims": [
+                    {"claim_id": c.claim_id, "text": c.text}
+                    for c in d.current_claims[:8]
+                    if c.text
+                ],
                 "keywords": d.keywords[:8],
                 "similarity": round(score, 4),
             }
@@ -766,34 +845,89 @@ class TopicConsolidatorV2:
         if not data:
             return None
 
-        action = str(data.get("action") or "skip").strip().lower()
-        if action not in ("attach", "create", "skip"):
+        raw_action = data.get("action")
+        if not isinstance(raw_action, str) or not raw_action.strip():
+            logger.warning("topic_v2: Phase 1 JSON missing explicit action for qa_id=%s", qa_id)
             return None
-        update_type = str(data.get("update_type") or "add").strip().lower()
-        if update_type not in ("add", "problem", "evolve", "correct", "historical_note", "skip"):
-            update_type = "add"
+        action = raw_action.strip().lower()
+        if action not in ("attach", "create", "skip"):
+            logger.warning("topic_v2: Phase 1 JSON invalid action=%r for qa_id=%s", raw_action, qa_id)
+            return None
+
+        raw_utype = data.get("update_type")
+        if action == "skip":
+            update_type = str(raw_utype or "skip").strip().lower() or "skip"
+            if update_type != "skip":
+                logger.warning("topic_v2: Phase 1 skip JSON has non-skip update_type=%r for qa_id=%s", raw_utype, qa_id)
+                return None
+        else:
+            if not isinstance(raw_utype, str) or not raw_utype.strip():
+                logger.warning("topic_v2: Phase 1 JSON missing explicit update_type for qa_id=%s", qa_id)
+                return None
+            update_type = raw_utype.strip().lower()
+            if update_type not in ("add", "problem", "evolve", "correct", "historical_note"):
+                logger.warning("topic_v2: Phase 1 JSON invalid update_type=%r for qa_id=%s", raw_utype, qa_id)
+                return None
 
         valid_ids = {d.topic_id for _, d in candidates}
         target_id = str(data.get("target_topic_id") or "").strip()
         if action == "attach" and target_id not in valid_ids:
-            if candidates:
-                target_id = candidates[0][1].topic_id
-            else:
-                action = "create"
-                target_id = ""
+            logger.warning(
+                "topic_v2: Phase 1 attach JSON has invalid target_topic_id=%r (valid=%s) for qa_id=%s",
+                target_id,
+                sorted(valid_ids),
+                qa_id,
+            )
+            return None
 
         kws = [str(k).strip() for k in (data.get("keywords") or []) if str(k).strip()]
+        raw_rep_ids = data.get("replaces_claim_ids")
+        rep_ids = (
+            tuple(str(cid).strip() for cid in raw_rep_ids if str(cid).strip())
+            if isinstance(raw_rep_ids, (list, tuple))
+            else ()
+        )
+        claim_text = _clean_clause(str(data.get("claim_text") or ""))
+        replaces_text = _clean_clause(str(data.get("replaces_text") or ""))
+        reason = _clean_clause(str(data.get("reason") or ""))
+
+        if action != "skip":
+            if update_type == "historical_note":
+                if not (reason or claim_text):
+                    logger.warning(
+                        "topic_v2: Phase 1 historical_note missing reason/claim_text for qa_id=%s",
+                        qa_id,
+                    )
+                    return None
+            else:
+                if not claim_text:
+                    logger.warning(
+                        "topic_v2: Phase 1 JSON missing non-empty claim_text for qa_id=%s (action=%s update_type=%s)",
+                        qa_id,
+                        action,
+                        update_type,
+                    )
+                    return None
+                if update_type in ("evolve", "correct") and not (rep_ids or replaces_text):
+                    logger.warning(
+                        "topic_v2: Phase 1 %s JSON missing replaces_claim_ids/replaces_text for qa_id=%s",
+                        update_type,
+                        qa_id,
+                    )
+                    return None
+
         return Phase1Note(
             action=action,
             target_topic_id=target_id,
             topic_title=str(data.get("topic_title") or _derive_topic_title(question, answer)).strip(),
             update_type=update_type,
-            claim_text=_clean_clause(str(data.get("claim_text") or "")),
-            replaces_text=_clean_clause(str(data.get("replaces_text") or "")),
-            reason=_clean_clause(str(data.get("reason") or "")),
+            claim_text=claim_text,
+            replaces_text=replaces_text,
+            reason=reason,
             keywords=kws,
             evidence_qa_id=qa_id,
             timestamp=ts,
+            replaces_claim_ids=rep_ids,
         )
 
     def _distill_deterministic(
@@ -873,11 +1007,32 @@ class TopicConsolidatorV2:
                 timestamp=ts,
             )
 
-        # 4. Problem / limitation report on an existing approach.
+        # 4. Problem / limitation report on an existing approach (skip trivial chitchat/acks).
         target = self._pick_target_candidate(qa_text, candidates)
         clean_ans = _clean_clause(answer)
         codes = _ASCII_CODE_TOKEN_RE.findall(qa_text)
         update_type = "problem" if _PROBLEM_HINT_RE.search(qa_text) else "add"
+        if (
+            target is None
+            and update_type == "add"
+            and not codes
+            and (
+                _TRIVIAL_NOISE_RE.match(clean_ans)
+                or (_TRIVIAL_NOISE_RE.match(_clean_clause(question)) and len(clean_ans) <= 24)
+            )
+        ):
+            return Phase1Note(
+                action="skip",
+                target_topic_id="",
+                topic_title="",
+                update_type="skip",
+                claim_text="",
+                replaces_text="",
+                reason="trivial_chitchat",
+                keywords=[],
+                evidence_qa_id=qa_id,
+                timestamp=ts,
+            )
         return Phase1Note(
             action="attach" if target else "create",
             target_topic_id=target.topic_id if target else "",
@@ -914,6 +1069,14 @@ class TopicConsolidatorV2:
             )
             dossiers.append(target)
 
+        # Replay idempotency: if this QA was already materialized before a crash, do not duplicate claims.
+        if note.evidence_qa_id > 0 and (
+            note.evidence_qa_id in target.active_qa_ids()
+            or note.evidence_qa_id in target.superseded_qa_ids()
+            or any(note.evidence_qa_id in s.evidence_qa_ids for s in target.superseded_claims)
+        ):
+            return target
+
         if note.evidence_qa_id > target.last_evidence_qa_id:
             target.last_evidence_qa_id = note.evidence_qa_id
         if note.timestamp:
@@ -921,18 +1084,47 @@ class TopicConsolidatorV2:
 
         if note.update_type in ("evolve", "correct"):
             new_cid = f"c_{note.evidence_qa_id}_{len(target.current_claims) + len(target.superseded_claims) + 1}"
+            replaces_id_set = {cid.strip() for cid in note.replaces_claim_ids if cid.strip()}
             old_low = note.replaces_text.strip().lower()
             old_clean = re.sub(r"[（(][^）)]*[）)]", "", old_low).strip()
             old_codes = [c.lower() for c in _ASCII_CODE_TOKEN_RE.findall(note.replaces_text)]
             old_terms = [t for t in dict.fromkeys([old_low, old_clean, *old_codes]) if len(t) >= 2]
+            matched_indices: set[int] = set()
+            if replaces_id_set:
+                # Strict ID-only replacement when LLM provided explicit replaces_claim_ids:
+                # never fall through to text matching that could wipe sibling claims.
+                for idx, claim in enumerate(target.current_claims):
+                    if claim.claim_id and claim.claim_id in replaces_id_set:
+                        matched_indices.add(idx)
+            else:
+                # Compatibility fallback (deterministic extractor / legacy LLM without IDs):
+                # require unambiguous match on primary claims (fact/decision/rule) so a shared
+                # term never wipes multiple distinct sibling claims.
+                primary_matches: list[int] = []
+                aux_matches: list[int] = []
+                for idx, claim in enumerate(target.current_claims):
+                    c_low = claim.text.lower()
+                    if old_terms and any(term in c_low for term in old_terms):
+                        if claim.kind in ("problem", "legacy_seed"):
+                            aux_matches.append(idx)
+                        else:
+                            primary_matches.append(idx)
+                if len(primary_matches) == 1:
+                    matched_indices.add(primary_matches[0])
+                    matched_indices.update(aux_matches)
+                elif len(primary_matches) == 0:
+                    if aux_matches:
+                        matched_indices.update(aux_matches)
+                    else:
+                        # Unparsed pre-V2 legacy_seed blob inside this exact dossier.
+                        for idx, claim in enumerate(target.current_claims):
+                            if claim.kind == "legacy_seed":
+                                matched_indices.add(idx)
+                # When len(primary_matches) > 1, text matching is ambiguous: preserve sibling
+                # claims rather than wiping them indiscriminately.
             kept_claims: list[TopicClaim] = []
-            for claim in target.current_claims:
-                c_low = claim.text.lower()
-                is_superseded = (
-                    any(term in c_low for term in old_terms)
-                    or claim.kind in ("legacy_seed", "problem")
-                )
-                if is_superseded:
+            for idx, claim in enumerate(target.current_claims):
+                if idx in matched_indices:
                     target.superseded_claims.append(
                         SupersededClaim(
                             text=claim.text,
@@ -1005,7 +1197,11 @@ class TopicConsolidatorV2:
         active_texts = [c.text for c in target.current_claims if c.text]
         if active_texts:
             target.summary = "；".join(active_texts[-2:])[:240]
-        target.embedding = self.embed_fn(target.embedding_text())
+        new_emb = self.embed_fn(target.embedding_text())
+        if new_emb:
+            target.embedding = new_emb
+            if self.embed_model:
+                target.embed_model = self.embed_model
         return target
 
     def consolidate_qa_stream(
@@ -1025,32 +1221,46 @@ class TopicConsolidatorV2:
         updated_ids: set[str] = set()
         superseded_before = sum(len(d.superseded_claims) for d in dossiers)
         skipped = 0
+        processed = 0
+        failed_qa_ids: list[int] = []
         max_qa_id = max((d.last_evidence_qa_id for d in dossiers), default=0)
 
         for qa in ordered:
             qid = int(qa.get("id") or 0)
-            if qid > max_qa_id:
-                max_qa_id = qid
-            note = self.distill_qa(qa, dossiers)
+            processed += 1
+            note, failed = self._distill_qa_with_status(qa, dossiers)
+            if failed:
+                skipped += 1
+                if qid > 0:
+                    failed_qa_ids.append(qid)
+                # Preserve exact chronological watermark: halt before advancing past failed QA.
+                break
             if note is None or note.action == "skip" or note.update_type == "skip":
                 skipped += 1
+                if qid > max_qa_id:
+                    max_qa_id = qid
                 continue
             touched = self.apply_note(note, dossiers)
             if touched is None:
                 skipped += 1
+                if qid > max_qa_id:
+                    max_qa_id = qid
                 continue
+            if qid > max_qa_id:
+                max_qa_id = qid
             if touched.topic_id in initial_ids:
                 updated_ids.add(touched.topic_id)
 
         created = len([d for d in dossiers if d.topic_id not in initial_ids])
         superseded_after = sum(len(d.superseded_claims) for d in dossiers)
         report = ConsolidationReport(
-            processed_qas=len(ordered),
+            processed_qas=processed,
             created_topics=created,
             updated_topics=len(updated_ids),
             superseded_claims=max(0, superseded_after - superseded_before),
             skipped_qas=skipped,
             max_qa_id=max_qa_id,
+            failed_qa_ids=tuple(failed_qa_ids),
         )
         return dossiers, report
 
@@ -1089,6 +1299,27 @@ def _cap_demoted_score(raw_score: float, factor: float, min_fresh_score: float) 
     return round(scaled, 6)
 
 
+def enforce_topic_v2_post_rerank_order(
+    ranked: list[Any],
+    *,
+    demoted_sids: Sequence[str] | set[str],
+    is_historical: bool = False,
+) -> list[Any]:
+    """Enforce Topic V2 demotion invariants after optional cross-encoder rerank.
+
+    Preserves Rerank's relative ordering inside the active group and inside the
+    demoted group, while ensuring demoted stale items never rank above active hits.
+    """
+    if is_historical or not demoted_sids or not ranked:
+        return ranked
+    demoted_set = set(demoted_sids)
+    active_group = [h for h in ranked if str(getattr(h, "source_id", "") or "") not in demoted_set]
+    demoted_group = [h for h in ranked if str(getattr(h, "source_id", "") or "") in demoted_set]
+    if not demoted_group or not active_group:
+        return ranked
+    return active_group + demoted_group
+
+
 def apply_topic_v2_ranking_guard(
     scored: list[Any],
     *,
@@ -1096,21 +1327,30 @@ def apply_topic_v2_ranking_guard(
     trace: Any = None,
     probe_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Enforce read-side freshness, watermark check, and A->B supersession in ``scored``.
+    """Enforce read-side freshness and explicit LLM-established supersession in ``scored``.
+
+    Design invariant:
+      - Topic membership and supersession are established by the LLM during consolidation
+        and persisted as explicit QA IDs (``active_qas``, ``superseded_qas``).
+      - Recall NEVER guesses topic membership via keyword/bigram overlap and NEVER demotes
+        whole multi-topic Observation Notes or Yin paragraphs from coarse ``source_qa_range``
+        intervals (fail-safe preservation; notes rely on UTC half-life decay until
+        paragraph-level provenance lands).
 
     Mutates ``hit.content``, ``hit.content_preview`` (stripping internal ``topic_v2`` headers),
-    and ``hit.rrf_score`` in place prior to final score sorting.
+    and ``hit.rrf_score`` in place prior to final score sorting. Returns guard metadata
+    including ``demoted_sids`` for downstream post-rerank enforcement.
     """
     is_hist = is_historical_trace_query(query)
     topic_meta: dict[str, dict[str, Any] | None] = {}
-    qa_ids: list[int] = []
+    qa_ids_seen: list[int] = []
     qa_timestamps: dict[str, datetime] = {}
 
     for hit in scored:
         kind = getattr(hit, "kind", "")
         sid = str(getattr(hit, "source_id", "") or "")
+        raw_body = str(getattr(hit, "content", "") or getattr(hit, "content_preview", "") or "")
         if kind == "topic":
-            raw_body = str(getattr(hit, "content", "") or getattr(hit, "content_preview", "") or "")
             meta = parse_topic_v2_header(raw_body)
             topic_meta[sid] = meta
             if meta is not None:
@@ -1119,13 +1359,13 @@ def apply_topic_v2_ranking_guard(
                 hit.content_preview = clean_full[:500]
         elif kind == "qa":
             qid = _parse_qa_id(sid)
-            if qid is not None:
-                qa_ids.append(qid)
             dt = _parse_iso_ts(getattr(hit, "created_at", ""))
             if dt is not None:
                 qa_timestamps[sid] = dt
+            if qid is not None:
+                qa_ids_seen.append(qid)
 
-    max_qa_id = max(qa_ids, default=0)
+    max_qa_id = max(qa_ids_seen, default=0)
     latest_qa_ts = max(qa_timestamps.values(), default=None)
     earliest_qa_ts = min(qa_timestamps.values(), default=None)
     qa_span_days = (
@@ -1134,24 +1374,70 @@ def apply_topic_v2_ranking_guard(
         else 0.0
     )
 
+    hit_dt_by_sid = {
+        str(getattr(hit, "source_id", "") or ""): _parse_iso_ts(getattr(hit, "created_at", ""))
+        for hit in scored
+        if getattr(hit, "kind", "") == "topic"
+    }
+
+    # Collect explicit LLM-confirmed supersession relations from Topic V2 headers.
     superseded_qa_ids: set[int] = set()
+    superseded_qa_by_topic: dict[str, set[int]] = {}
+    superseded_qa_ts: dict[int, datetime | None] = {}
+    topic_active_qas: dict[str, set[int]] = {}
+
+    for sid, meta in topic_meta.items():
+        if meta is None or int(meta.get("v") or 0) != 2:
+            continue
+        t_dt = _parse_iso_ts(meta.get("last_at", "")) or hit_dt_by_sid.get(sid)
+        act_set: set[int] = set()
+        for qid in (meta.get("active_qas") or []):
+            try:
+                act_set.add(int(qid))
+            except (TypeError, ValueError):
+                pass
+        topic_active_qas[sid] = act_set
+
+        sup_set: set[int] = set()
+        for qid in (meta.get("superseded_qas") or []):
+            try:
+                iq = int(qid)
+            except (TypeError, ValueError):
+                continue
+            sup_set.add(iq)
+            superseded_qa_ids.add(iq)
+            prev_dt = superseded_qa_ts.get(iq)
+            if t_dt is not None and (prev_dt is None or t_dt > prev_dt):
+                superseded_qa_ts[iq] = t_dt
+            elif iq not in superseded_qa_ts:
+                superseded_qa_ts[iq] = None
+        superseded_qa_by_topic[sid] = sup_set
+
+    # A Topic V2 dossier is stale ONLY when another Topic V2 dossier explicitly superseded
+    # one of its active evidence QAs. Never demote any Topic V2 dossier via keyword guessing
+    # or global max_qa_id.
     fresh_topic_sids: set[str] = set()
     stale_topic_sids: set[str] = set()
     for sid, meta in topic_meta.items():
-        if meta is not None and int(meta.get("v") or 0) == 2 and (max_qa_id == 0 or int(meta.get("last_qa") or 0) >= max_qa_id):
-            fresh_topic_sids.add(sid)
-            for qid in (meta.get("superseded_qas") or []):
-                try:
-                    superseded_qa_ids.add(int(qid))
-                except (TypeError, ValueError):
-                    pass
-        elif max_qa_id > 0:
-            # Either legacy v1 topic without header, or v2 topic lagging behind recalled QA.
+        if meta is None or int(meta.get("v") or 0) != 2:
+            continue
+        act_set = topic_active_qas.get(sid, set())
+        other_sup = set().union(
+            *(s for other_sid, s in superseded_qa_by_topic.items() if other_sid != sid)
+        ) if superseded_qa_by_topic else set()
+        if act_set and (act_set & other_sup):
             stale_topic_sids.add(sid)
+        else:
+            fresh_topic_sids.add(sid)
 
-    has_fresh_v2_topic = bool(fresh_topic_sids)
+    # Schema-version precedence (zero keyword guessing): when structured Topic V2 dossiers
+    # are present, unmigrated pre-V2 legacy topic rows (meta is None) yield rank to them.
+    if fresh_topic_sids:
+        for sid, meta in topic_meta.items():
+            if meta is None:
+                stale_topic_sids.add(sid)
 
-    # First, adjust non-demoted QA recency tie-breaks on current-state queries (lag-window protection).
+    # First, adjust non-demoted QA recency tie-breaks on current-state queries (pure timestamp recency).
     qa_recency_adjusted = 0
     if not is_hist and len(qa_timestamps) >= 2 and qa_span_days >= 3.0 and latest_qa_ts is not None:
         for hit in scored:
@@ -1171,7 +1457,7 @@ def apply_topic_v2_ranking_guard(
                 if probe_fn is not None and trace is not None:
                     probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_qa_recency")
 
-    # Compute the lowest score among fresh active candidates so every demoted hit is pushed below it.
+    # Compute the lowest score among fresh active candidates so every explicitly demoted hit sorts below it.
     fresh_active_scores: list[float] = []
     for hit in scored:
         kind = getattr(hit, "kind", "")
@@ -1193,13 +1479,15 @@ def apply_topic_v2_ranking_guard(
     demoted_topics = 0
     demoted_superseded_qas = 0
     demoted_derived = 0
+    demoted_sids: set[str] = set()
 
     for hit in scored:
         kind = getattr(hit, "kind", "")
         sid = str(getattr(hit, "source_id", "") or "")
-        if kind == "topic" and sid in stale_topic_sids:
+        if kind == "topic" and sid in stale_topic_sids and not is_hist:
             hit.rrf_score = _cap_demoted_score(float(hit.rrf_score), 0.25, min_fresh_score)
             demoted_topics += 1
+            demoted_sids.add(sid)
             if probe_fn is not None and trace is not None:
                 probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_freshness_guard")
         elif kind == "qa" and not is_hist:
@@ -1207,18 +1495,11 @@ def apply_topic_v2_ranking_guard(
             if qid is not None and qid in superseded_qa_ids:
                 hit.rrf_score = _cap_demoted_score(float(hit.rrf_score), 0.20, min_fresh_score)
                 demoted_superseded_qas += 1
+                demoted_sids.add(sid)
                 if probe_fn is not None and trace is not None:
                     probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_freshness_guard")
-        elif kind in ("note", "yin") and not is_hist:
-            dt = _parse_iso_ts(getattr(hit, "created_at", ""))
-            is_older_than_qa = (
-                latest_qa_ts is not None and (dt is None or dt < latest_qa_ts)
-            )
-            if is_older_than_qa or (has_fresh_v2_topic and max_qa_id > 0):
-                hit.rrf_score = _cap_demoted_score(float(hit.rrf_score), 0.25, min_fresh_score)
-                demoted_derived += 1
-                if probe_fn is not None and trace is not None:
-                    probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_freshness_guard")
+        # Derived multi-topic Observation Notes & Yin paragraphs are fail-safe preserved here:
+        # coarse source_qa_range intervals cannot prove an entire multi-topic note is stale.
 
     return {
         "is_historical": is_hist,
@@ -1228,6 +1509,7 @@ def apply_topic_v2_ranking_guard(
         "demoted_superseded_qas": demoted_superseded_qas,
         "demoted_derived": demoted_derived,
         "qa_recency_adjusted": qa_recency_adjusted,
+        "demoted_sids": sorted(demoted_sids),
     }
 
 
@@ -1273,6 +1555,77 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+_STATE_DIR_LOCKS_GUARD = threading.Lock()
+_STATE_DIR_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _get_state_dir_lock(state_dir: str | Path) -> threading.Lock:
+    key = str(Path(state_dir).resolve())
+    with _STATE_DIR_LOCKS_GUARD:
+        lock = _STATE_DIR_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _STATE_DIR_LOCKS[key] = lock
+        return lock
+
+
+@contextlib.contextmanager
+def _state_dir_file_lock(state_dir: Path, timeout: float = 15.0):
+    """Fail-closed advisory file lock serializing multi-process writers on the same state_dir."""
+    lock_path = state_dir / ".topic_v2.lock"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a+b")
+    locked = False
+    try:
+        fh.seek(0, os.SEEK_END)
+        if fh.tell() == 0:
+            fh.write(b"0")
+            fh.flush()
+        deadline = time.monotonic() + max(0.05, float(timeout))
+        while True:
+            try:
+                try:
+                    import fcntl  # type: ignore
+
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except ImportError:
+                    import msvcrt  # type: ignore
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+            except (BlockingIOError, PermissionError, OSError) as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"topic_v2: failed to acquire file lock {lock_path} within {timeout:.1f}s"
+                    ) from exc
+                time.sleep(0.02)
+        yield
+    finally:
+        if locked:
+            try:
+                import fcntl  # type: ignore
+
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except ImportError:
+                try:
+                    import msvcrt  # type: ignore
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+
+
 def consolidate_pg_incremental(
     pg: Any,
     *,
@@ -1281,6 +1634,7 @@ def consolidate_pg_incremental(
     state_dir: str | Path,
     dry_run: bool = False,
     batch_limit: int = 100,
+    embed_model: str = "",
 ) -> dict[str, Any]:
     """Incrementally consolidate new PG ``qa_pairs`` into ``TopicDossier``s and PG ``topics``.
 
@@ -1293,134 +1647,221 @@ def consolidate_pg_incremental(
     root = Path(state_dir)
     state_path = root / "topic_v2_state.json"
     dossiers_path = root / "topic_v2_dossiers.json"
+    dir_lock = _get_state_dir_lock(root)
 
-    last_qa_id = 0
-    if state_path.is_file():
-        try:
-            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-            last_qa_id = int(raw_state.get("last_qa_id") or 0)
-        except Exception:
-            last_qa_id = 0
+    with dir_lock, _state_dir_file_lock(root):
+        last_qa_id = 0
+        if state_path.is_file():
+            try:
+                raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+                last_qa_id = int(raw_state.get("last_qa_id") or 0)
+            except Exception:
+                last_qa_id = 0
 
-    consolidator = TopicConsolidatorV2(embed_fn=embed_fn, llm_fn=llm_fn)
-    dossiers = load_dossiers(dossiers_path)
+        eff_embed_model = str(embed_model or "").strip()
+        consolidator = TopicConsolidatorV2(
+            embed_fn=embed_fn,
+            llm_fn=llm_fn,
+            embed_model=eff_embed_model,
+        )
+        dossiers = load_dossiers(dossiers_path)
+        reembedded_dossiers: set[str] = set()
 
-    new_qas: list[dict[str, Any]] = []
-    with _pg_conn_ctx(pg) as conn:
-        if conn is None:
-            raise RuntimeError("consolidate_pg_incremental: failed to obtain PG connection")
-        with conn.cursor() as cur:
-            if not dossiers:
-                try:
-                    cur.execute(
-                        "SELECT topic_id, title, COALESCE(summary, ''), COALESCE(body, ''), "
-                        "keywords, status, embedding FROM topics WHERE status='active'"
-                    )
-                    legacy_rows = []
-                    for row in cur.fetchall() or []:
-                        legacy_rows.append(
-                            {
-                                "topic_id": row[0],
-                                "title": row[1] or "",
-                                "summary": row[2] or "",
-                                "body": row[3] or "",
-                                "keywords": list(row[4] or []) if isinstance(row[4], (list, tuple)) else [],
-                                "status": row[5] or "active",
-                                "embedding": _parse_pg_emb(row[6]),
-                            }
-                        )
-                    if legacy_rows:
-                        dossiers = consolidator.seed_from_legacy_topics(legacy_rows)
-                except Exception:
-                    dossiers = []
+        new_qas: list[dict[str, Any]] = []
+        with _pg_conn_ctx(pg) as conn:
+            if conn is None:
+                raise RuntimeError("consolidate_pg_incremental: failed to obtain PG connection")
+            with conn.cursor() as cur:
+                if not dossiers:
+                    try:
+                        try:
+                            cur.execute(
+                                "SELECT topic_id, title, COALESCE(summary, ''), COALESCE(body, ''), "
+                                "keywords, status, embedding, COALESCE(embed_model, '') "
+                                "FROM topics WHERE status='active'"
+                            )
+                        except Exception:
+                            cur.execute(
+                                "SELECT topic_id, title, COALESCE(summary, ''), COALESCE(body, ''), "
+                                "keywords, status, embedding FROM topics WHERE status='active'"
+                            )
+                        legacy_rows = []
+                        for row in cur.fetchall() or []:
+                            legacy_rows.append(
+                                {
+                                    "topic_id": row[0],
+                                    "title": row[1] or "",
+                                    "summary": row[2] or "",
+                                    "body": row[3] or "",
+                                    "keywords": list(row[4] or []) if isinstance(row[4], (list, tuple)) else [],
+                                    "status": row[5] or "active",
+                                    "embedding": _parse_pg_emb(row[6]),
+                                    "embed_model": str(row[7] or "") if len(row) > 7 else "",
+                                }
+                            )
+                        if legacy_rows:
+                            dossiers = consolidator.seed_from_legacy_topics(legacy_rows)
+                    except Exception:
+                        dossiers = []
 
-            cur.execute(
-                "SELECT id, timestamp, question, answer FROM qa_pairs "
-                "WHERE id > %s AND answer IS NOT NULL AND session_id NOT LIKE '%%.trajectory%%' "
-                "ORDER BY id ASC LIMIT %s",
-                (last_qa_id, max(int(batch_limit), 1)),
-            )
-            for row in cur.fetchall() or []:
-                new_qas.append(
-                    {
-                        "id": int(row[0]),
-                        "timestamp": row[1],
-                        "question": str(row[2] or ""),
-                        "answer": str(row[3] or ""),
-                    }
+                cur.execute(
+                    "SELECT id, timestamp, question, answer FROM qa_pairs "
+                    "WHERE id > %s AND answer IS NOT NULL "
+                    "AND COALESCE(session_id, '') NOT LIKE '%%.trajectory%%' "
+                    "ORDER BY id ASC LIMIT %s",
+                    (last_qa_id, max(int(batch_limit), 1)),
                 )
+                for row in cur.fetchall() or []:
+                    new_qas.append(
+                        {
+                            "id": int(row[0]),
+                            "timestamp": row[1],
+                            "question": str(row[2] or ""),
+                            "answer": str(row[3] or ""),
+                        }
+                    )
 
-    if not new_qas:
+        before_map = {d.topic_id: d.to_dict() for d in dossiers}
+
+        # Re-embed ALL loaded or freshly migrated legacy dossiers whose model fingerprint does
+        # not match the active model BEFORE consolidating new QAs or stamping PG metadata.
+        if eff_embed_model:
+            for d in dossiers:
+                if d.embed_model != eff_embed_model:
+                    new_emb = embed_fn(d.embedding_text())
+                    if new_emb:
+                        d.embedding = new_emb
+                        d.embed_model = eff_embed_model
+                        reembedded_dossiers.add(d.topic_id)
+
+        if not new_qas and not reembedded_dossiers:
+            return {
+                "dry_run": bool(dry_run),
+                "previous_last_qa_id": last_qa_id,
+                "new_last_qa_id": last_qa_id,
+                "processed_qas": 0,
+                "created_topics": 0,
+                "updated_topics": 0,
+                "superseded_claims": 0,
+                "skipped_qas": 0,
+                "upserted_topics": 0,
+                "failed_qa_ids": [],
+            }
+
+        if new_qas:
+            updated_dossiers, report = consolidator.consolidate_qa_stream(
+                new_qas,
+                existing_dossiers=dossiers,
+            )
+        else:
+            updated_dossiers = dossiers
+            report = ConsolidationReport(
+                processed_qas=0,
+                created_topics=0,
+                updated_topics=len(reembedded_dossiers),
+                superseded_claims=0,
+                skipped_qas=0,
+                max_qa_id=last_qa_id,
+                failed_qa_ids=(),
+            )
+        changed_dossiers = [
+            d
+            for d in updated_dossiers
+            if d.topic_id in reembedded_dossiers or before_map.get(d.topic_id) != d.to_dict()
+        ]
+        # Never advance watermark beyond last succeeded/explicitly-skipped QA.
+        new_max_qa = max(last_qa_id, report.max_qa_id)
+
+        if not dry_run:
+            if changed_dossiers:
+                with _pg_conn_ctx(pg) as conn:
+                    if conn is None:
+                        raise RuntimeError("consolidate_pg_incremental: PG connection lost before upsert")
+                    manual_tx = getattr(conn, "autocommit", None) is True
+                    with conn.cursor() as cur:
+                        if manual_tx:
+                            cur.execute("BEGIN")
+                        try:
+                            for dossier in changed_dossiers:
+                                row = dossier.to_topic_row(embed_fn)
+                                emb = row.get("embedding")
+                                emb_str = "[" + ",".join(str(x) for x in emb) + "]" if emb is not None else None
+                                row_fp = str(row.get("embed_model") or "")
+                                try:
+                                    cur.execute(
+                                        "INSERT INTO topics (topic_id, title, summary, body, keywords, status, embed_model, embedding, updated_at) "
+                                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, NOW()) "
+                                        "ON CONFLICT (topic_id) DO UPDATE SET "
+                                        "title = EXCLUDED.title, summary = EXCLUDED.summary, body = EXCLUDED.body, "
+                                        "keywords = EXCLUDED.keywords, status = EXCLUDED.status, "
+                                        "embed_model = COALESCE(NULLIF(EXCLUDED.embed_model, ''), topics.embed_model), "
+                                        "embedding = EXCLUDED.embedding, "
+                                        "updated_at = NOW()",
+                                        (
+                                            row["topic_id"],
+                                            row["title"],
+                                            row["summary"],
+                                            row["body"],
+                                            row["keywords"],
+                                            row["status"],
+                                            row_fp,
+                                            emb_str,
+                                        ),
+                                    )
+                                except Exception:
+                                    if manual_tx:
+                                        raise
+                                    # Compat fallback for minimal fake test cursors lacking embed_model/updated_at.
+                                    cur.execute(
+                                        "INSERT INTO topics (topic_id, title, summary, body, keywords, status, embedding) "
+                                        "VALUES (%s, %s, %s, %s, %s, %s, %s::vector) "
+                                        "ON CONFLICT (topic_id) DO UPDATE SET "
+                                        "title = EXCLUDED.title, summary = EXCLUDED.summary, body = EXCLUDED.body, "
+                                        "keywords = EXCLUDED.keywords, status = EXCLUDED.status, embedding = EXCLUDED.embedding",
+                                        (
+                                            row["topic_id"],
+                                            row["title"],
+                                            row["summary"],
+                                            row["body"],
+                                            row["keywords"],
+                                            row["status"],
+                                            emb_str,
+                                        ),
+                                    )
+                            if manual_tx:
+                                cur.execute("COMMIT")
+                        except Exception:
+                            if manual_tx:
+                                try:
+                                    cur.execute("ROLLBACK")
+                                except Exception:
+                                    pass
+                            raise
+                    if not manual_tx and callable(getattr(conn, "commit", None)):
+                        conn.commit()
+            save_dossiers(dossiers_path, updated_dossiers)
+            _atomic_write_json(
+                state_path,
+                {
+                    "last_qa_id": int(new_max_qa),
+                    "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "topic_count": len(updated_dossiers),
+                    "failed_qa_ids": list(report.failed_qa_ids),
+                },
+            )
+
         return {
             "dry_run": bool(dry_run),
             "previous_last_qa_id": last_qa_id,
-            "new_last_qa_id": last_qa_id,
-            "processed_qas": 0,
-            "created_topics": 0,
-            "updated_topics": 0,
-            "superseded_claims": 0,
-            "skipped_qas": 0,
-            "upserted_topics": 0,
+            "new_last_qa_id": int(new_max_qa),
+            "processed_qas": report.processed_qas,
+            "created_topics": report.created_topics,
+            "updated_topics": report.updated_topics,
+            "superseded_claims": report.superseded_claims,
+            "skipped_qas": report.skipped_qas,
+            "upserted_topics": 0 if dry_run else len(changed_dossiers),
+            "failed_qa_ids": list(report.failed_qa_ids),
         }
-
-    before_map = {d.topic_id: d.to_dict() for d in dossiers}
-    updated_dossiers, report = consolidator.consolidate_qa_stream(
-        new_qas,
-        existing_dossiers=dossiers,
-    )
-    changed_dossiers = [
-        d for d in updated_dossiers if before_map.get(d.topic_id) != d.to_dict()
-    ]
-    new_max_qa = max(last_qa_id, report.max_qa_id)
-
-    if not dry_run:
-        with _pg_conn_ctx(pg) as conn:
-            if conn is None:
-                raise RuntimeError("consolidate_pg_incremental: PG connection lost before upsert")
-            with conn.cursor() as cur:
-                for dossier in changed_dossiers:
-                    row = dossier.to_topic_row(embed_fn)
-                    emb = row.get("embedding")
-                    emb_str = "[" + ",".join(str(x) for x in emb) + "]" if emb is not None else None
-                    cur.execute(
-                        "INSERT INTO topics (topic_id, title, summary, body, keywords, status, embedding) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s::vector) "
-                        "ON CONFLICT (topic_id) DO UPDATE SET "
-                        "title = EXCLUDED.title, summary = EXCLUDED.summary, body = EXCLUDED.body, "
-                        "keywords = EXCLUDED.keywords, status = EXCLUDED.status, embedding = EXCLUDED.embedding",
-                        (
-                            row["topic_id"],
-                            row["title"],
-                            row["summary"],
-                            row["body"],
-                            row["keywords"],
-                            row["status"],
-                            emb_str,
-                        ),
-                    )
-            if callable(getattr(conn, "commit", None)):
-                conn.commit()
-        save_dossiers(dossiers_path, updated_dossiers)
-        _atomic_write_json(
-            state_path,
-            {
-                "last_qa_id": int(new_max_qa),
-                "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "topic_count": len(updated_dossiers),
-            },
-        )
-
-    return {
-        "dry_run": bool(dry_run),
-        "previous_last_qa_id": last_qa_id,
-        "new_last_qa_id": int(new_max_qa),
-        "processed_qas": report.processed_qas,
-        "created_topics": report.created_topics,
-        "updated_topics": report.updated_topics,
-        "superseded_claims": report.superseded_claims,
-        "skipped_qas": report.skipped_qas,
-        "upserted_topics": 0 if dry_run else len(changed_dossiers),
-    }
 
 
 def inspect_dossiers_summary(state_dir: str | Path) -> dict[str, Any]:
@@ -1534,6 +1975,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         state_dir=state_dir,
         dry_run=bool(args.dry_run),
         batch_limit=max(int(args.limit or 100), 1),
+        embed_model=str(embed_cfg.get("_fingerprint") or ""),
     )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
