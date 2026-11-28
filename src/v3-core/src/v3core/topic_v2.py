@@ -105,8 +105,30 @@ _ASSOC_STOPWORDS = frozenset(
     }
 )
 
+_GENERIC_PLATFORM_TOKENS = frozenset(
+    {
+        "postgresql", "postgres", "mysql", "sqlite", "redis", "docker", "kubernetes", "k8s",
+        "python", "node", "nodejs", "linux", "windows", "macos", "openai", "anthropic",
+        "minimax", "deepseek", "hermes", "github", "git", "http", "https", "json", "yaml",
+        "sql", "api", "sdk", "cli", "mcp", "llm", "agent", "model", "server", "client",
+        "cloud", "aws", "gcp", "azure", "react", "vue", "typescript", "javascript", "rust",
+        "golang", "java", "kafka", "nginx", "prometheus", "grafana", "v3core", "v3",
+    }
+)
+
+_GENERIC_CJK_UMBRELLA = frozenset(
+    {
+        "数据", "据库", "项目", "服务", "代码", "插件", "模块", "工具", "平台", "容器",
+        "环境", "接口", "模型", "架构", "文件", "目录", "应用", "工程", "开发", "技术",
+        "运行", "管理", "设置", "参数", "功能", "消息", "内容", "逻辑", "流程",
+    }
+)
+
+_TRIVIAL_NOISE_WORD = (
+    r"(?:好的|收到|谢谢|感谢|明白(?:了)?|了解(?:了)?|嗯嗯?|哈哈+|哦哦?|行|没问题|ok|okay|thanks|thank you|thx|got it|cool|nice|hi|hello|你好)"
+)
 _TRIVIAL_NOISE_RE = re.compile(
-    r"^(?:好的|收到|谢谢|感谢|明白|了解了?|嗯嗯?|哈哈+|哦哦?|行|没问题|ok|okay|thanks|thank you|thx|got it|cool|nice|hi|hello|你好)[!！。.,，~～\s]*$",
+    rf"^{_TRIVIAL_NOISE_WORD}(?:[!！。.,，~～\s]+{_TRIVIAL_NOISE_WORD})*[!！。.,，~～\s]*$",
     re.I,
 )
 
@@ -176,57 +198,64 @@ def _extract_tokens(text: str) -> set[str]:
 
 def _extract_association_terms(
     text: str, extra_keywords: Sequence[str] = ()
-) -> tuple[set[str], set[str]]:
-    """Return ``(strong_terms, domain_terms)`` for scoped topic/evidence matching."""
+) -> tuple[set[str], set[str], set[str]]:
+    """Return ``(specific_terms, platform_terms, domain_terms)`` for scoped topic matching.
+
+    Separates broad shared platform/ecosystem identifiers (e.g. ``PostgreSQL``, ``Docker``,
+    ``Python``) from concrete component/version identifiers (e.g. ``PgBouncer``, ``WAL-G``)
+    and CJK sub-topic bigrams so unrelated sub-topics on the same platform stay independent.
+    """
     raw = str(text or "")
-    strong: set[str] = set()
+    specific: set[str] = set()
+    platform: set[str] = set()
     domain: set[str] = set()
 
+    def _classify_ascii(tok_low: str) -> None:
+        if len(tok_low) < 2 or tok_low in _ASSOC_STOPWORDS:
+            return
+        if tok_low in _GENERIC_PLATFORM_TOKENS:
+            platform.add(tok_low)
+        else:
+            specific.add(tok_low)
+
     for tok in _ASCII_CODE_TOKEN_RE.findall(raw):
-        tl = tok.lower()
-        if tl not in _ASSOC_STOPWORDS:
-            strong.add(tl)
+        _classify_ascii(tok.lower())
 
     for kw in extra_keywords:
         ks = str(kw or "").strip().lower()
         if len(ks) < 2 or ks in _ASSOC_STOPWORDS:
             continue
         if re.search(r"[a-z0-9]", ks):
-            strong.add(ks)
-        elif re.search(r"[\u4e00-\u9fff]", ks):
-            domain.add(ks)
-            if len(ks) > 2:
-                for i in range(len(ks) - 1):
-                    bg = ks[i : i + 2]
-                    if bg not in _ASSOC_STOPWORDS:
+            _classify_ascii(ks)
+        else:
+            for run in _ZH_WORD_RUN_RE.findall(ks):
+                for i in range(len(run) - 1):
+                    bg = run[i : i + 2]
+                    if bg not in _ASSOC_STOPWORDS and bg not in _GENERIC_CJK_UMBRELLA:
                         domain.add(bg)
 
     for run in _ZH_WORD_RUN_RE.findall(raw):
-        if len(run) <= 4 and run not in _ASSOC_STOPWORDS:
-            domain.add(run)
         for i in range(len(run) - 1):
             bg = run[i : i + 2]
-            if bg not in _ASSOC_STOPWORDS:
+            if bg not in _ASSOC_STOPWORDS and bg not in _GENERIC_CJK_UMBRELLA:
                 domain.add(bg)
-    return strong, domain
+    return specific, platform, domain
 
 
 def _has_topic_overlap(
-    terms_a: tuple[set[str], set[str]],
-    terms_b: tuple[set[str], set[str]],
+    terms_a: tuple[set[str], set[str], set[str]],
+    terms_b: tuple[set[str], set[str], set[str]],
 ) -> bool:
-    """Return True only when two texts share specific entities or >=2 domain terms."""
-    strong_a, dom_a = terms_a
-    strong_b, dom_b = terms_b
-    if strong_a & strong_b:
+    """Return True when two texts share a concrete component, platform+subtopic concept, or >=2 domain bigrams."""
+    spec_a, plat_a, dom_a = terms_a
+    spec_b, plat_b, dom_b = terms_b
+    if spec_a & spec_b:
         return True
-    if len(dom_a & dom_b) >= 2:
+    dom_inter = dom_a & dom_b
+    if (plat_a & plat_b) and len(dom_inter) >= 1:
         return True
-    # Allow explicit multi-char CJK keyword match when one side used compact keywords.
-    if dom_a and dom_b:
-        for t_a in dom_a:
-            if len(t_a) >= 3 and any(t_a in t_b or t_b in t_a for t_b in dom_b if len(t_b) >= 2):
-                return True
+    if len(dom_inter) >= 2:
+        return True
     return False
 
 
@@ -706,10 +735,12 @@ class TopicConsolidatorV2:
         embed_fn: Callable[[str], list[float]],
         llm_fn: Callable[[list[dict[str, str]]], str] | None = None,
         top_k_candidates: int = 5,
+        embed_model: str = "",
     ) -> None:
         self.embed_fn = embed_fn
         self.llm_fn = llm_fn
         self.top_k_candidates = max(int(top_k_candidates), 1)
+        self.embed_model = str(embed_model or "").strip()
 
     def seed_from_legacy_topics(self, legacy_topics: Sequence[Mapping[str, Any]]) -> list[TopicDossier]:
         """Convert legacy ``topics`` rows into initial ``TopicDossier`` instances.
@@ -783,7 +814,11 @@ class TopicConsolidatorV2:
                 embedding=emb,
             )
             if dossier.embedding is None and self.embed_fn is not None:
-                dossier.embedding = self.embed_fn(dossier.embedding_text())
+                new_emb = self.embed_fn(dossier.embedding_text())
+                if new_emb:
+                    dossier.embedding = new_emb
+                    if self.embed_model:
+                        dossier.embed_model = self.embed_model
             dossiers.append(dossier)
         return dossiers
 
@@ -899,12 +934,29 @@ class TopicConsolidatorV2:
         if not data:
             return None
 
-        action = str(data.get("action") or "skip").strip().lower()
-        if action not in ("attach", "create", "skip"):
+        raw_action = data.get("action")
+        if not isinstance(raw_action, str) or not raw_action.strip():
+            logger.warning("topic_v2: Phase 1 JSON missing explicit action for qa_id=%s", qa_id)
             return None
-        update_type = str(data.get("update_type") or "add").strip().lower()
-        if update_type not in ("add", "problem", "evolve", "correct", "historical_note", "skip"):
-            update_type = "add"
+        action = raw_action.strip().lower()
+        if action not in ("attach", "create", "skip"):
+            logger.warning("topic_v2: Phase 1 JSON invalid action=%r for qa_id=%s", raw_action, qa_id)
+            return None
+
+        raw_utype = data.get("update_type")
+        if action == "skip":
+            update_type = str(raw_utype or "skip").strip().lower() or "skip"
+            if update_type != "skip":
+                logger.warning("topic_v2: Phase 1 skip JSON has non-skip update_type=%r for qa_id=%s", raw_utype, qa_id)
+                return None
+        else:
+            if not isinstance(raw_utype, str) or not raw_utype.strip():
+                logger.warning("topic_v2: Phase 1 JSON missing explicit update_type for qa_id=%s", qa_id)
+                return None
+            update_type = raw_utype.strip().lower()
+            if update_type not in ("add", "problem", "evolve", "correct", "historical_note"):
+                logger.warning("topic_v2: Phase 1 JSON invalid update_type=%r for qa_id=%s", raw_utype, qa_id)
+                return None
 
         valid_ids = {d.topic_id for _, d in candidates}
         target_id = str(data.get("target_topic_id") or "").strip()
@@ -1018,7 +1070,6 @@ class TopicConsolidatorV2:
             and (
                 _TRIVIAL_NOISE_RE.match(clean_ans)
                 or (_TRIVIAL_NOISE_RE.match(_clean_clause(question)) and len(clean_ans) <= 24)
-                or len(re.sub(r"\s+", "", qa_text)) <= 14
             )
         ):
             return Phase1Note(
@@ -1096,7 +1147,7 @@ class TopicConsolidatorV2:
                 is_superseded = any(term in c_low for term in old_terms)
                 if not is_superseded and claim.kind in ("legacy_seed", "problem"):
                     claim_assoc = _extract_association_terms(claim.text)
-                    if old_assoc[0] or old_assoc[1]:
+                    if old_assoc[0] or old_assoc[1] or old_assoc[2]:
                         is_superseded = _has_topic_overlap(claim_assoc, old_assoc)
                     elif not old_terms:
                         is_superseded = _has_topic_overlap(claim_assoc, new_assoc)
@@ -1173,7 +1224,11 @@ class TopicConsolidatorV2:
         active_texts = [c.text for c in target.current_claims if c.text]
         if active_texts:
             target.summary = "；".join(active_texts[-2:])[:240]
-        target.embedding = self.embed_fn(target.embedding_text())
+        new_emb = self.embed_fn(target.embedding_text())
+        if new_emb:
+            target.embedding = new_emb
+            if self.embed_model:
+                target.embed_model = self.embed_model
         return target
 
     def consolidate_qa_stream(
@@ -1307,8 +1362,8 @@ def apply_topic_v2_ranking_guard(
     """
     is_hist = is_historical_trace_query(query)
     topic_meta: dict[str, dict[str, Any] | None] = {}
-    topic_terms: dict[str, tuple[set[str], set[str]]] = {}
-    qa_entries: list[tuple[int, str, datetime | None, tuple[set[str], set[str]]]] = []
+    topic_terms: dict[str, tuple[set[str], set[str], set[str]]] = {}
+    qa_entries: list[tuple[int, str, datetime | None, tuple[set[str], set[str], set[str]]]] = []
     qa_timestamps: dict[str, datetime] = {}
 
     for hit in scored:
@@ -1344,13 +1399,19 @@ def apply_topic_v2_ranking_guard(
 
     superseded_qa_ids: set[int] = set()
     fresh_topic_sids: set[str] = set()
+    fresh_topic_info: list[tuple[datetime | None, tuple[set[str], set[str], set[str]]]] = []
     stale_topic_sids: set[str] = set()
 
     # First pass: classify Topic V2 hits against overlapping QAs only (prevents global cross-topic demotion).
+    hit_dt_by_sid = {
+        str(getattr(hit, "source_id", "") or ""): _parse_iso_ts(getattr(hit, "created_at", ""))
+        for hit in scored
+        if getattr(hit, "kind", "") == "topic"
+    }
     for sid, meta in topic_meta.items():
         if meta is not None and int(meta.get("v") or 0) == 2:
             last_qa = int(meta.get("last_qa") or 0)
-            t_terms = topic_terms.get(sid, (set(), set()))
+            t_terms = topic_terms.get(sid, (set(), set(), set()))
             has_newer_related_qa = any(
                 qid > last_qa and _has_topic_overlap(t_terms, q_terms)
                 for qid, _, _, q_terms in qa_entries
@@ -1364,26 +1425,25 @@ def apply_topic_v2_ranking_guard(
                 stale_topic_sids.add(sid)
             else:
                 fresh_topic_sids.add(sid)
+                ft_dt = _parse_iso_ts(meta.get("last_at", "")) or hit_dt_by_sid.get(sid)
+                fresh_topic_info.append((ft_dt, t_terms))
 
     # Second pass: legacy topics without Topic V2 metadata are stale only when overlapping
     # fresh Topic V2 dossiers or recalled QA evidence in the same batch.
     for sid, meta in topic_meta.items():
         if meta is not None and int(meta.get("v") or 0) == 2:
             continue
-        t_terms = topic_terms.get(sid, (set(), set()))
+        t_terms = topic_terms.get(sid, (set(), set(), set()))
         overlaps_fresh_topic = any(
-            _has_topic_overlap(t_terms, topic_terms.get(fsid, (set(), set())))
+            _has_topic_overlap(t_terms, topic_terms.get(fsid, (set(), set(), set())))
             for fsid in fresh_topic_sids
         )
         overlaps_recalled_qa = any(_has_topic_overlap(t_terms, q_terms) for _, _, _, q_terms in qa_entries)
         if max_qa_id > 0 and (overlaps_fresh_topic or overlaps_recalled_qa):
             stale_topic_sids.add(sid)
 
-    has_fresh_v2_topic = bool(fresh_topic_sids)
-
     # Build evolved topic/QA term sets for scoped note/yin demotion (prevents demoting unrelated yin/note).
-    fresh_topic_term_list = [topic_terms.get(sid, (set(), set())) for sid in fresh_topic_sids]
-    active_qa_terms: list[tuple[datetime | None, tuple[set[str], set[str]]]] = [
+    active_qa_terms: list[tuple[datetime | None, tuple[set[str], set[str], set[str]]]] = [
         (dt, q_terms)
         for qid, _, dt, q_terms in qa_entries
         if qid not in superseded_qa_ids
@@ -1457,8 +1517,10 @@ def apply_topic_v2_ranking_guard(
                 f"{getattr(hit, 'content', '') or getattr(hit, 'content_preview', '') or ''}"
             )
             derived_terms = _extract_association_terms(derived_text)
-            overlaps_fresh_topic = has_fresh_v2_topic and any(
-                _has_topic_overlap(derived_terms, ft_terms) for ft_terms in fresh_topic_term_list
+            overlaps_fresh_topic = any(
+                _has_topic_overlap(derived_terms, ft_terms)
+                and (dt is None or ft_dt is None or dt <= ft_dt)
+                for ft_dt, ft_terms in fresh_topic_info
             )
             overlaps_newer_qa = any(
                 _has_topic_overlap(derived_terms, q_terms)
@@ -1540,6 +1602,61 @@ def _get_state_dir_lock(state_dir: str | Path) -> threading.Lock:
         return lock
 
 
+@contextlib.contextmanager
+def _state_dir_file_lock(state_dir: Path):
+    """Best-effort advisory file lock serializing multi-process writers on the same state_dir."""
+    lock_path = state_dir / ".topic_v2.lock"
+    fh = None
+    locked = False
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+b")
+        if fh.tell() == 0 and lock_path.stat().st_size == 0:
+            fh.write(b"0")
+            fh.flush()
+        try:
+            import fcntl  # type: ignore
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            locked = True
+        except ImportError:
+            try:
+                import msvcrt  # type: ignore
+
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                locked = True
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        if fh is not None:
+            if locked:
+                try:
+                    import fcntl  # type: ignore
+
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except ImportError:
+                    try:
+                        import msvcrt  # type: ignore
+
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+
 def consolidate_pg_incremental(
     pg: Any,
     *,
@@ -1563,7 +1680,7 @@ def consolidate_pg_incremental(
     dossiers_path = root / "topic_v2_dossiers.json"
     dir_lock = _get_state_dir_lock(root)
 
-    with dir_lock:
+    with dir_lock, _state_dir_file_lock(root):
         last_qa_id = 0
         if state_path.is_file():
             try:
@@ -1572,18 +1689,14 @@ def consolidate_pg_incremental(
             except Exception:
                 last_qa_id = 0
 
-        consolidator = TopicConsolidatorV2(embed_fn=embed_fn, llm_fn=llm_fn)
-        dossiers = load_dossiers(dossiers_path)
-
-        # Re-embed persisted dossiers when embedding model fingerprint changed.
-        reembedded_dossiers: set[str] = set()
         eff_embed_model = str(embed_model or "").strip()
-        if eff_embed_model:
-            for d in dossiers:
-                if d.embed_model != eff_embed_model:
-                    d.embedding = embed_fn(d.embedding_text())
-                    d.embed_model = eff_embed_model
-                    reembedded_dossiers.add(d.topic_id)
+        consolidator = TopicConsolidatorV2(
+            embed_fn=embed_fn,
+            llm_fn=llm_fn,
+            embed_model=eff_embed_model,
+        )
+        dossiers = load_dossiers(dossiers_path)
+        reembedded_dossiers: set[str] = set()
 
         new_qas: list[dict[str, Any]] = []
         with _pg_conn_ctx(pg) as conn:
@@ -1639,6 +1752,19 @@ def consolidate_pg_incremental(
                         }
                     )
 
+        before_map = {d.topic_id: d.to_dict() for d in dossiers}
+
+        # Re-embed ALL loaded or freshly migrated legacy dossiers whose model fingerprint does
+        # not match the active model BEFORE consolidating new QAs or stamping PG metadata.
+        if eff_embed_model:
+            for d in dossiers:
+                if d.embed_model != eff_embed_model:
+                    new_emb = embed_fn(d.embedding_text())
+                    if new_emb:
+                        d.embedding = new_emb
+                        d.embed_model = eff_embed_model
+                        reembedded_dossiers.add(d.topic_id)
+
         if not new_qas and not reembedded_dossiers:
             return {
                 "dry_run": bool(dry_run),
@@ -1653,7 +1779,6 @@ def consolidate_pg_incremental(
                 "failed_qa_ids": [],
             }
 
-        before_map = {d.topic_id: d.to_dict() for d in dossiers}
         if new_qas:
             updated_dossiers, report = consolidator.consolidate_qa_stream(
                 new_qas,
@@ -1670,10 +1795,6 @@ def consolidate_pg_incremental(
                 max_qa_id=last_qa_id,
                 failed_qa_ids=(),
             )
-        if eff_embed_model:
-            for d in updated_dossiers:
-                if not d.embed_model:
-                    d.embed_model = eff_embed_model
         changed_dossiers = [
             d
             for d in updated_dossiers
@@ -1696,7 +1817,7 @@ def consolidate_pg_incremental(
                                 row = dossier.to_topic_row(embed_fn)
                                 emb = row.get("embedding")
                                 emb_str = "[" + ",".join(str(x) for x in emb) + "]" if emb is not None else None
-                                row_fp = str(eff_embed_model or row.get("embed_model") or "")
+                                row_fp = str(row.get("embed_model") or "")
                                 try:
                                     cur.execute(
                                         "INSERT INTO topics (topic_id, title, summary, body, keywords, status, embed_model, embedding, updated_at) "

@@ -829,3 +829,90 @@ def test_pg_p1_cross_topic_unrelated_yin_and_failed_qa_recovery(
     stale_note_sid = f"note:{_NOTE_PREFIX}stale_db"
     if stale_note_sid in hit_map:
         assert list(hit_map).index(db_topics[0]) < list(hit_map).index(stale_note_sid)
+
+
+def test_pg_r2_legacy_migration_reembeds_and_missing_action_retries(
+    pg_pool: PgPool, pg_store: PgEmbedStore, tmp_path: Path
+):
+    legacy_old_vec = _vec_literal([1.0] + [0.0] * 1023)
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            """
+            INSERT INTO public.topics (topic_id, title, summary, body, keywords, status, embedding, embed_model)
+            VALUES (%s, '缓存历史主题', '使用 Memcached-Legacy', '采用 Memcached-Legacy 作为缓存', ARRAY['Memcached-Legacy'], 'active', %s::vector, NULL)
+            """,
+            (_LEGACY_TOPIC_ID, legacy_old_vec),
+        )
+        lease.connection.commit()
+
+    t0 = datetime(2026, 11, 27, 12, 0, tzinfo=timezone.utc)
+    qa1 = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r2_missing_action",
+        session_id="sess_r2_1",
+        turn_id=1,
+        question="缓存方案怎么升级了？",
+        answer="正式废弃 Memcached-Legacy，改为 Dragonfly-Cluster-V2。",
+        ts=t0,
+    )
+
+    state_dir = tmp_path / "r2_state"
+    attempts = {"n": 0}
+
+    def missing_action_then_valid(messages):
+        attempts["n"] += 1
+        payload = json.loads(messages[-1]["content"])
+        if attempts["n"] == 1:
+            # Valid JSON without explicit action -> MUST fail cleanly and trigger retry on next run.
+            return json.dumps({"topic_title": "缓存方案", "claim_text": "Dragonfly-Cluster-V2"})
+        return json.dumps(
+            {
+                "action": "attach",
+                "target_topic_id": payload["candidate_topics"][0]["topic_id"],
+                "topic_title": "缓存历史主题",
+                "update_type": "evolve",
+                "claim_text": "改用 Dragonfly-Cluster-V2",
+                "replaces_text": "Memcached-Legacy",
+                "keywords": ["Dragonfly-Cluster-V2"],
+            }
+        )
+
+    out1 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=missing_action_then_valid,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="r2-fp-v2",
+    )
+    assert out1["failed_qa_ids"] == [qa1]
+    assert out1["new_last_qa_id"] == 0
+    # Legacy migrated topic must ALREADY have its vector recomputed before stamping r2-fp-v2!
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute(
+            "SELECT embed_model, embedding::text FROM public.topics WHERE topic_id = %s",
+            (_LEGACY_TOPIC_ID,),
+        )
+        mig_row = cur.fetchone()
+    assert mig_row is not None and mig_row[0] == "r2-fp-v2"
+    assert mig_row[1] != legacy_old_vec
+
+    # Retry succeeds and consumes qa1 cleanly
+    out2 = consolidate_pg_incremental(
+        pg_store,
+        embed_fn=_EMBED_FN,
+        llm_fn=missing_action_then_valid,
+        state_dir=state_dir,
+        dry_run=False,
+        embed_model="r2-fp-v2",
+    )
+    assert out2["failed_qa_ids"] == []
+    assert out2["new_last_qa_id"] == qa1
+    with pg_pool.lease() as lease:
+        cur = lease.connection.cursor()
+        cur.execute("SELECT body, embed_model FROM public.topics WHERE topic_id = %s", (_LEGACY_TOPIC_ID,))
+        final_row = cur.fetchone()
+    assert final_row is not None and final_row[1] == "r2-fp-v2"
+    assert "Dragonfly-Cluster-V2" in strip_topic_v2_header(final_row[0])

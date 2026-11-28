@@ -1297,7 +1297,7 @@ class V3Core:
         with self._core_lock:
             self._core_closed = True
             self._core_fenced = True
-        # 5. bounded LiveBuffer shutdown — remaining deadline
+        # 5. bounded LiveBuffer shutdown — remaining deadline (allow final post_flush to signal Topic V2 worker)
         if self._live_buffer:
             try:
                 remaining = max(0.0, deadline - time.monotonic())
@@ -1307,8 +1307,11 @@ class V3Core:
                     logger.warning("LiveBuffer shutdown skip: remaining=%.2fs no timeout support, bounded detach fenced", remaining)
             except Exception as e:
                 logger.warning("LiveBuffer shutdown failed: %s", _safe_err(e))
-        # 6. bounded Topic V2 background worker shutdown — remaining deadline
+        # 6. bounded Topic V2 background worker drain & shutdown — remaining deadline
         try:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining > 0 and getattr(self, "_topic_v2_worker", None) is not None:
+                self.wait_topic_v2_idle(timeout=min(remaining * 0.5, 0.5))
             remaining = max(0.0, deadline - time.monotonic())
             self._stop_topic_v2_worker(timeout=remaining)
         except Exception as e:
@@ -3662,6 +3665,9 @@ class V3Core:
         stop_ev = self._topic_v2_stop
         wake_ev = self._topic_v2_wake
         busy_ev = self._topic_v2_busy
+        max_batches_per_wake = 20
+        batch_size = 20
+        retry_base = float(getattr(self, "_topic_v2_retry_base_s", 2.0))
         while not stop_ev.is_set():
             if not wake_ev.wait(timeout=0.5):
                 continue
@@ -3669,10 +3675,32 @@ class V3Core:
                 busy_ev.set()
                 wake_ev.clear()
                 try:
-                    if not (getattr(self, "_core_closed", False) or getattr(self, "_core_fenced", False)):
-                        self.consolidate_topics_v2(dry_run=False, batch_limit=20)
-                except Exception as e:
-                    logger.warning("_topic_v2_worker consolidation error: %s", _safe_err(e)[:100])
+                    retry_attempt = 0
+                    batches = 0
+                    while not stop_ev.is_set() and not getattr(self, "_topic_v2_stop_requested", False):
+                        try:
+                            res = self.consolidate_topics_v2(dry_run=False, batch_limit=batch_size) or {}
+                        except Exception as e:
+                            logger.warning("_topic_v2_worker consolidation error: %s", _safe_err(e)[:100])
+                            if retry_attempt >= 2 or stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
+                                break
+                            retry_attempt += 1
+                            continue
+                        failed_qas = res.get("failed_qa_ids") or []
+                        if failed_qas:
+                            if retry_attempt >= 2 or stop_ev.wait(timeout=retry_base * (2 ** retry_attempt)):
+                                break
+                            retry_attempt += 1
+                            continue
+                        retry_attempt = 0
+                        batches += 1
+                        processed = int(res.get("processed_qas") or 0)
+                        if processed >= batch_size:
+                            if batches >= max_batches_per_wake:
+                                wake_ev.set()
+                                break
+                            continue
+                        break
                 finally:
                     busy_ev.clear()
 
@@ -3690,6 +3718,7 @@ class V3Core:
         return (wake_ev is None or not wake_ev.is_set()) and (busy_ev is None or not busy_ev.is_set())
 
     def _stop_topic_v2_worker(self, timeout: float = 0.5) -> None:
+        self._topic_v2_stop_requested = True
         stop_ev = getattr(self, "_topic_v2_stop", None)
         wake_ev = getattr(self, "_topic_v2_wake", None)
         worker = getattr(self, "_topic_v2_worker", None)
@@ -3707,7 +3736,7 @@ class V3Core:
         """
         if not items:
             return
-        if getattr(self, "_core_closed", False) or getattr(self, "_core_fenced", False):
+        if getattr(self, "_topic_v2_stop_requested", False) or getattr(self, "_core_fenced", False):
             return
         cfg_v2 = getattr(self, "_config", None) or getattr(self, "config", None)
         if not self._is_topic_v2_enabled(cfg_v2):

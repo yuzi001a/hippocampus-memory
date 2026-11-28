@@ -541,3 +541,437 @@ def test_p2_deterministic_skips_trivial_chitchat_noise_and_keeps_header_compact(
     assert len(hdr) < 260
     assert parse_topic_v2_header(hdr)["v"] == 2
     assert "<!-- topic_v2:" not in strip_topic_v2_header(f"{hdr}\nhello")
+
+
+# ---------------------------------------------------------------------------
+# Round-2 Review Fixes: P1-1, P1-2, P1-3 and P2-1..P2-4 regressions
+# ---------------------------------------------------------------------------
+
+def test_p1_1_llm_missing_action_or_invalid_update_type_fails_for_retry():
+    calls = {"11": 0, "12": 0}
+
+    def bad_then_good_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        qid = payload["qa_id"]
+        if qid == 10:
+            return json.dumps(
+                {
+                    "action": "create",
+                    "topic_title": "数据库连接池",
+                    "update_type": "add",
+                    "claim_text": "使用 PgBouncer",
+                    "keywords": ["PgBouncer"],
+                }
+            )
+        if qid == 11:
+            calls["11"] += 1
+            if calls["11"] == 1:
+                # Valid JSON but missing explicit "action" -> must NOT silently skip!
+                return json.dumps({"topic_title": "数据库连接池", "claim_text": "采用 PgBouncer"})
+            return json.dumps(
+                {
+                    "action": "attach",
+                    "target_topic_id": payload["candidate_topics"][0]["topic_id"],
+                    "topic_title": "数据库连接池",
+                    "update_type": "evolve",
+                    "claim_text": "改用 PgBouncer-V2",
+                    "replaces_text": "PgBouncer",
+                }
+            )
+        calls["12"] += 1
+        if calls["12"] == 1:
+            # Invalid update_type on create/attach -> must NOT silently downgrade to "add"!
+            return json.dumps(
+                {
+                    "action": "create",
+                    "topic_title": "日志",
+                    "update_type": "bogus_mode",
+                    "claim_text": "Loki",
+                }
+            )
+        return json.dumps({"action": "skip", "update_type": "skip"})
+
+    consolidator = TopicConsolidatorV2(embed_fn=_embed, llm_fn=bad_then_good_llm)
+    qas = [
+        {"id": 10, "timestamp": _utc(5), "question": "连接池?", "answer": "PgBouncer"},
+        {"id": 11, "timestamp": _utc(3), "question": "升级?", "answer": "PgBouncer-V2"},
+        {"id": 12, "timestamp": _utc(1), "question": "日志?", "answer": "Loki"},
+    ]
+    dossiers1, rep1 = consolidator.consolidate_qa_stream(qas)
+    assert rep1.max_qa_id == 10
+    assert rep1.failed_qa_ids == (11,)
+
+    # Retry QA 11 succeeds, then QA 12 fails on invalid update_type (watermark stops at 11).
+    dossiers2, rep2 = consolidator.consolidate_qa_stream(
+        [q for q in qas if q["id"] > rep1.max_qa_id], existing_dossiers=dossiers1
+    )
+    assert rep2.max_qa_id == 11
+    assert rep2.failed_qa_ids == (12,)
+
+    # Retry QA 12 returns explicit skip -> watermark advances cleanly to 12.
+    dossiers3, rep3 = consolidator.consolidate_qa_stream(
+        [q for q in qas if q["id"] > rep2.max_qa_id], existing_dossiers=dossiers2
+    )
+    assert rep3.failed_qa_ids == ()
+    assert rep3.max_qa_id == 12
+    assert "PgBouncer-V2" in dossiers3[0].render_current_body(include_header=False)
+
+
+def test_p1_2_same_platform_distinct_subtopics_not_demoted():
+    consolidator = TopicConsolidatorV2(embed_fn=_embed)
+    dossiers, _ = consolidator.consolidate_qa_stream(
+        [
+            {
+                "id": 100,
+                "timestamp": _utc(48),
+                "question": "PostgreSQL 连接池怎么配置？",
+                "answer": "PostgreSQL 连接池采用 PgBouncer 复用连接。",
+            },
+            {
+                "id": 105,
+                "timestamp": _utc(36),
+                "question": "Docker 容器如何编排部署？",
+                "answer": "Docker 生产部署使用 Compose 进行多服务编排。",
+            },
+            {
+                "id": 108,
+                "timestamp": _utc(24),
+                "question": "Hermes 消息路由规则是什么？",
+                "answer": "Hermes 消息路由按频道分发会话流量。",
+            },
+        ]
+    )
+    t_pg_pool = next(d for d in dossiers if d.last_evidence_qa_id == 100)
+    t_docker = next(d for d in dossiers if d.last_evidence_qa_id == 105)
+    t_hermes = next(d for d in dossiers if d.last_evidence_qa_id == 108)
+
+    scored = [
+        rp_mod.RecallHit(
+            source_id=f"topic_{t_pg_pool.topic_id}",
+            kind="topic",
+            title=t_pg_pool.title,
+            content=t_pg_pool.render_current_body(include_header=True),
+            content_preview=t_pg_pool.render_current_body(include_header=True)[:500],
+            rrf_score=0.050,
+            created_at=_utc(48),
+        ),
+        rp_mod.RecallHit(
+            source_id="qa_200",
+            kind="qa",
+            title="PostgreSQL 数据库备份用什么？",
+            content="PostgreSQL 全量增量备份与归档使用 WAL-G。",
+            content_preview="PostgreSQL 全量增量备份与归档使用 WAL-G。",
+            rrf_score=0.048,
+            created_at=_utc(2),
+        ),
+        rp_mod.RecallHit(
+            source_id=f"topic_{t_docker.topic_id}",
+            kind="topic",
+            title=t_docker.title,
+            content=t_docker.render_current_body(include_header=True),
+            content_preview=t_docker.render_current_body(include_header=True)[:500],
+            rrf_score=0.049,
+            created_at=_utc(36),
+        ),
+        rp_mod.RecallHit(
+            source_id="qa_201",
+            kind="qa",
+            title="Docker 网络隔离模式怎么选？",
+            content="Docker 宿主机直连网络改用 macvlan 网卡驱动。",
+            content_preview="Docker 宿主机直连网络改用 macvlan 网卡驱动。",
+            rrf_score=0.047,
+            created_at=_utc(2),
+        ),
+        rp_mod.RecallHit(
+            source_id=f"topic_{t_hermes.topic_id}",
+            kind="topic",
+            title=t_hermes.title,
+            content=t_hermes.render_current_body(include_header=True),
+            content_preview=t_hermes.render_current_body(include_header=True)[:500],
+            rrf_score=0.046,
+            created_at=_utc(24),
+        ),
+        rp_mod.RecallHit(
+            source_id="qa_202",
+            kind="qa",
+            title="Hermes 记忆插件开关在哪里配？",
+            content="Hermes 记忆存储插件通过 explicit_opt_in 启停。",
+            content_preview="Hermes 记忆存储插件通过 explicit_opt_in 启停。",
+            rrf_score=0.045,
+            created_at=_utc(1),
+        ),
+    ]
+    guard = apply_topic_v2_ranking_guard(scored, query="PostgreSQL Docker Hermes 当前配置")
+    assert guard["demoted_topics"] == 0, f"Shared platform name must not cross-demote distinct subtopics: {guard}"
+
+    # Verify a newer QA in the SAME subtopic (PostgreSQL 连接池) still marks t_pg_pool stale!
+    scored_same_subtopic = [
+        scored[0],
+        rp_mod.RecallHit(
+            source_id="qa_250",
+            kind="qa",
+            title="PostgreSQL 连接池改用什么？",
+            content="PostgreSQL 连接池改为内置连接池架构。",
+            content_preview="PostgreSQL 连接池改为内置连接池架构。",
+            rrf_score=0.040,
+            created_at=_utc(1),
+        ),
+    ]
+    guard_same = apply_topic_v2_ranking_guard(scored_same_subtopic, query="PostgreSQL 连接池现在用什么？")
+    assert guard_same["demoted_topics"] == 1
+
+
+def test_p1_3_first_time_legacy_migration_reembeds_before_stamping_fingerprint(tmp_path):
+    legacy_old_vec = [1.0] + [0.0] * 127
+    pg_rows: dict[str, tuple[str, list[float] | None]] = {}
+    embed_calls: list[str] = []
+
+    def tracking_embed(text: str) -> list[float]:
+        embed_calls.append(text)
+        return _embed(text)
+
+    class _FakeCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if q.startswith("select topic_id, title"):
+                self._rows = [
+                    (
+                        "legacy_t1",
+                        "调度系统",
+                        "使用 Cron-Worker-V1",
+                        "使用 Cron-Worker-V1 进行周期调度。",
+                        ["Cron-Worker-V1"],
+                        "active",
+                        legacy_old_vec,
+                        "",
+                    )
+                ]
+            elif "from qa_pairs" in q:
+                self._rows = []
+            elif q.startswith("insert into topics"):
+                tid, _t, _s, _b, _k, _st, fp, emb_str = params
+                pg_rows[tid] = (fp, json.loads(emb_str))
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _FakeConn:
+        autocommit = True
+
+        def cursor(self):
+            return _FakeCur()
+
+    class _FakePg:
+        def _connect(self):
+            return _FakeConn()
+
+        @contextlib.contextmanager
+        def lease(self, timeout=10.0):
+            yield _FakeConn()
+
+    res = consolidate_pg_incremental(
+        _FakePg(),
+        embed_fn=tracking_embed,
+        llm_fn=None,
+        state_dir=tmp_path,
+        dry_run=False,
+        embed_model="new-model-fp-v2",
+    )
+    assert res["upserted_topics"] == 1
+    assert len(embed_calls) >= 1, "Legacy migration must recompute vector when embed_model differs"
+    assert pg_rows["legacy_t1"][0] == "new-model-fp-v2"
+    assert pg_rows["legacy_t1"][1] != legacy_old_vec
+
+    # Failure guard: if embed_fn fails (returns []) during migration, fingerprint must stay unset.
+    sub_dir = tmp_path / "fail_embed"
+    pg_rows.clear()
+    res_fail = consolidate_pg_incremental(
+        _FakePg(),
+        embed_fn=lambda _txt: [],
+        llm_fn=None,
+        state_dir=sub_dir,
+        dry_run=False,
+        embed_model="new-model-fp-v2",
+    )
+    assert res_fail["upserted_topics"] == 0
+    assert pg_rows == {}
+    assert not (sub_dir / "topic_v2_dossiers.json").exists()
+
+
+def test_p2_1_newer_note_not_demoted_by_older_topic_v2():
+    consolidator = TopicConsolidatorV2(embed_fn=_embed)
+    dossiers, _ = consolidator.consolidate_qa_stream(
+        [
+            {
+                "id": 50,
+                "timestamp": "2026-11-20T08:00:00Z",
+                "question": "日志采集方案？",
+                "answer": "采用 Fluentd-Agent 采集容器日志。",
+            }
+        ]
+    )
+    topic = dossiers[0]
+    scored = [
+        rp_mod.RecallHit(
+            source_id=f"topic_{topic.topic_id}",
+            kind="topic",
+            title=topic.title,
+            content=topic.render_current_body(include_header=True),
+            content_preview=topic.render_current_body(include_header=True)[:500],
+            rrf_score=0.050,
+            created_at="2026-11-20T08:00:00Z",
+        ),
+        rp_mod.RecallHit(
+            source_id="note:v_newer",
+            kind="note",
+            title="最新日志采集观察",
+            content="观察结论：Fluentd-Agent 已在边缘集群灰度替换为 Vector。",
+            content_preview="观察结论：Fluentd-Agent 已在边缘集群灰度替换为 Vector。",
+            rrf_score=0.049,
+            created_at="2026-11-27T09:00:00Z",
+        ),
+        rp_mod.RecallHit(
+            source_id="note:v_older",
+            kind="note",
+            title="旧日志采集观察",
+            content="早期观察：Fluentd-Agent 正在测试中。",
+            content_preview="早期观察：Fluentd-Agent 正在测试中。",
+            rrf_score=0.048,
+            created_at="2026-11-15T09:00:00Z",
+        ),
+    ]
+    guard = apply_topic_v2_ranking_guard(scored, query="日志采集方案现在怎样？")
+    assert "note:v_newer" not in guard["demoted_sids"]
+    assert scored[1].rrf_score == 0.049
+    assert "note:v_older" in guard["demoted_sids"]
+
+
+def test_p2_2_chain_recall_backfills_after_filtering_superseded_entries(monkeypatch):
+    header = (
+        '<!-- topic_v2:{"v":2,"last_qa":20,"last_at":"2026-11-28T01:00:00Z",'
+        '"active_qas":[20],"superseded_qas":[10,11]} -->'
+    )
+    seen_entry_queries: list[tuple[str, Any]] = []
+
+    class _FakeCur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "from topics" in q and "select embedding" in q:
+                self._rows = [(json.dumps(_embed("调度")),)]
+            elif "from topics" in q:
+                self._rows = [
+                    ("tv2_sched", "调度器", f"{header}\n- 当前结论：Event-Scheduler-V2", 0.92, f"{header}\n- 当前结论：Event-Scheduler-V2"),
+                ]
+            elif "from topic_entries" in q:
+                seen_entry_queries.append((q, params))
+                all_rows = [
+                    ("tv2_sched", "旧方案1", "Cron-Worker-V1", 0.95, 10),
+                    ("tv2_sched", "旧方案2", "Cron-Worker-V1.5", 0.93, 11),
+                    ("tv2_sched", "当前方案", "Event-Scheduler-V2", 0.89, 20),
+                ]
+                if "source_qa_id = any" in q:
+                    excl = set(params[2] or [])
+                    lim = int(params[-1])
+                    self._rows = [r for r in all_rows if r[4] not in excl][:lim]
+                else:
+                    lim = int(params[-1])
+                    self._rows = all_rows[:lim]
+
+        def fetchall(self):
+            return list(self._rows)
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCur()
+
+        def close(self):
+            pass
+
+    class _FakePg:
+        def _connect(self):
+            return _FakeConn()
+
+    monkeypatch.setattr(rp_mod, "_pg_is_connected", lambda pg, deadline=None: True)
+    out = rp_mod.chain_recall(
+        "现在定时任务用什么？",
+        pg=_FakePg(),
+        q_emb=_embed("定时任务"),
+        traces_per_card=2,
+        config={"prefetch": {"topic_v2_mode": True}},
+    )
+    assert seen_entry_queries and "source_qa_id = any" in seen_entry_queries[0][0]
+    traces = out["traces"]["tv2_sched"]
+    assert [t["source_qa_id"] for t in traces] == [20]
+
+
+def test_p2_3_async_worker_drains_backlog_retries_and_shutdown_flushes(monkeypatch):
+    import v3core
+    from v3core.config_model import from_legacy_dict
+
+    core = v3core.V3Core.__new__(v3core.V3Core)
+    core._config = from_legacy_dict({})
+    core._topic_v2_retry_base_s = 0.01
+
+    state = {"remaining": 45, "failed_once": False, "calls": 0}
+
+    def fake_consolidate(*, dry_run=False, batch_limit=20, **kw):
+        state["calls"] += 1
+        if state["calls"] == 1 and not state["failed_once"]:
+            state["failed_once"] = True
+            return {"processed_qas": 1, "failed_qa_ids": [99]}
+        take = min(batch_limit, state["remaining"])
+        state["remaining"] -= take
+        return {"processed_qas": take, "failed_qa_ids": []}
+
+    monkeypatch.setattr(core, "consolidate_topics_v2", fake_consolidate)
+
+    core._on_live_flush([("sess", "m1", "msg", "user")])
+    assert core.wait_topic_v2_idle(timeout=3.0)
+    assert state["remaining"] == 0, "Worker must keep draining full batches & retry transient failures"
+
+    # Simulate LiveBuffer final flush during shutdown path before _stop_topic_v2_worker runs.
+    state["remaining"] = 5
+    core._core_closed = True
+    core._on_live_flush([("sess", "m2", "msg", "user")])
+    assert core.wait_topic_v2_idle(timeout=2.0)
+    assert state["remaining"] == 0
+    core._stop_topic_v2_worker(timeout=1.0)
+
+
+def test_p2_4_deterministic_preserves_short_user_directives():
+    consolidator = TopicConsolidatorV2(embed_fn=_embed)
+    dossiers, report = consolidator.consolidate_qa_stream(
+        [
+            {"id": 1, "timestamp": _utc(4), "question": "偏好", "answer": "不要用表格。"},
+            {"id": 2, "timestamp": _utc(3), "question": "语言", "answer": "以后用中文回答。"},
+            {"id": 3, "timestamp": _utc(2), "question": "权限", "answer": "不要自动发邮件。"},
+            {"id": 4, "timestamp": _utc(1), "question": "收到？", "answer": "好的！"},
+        ]
+    )
+    assert report.created_topics == 3
+    assert report.skipped_qas == 1
+    combined = "\n".join(d.render_current_body(include_header=False) for d in dossiers)
+    assert "不要用表格" in combined
+    assert "以后用中文回答" in combined
+    assert "不要自动发邮件" in combined

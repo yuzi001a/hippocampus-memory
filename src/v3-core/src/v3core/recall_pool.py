@@ -4454,7 +4454,7 @@ def _trim(s, n=200):
     return s[:n].strip()
 
 
-def _chain_search_by_embedding(pg, emb, table, kind, limit):
+def _chain_search_by_embedding(pg, emb, table, kind, limit, exclude_qa_ids=None):
     """Search the current chain tables and return compact vector hits.
 
     ``topics`` supplies the anchor/card layer and ``topic_entries`` supplies
@@ -4462,6 +4462,8 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
     """
     if not pg or not emb:
         return []
+    excluded_list = [int(x) for x in (exclude_qa_ids or [])]
+    excluded_set = set(excluded_list)
     if table == "topics":
         # topics 是观察者链的唯一锚点/主题卡索引
         sql = (
@@ -4472,25 +4474,40 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
             " FROM topics WHERE status='active' AND embedding IS NOT NULL"
             " ORDER BY embedding <=> %s::vector LIMIT %s"
         )
+        sql_params = (chr(34), None, None, limit)
     elif table == "topic_entries":
         # 2026-08-06: chain traces 用 topic_entries (QA 原文 + embedding)
-        sql = (
-            "SELECT topic_id, LEFT(COALESCE(question, %s), 200),"
-            " LEFT(COALESCE(question, '') || ' ' || COALESCE(answer, ''), 500),"
-            " 1 - (embedding <=> %s::vector) AS cosine,"
-            " source_qa_id"
-            " FROM topic_entries WHERE embedding IS NOT NULL"
-            " ORDER BY embedding <=> %s::vector LIMIT %s"
-        )
+        if excluded_list:
+            sql = (
+                "SELECT topic_id, LEFT(COALESCE(question, %s), 200),"
+                " LEFT(COALESCE(question, '') || ' ' || COALESCE(answer, ''), 500),"
+                " 1 - (embedding <=> %s::vector) AS cosine,"
+                " source_qa_id"
+                " FROM topic_entries WHERE embedding IS NOT NULL"
+                " AND (source_qa_id IS NULL OR NOT (source_qa_id = ANY(%s)))"
+                " ORDER BY embedding <=> %s::vector LIMIT %s"
+            )
+            sql_params = (chr(34), None, excluded_list, None, limit + len(excluded_list))
+        else:
+            sql = (
+                "SELECT topic_id, LEFT(COALESCE(question, %s), 200),"
+                " LEFT(COALESCE(question, '') || ' ' || COALESCE(answer, ''), 500),"
+                " 1 - (embedding <=> %s::vector) AS cosine,"
+                " source_qa_id"
+                " FROM topic_entries WHERE embedding IS NOT NULL"
+                " ORDER BY embedding <=> %s::vector LIMIT %s"
+            )
+            sql_params = (chr(34), None, None, limit)
     else:
         return []
     emb_str = "[" + ",".join(str(x) for x in emb) + "]"
+    resolved_params = tuple(emb_str if p is None else p for p in sql_params)
     try:
         with _lease_pg_connection(pg) as conn:
             if not conn:
                 return []
             with conn.cursor() as cur:
-                cur.execute(sql, (chr(34), emb_str, emb_str, limit))
+                cur.execute(sql, resolved_params)
                 rows = cur.fetchall()
     except PrefetchDeadlineExceeded:
         raise
@@ -4499,6 +4516,12 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
         return []
     out = []
     for row in rows:
+        if kind == "entry" and len(row) > 4 and row[4] is not None and excluded_set:
+            try:
+                if int(row[4]) in excluded_set:
+                    continue
+            except (TypeError, ValueError):
+                pass
         # topics / topic_entries use the same compact result shape.
         item = {
             "source_id": row[0],
@@ -4513,6 +4536,8 @@ def _chain_search_by_embedding(pg, emb, table, kind, limit):
             elif kind == "entry":
                 item["source_qa_id"] = row[4]
         out.append(item)
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -4650,18 +4675,14 @@ def chain_recall(query, pg=None, q_emb=None,
                     card_hits = fresh_cards + legacy_cards
 
             traces = {}
+            exclude_qas = sorted(tv2_superseded_qa_ids) if (tv2_enabled and not is_hist_query and tv2_superseded_qa_ids) else None
             for card in card_hits:
                 card_emb = _get_topic_embedding(pg, card["source_id"])
                 if not card_emb:
                     continue
                 msg_hits = _chain_search_by_embedding(
-                    pg, card_emb, "topic_entries", "entry", traces_per_card
+                    pg, card_emb, "topic_entries", "entry", traces_per_card, exclude_qa_ids=exclude_qas
                 )
-                if tv2_enabled and not is_hist_query and tv2_superseded_qa_ids and msg_hits:
-                    msg_hits = [
-                        m for m in msg_hits
-                        if m.get("source_qa_id") is None or int(m["source_qa_id"]) not in tv2_superseded_qa_ids
-                    ]
                 if msg_hits:
                     traces[card["source_id"]] = msg_hits
 
