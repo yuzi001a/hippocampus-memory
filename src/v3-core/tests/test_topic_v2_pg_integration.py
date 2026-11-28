@@ -924,17 +924,26 @@ def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
 ):
     from v3core.recall_pool import recall_pool as _rp_call
 
+    t_old = datetime(2026, 11, 10, 8, 0, tzinfo=timezone.utc)
     t_topic = datetime(2026, 11, 20, 8, 0, tzinfo=timezone.utc)
-    t_old = datetime(2026, 11, 15, 8, 0, tzinfo=timezone.utc)
     t_new = datetime(2026, 11, 27, 10, 0, tzinfo=timezone.utc)
 
-    _insert_qa(
+    qid_old = _insert_qa(
+        pg_pool,
+        source_id=f"{_QA_PREFIX}r3_log_0",
+        session_id="sess_r3_log",
+        turn_id=1,
+        question="日志采集最初用什么方案？",
+        answer="日志采集系统早期采用 Syslog-Legacy 方案。",
+        ts=t_old,
+    )
+    qid_cur = _insert_qa(
         pg_pool,
         source_id=f"{_QA_PREFIX}r3_log_1",
         session_id="sess_r3_log",
-        turn_id=1,
-        question="日志采集方案是什么？",
-        answer="日志采集系统当前选用 Fluentd-Legacy 方案。",
+        turn_id=2,
+        question="日志采集方案现在是什么？",
+        answer="正式废弃 Syslog-Legacy，改为 Fluentd-Current 方案。",
         ts=t_topic,
     )
     consolidate_pg_incremental(
@@ -946,29 +955,33 @@ def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
         embed_model="r3-fp",
     )
 
-    emb_log = _vec_literal(_EMBED_FN("日志采集 Fluentd-Legacy 灰度验证"))
+    emb_log = _vec_literal(_EMBED_FN("日志采集 Fluentd-Current 灰度验证"))
     with pg_pool.lease() as lease:
         cur = lease.connection.cursor()
         cur.execute(
             """
-            INSERT INTO public.observation_notes (version, content, embedding, embed_model, created_at)
-            VALUES (%s, %s, %s::vector, 'bge-m3', %s::timestamptz)
+            INSERT INTO public.observation_notes (version, content, source_qa_range, embedding, embed_model, created_at)
+            VALUES (%s, %s, int8range(%s, %s), %s::vector, 'bge-m3', %s::timestamptz)
             """,
             (
                 f"{_NOTE_PREFIX}r3_new",
-                "最新观察：日志采集 Fluentd-Legacy 已安排近期切换 Vector 节点。",
+                "最新观察：日志采集 Fluentd-Current 已安排近期切换 Vector 节点。",
+                qid_old,
+                qid_cur + 1,
                 emb_log,
                 t_new.isoformat(),
             ),
         )
         cur.execute(
             """
-            INSERT INTO public.observation_notes (version, content, embedding, embed_model, created_at)
-            VALUES (%s, %s, %s::vector, 'bge-m3', %s::timestamptz)
+            INSERT INTO public.observation_notes (version, content, source_qa_range, embedding, embed_model, created_at)
+            VALUES (%s, %s, int8range(%s, %s), %s::vector, 'bge-m3', %s::timestamptz)
             """,
             (
                 f"{_NOTE_PREFIX}r3_old",
-                "早期观察：日志采集 Fluentd-Legacy 初版调研中。",
+                "早期观察：日志采集 Syslog-Legacy 初版调研中。",
+                qid_old,
+                qid_old + 1,
                 emb_log,
                 t_old.isoformat(),
             ),
@@ -980,7 +993,7 @@ def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
             """,
             (
                 f"{_NOTE_PREFIX}y_new",
-                "长期经验：日志采集 Fluentd-Legacy 需要结构化字段统一。",
+                "长期经验：日志采集 Fluentd-Current 需要结构化字段统一。",
                 emb_log,
                 t_new.isoformat(),
             ),
@@ -989,9 +1002,9 @@ def test_pg_r3_newer_note_and_yin_preserved_via_real_prefetch(
 
     cfg = _default_pg_dict_config(tmp_path)
     hits, _rp_meta = _rp_call(
-        "日志采集 Fluentd-Legacy 最新情况？",
+        "日志采集 Fluentd-Current 最新情况？",
         pg=pg_store,
-        q_emb=_EMBED_FN("日志采集 Fluentd-Legacy"),
+        q_emb=_EMBED_FN("日志采集 Fluentd-Current"),
         include_keyword=True,
         include_topic=True,
         include_yin=True,

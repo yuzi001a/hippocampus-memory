@@ -91,12 +91,16 @@ def test_p1_rerank_cannot_overturn_topic_v2_freshness_guard(monkeypatch):
         rrf_score=0.05,
         created_at=_utc(48),
     )
-    stale_legacy_topic = rp_mod.RecallHit(
-        source_id="topic_legacy_cron",
+    stale_topic_header = (
+        '<!-- topic_v2:{"v":2,"last_qa":10,"last_at":"2026-11-26T00:00:00Z",'
+        '"active_qas":[10],"superseded_qas":[]} -->'
+    )
+    stale_topic = rp_mod.RecallHit(
+        source_id="topic_tv2_old_cron_10",
         kind="topic",
         title="定时任务调度",
-        content="旧主题结论：当前仍建议继续使用 Cron-Worker-V1 进行轮询调度。",
-        content_preview="旧主题结论：当前仍建议继续使用 Cron-Worker-V1 进行轮询调度。",
+        content=f"{stale_topic_header}\n- 当前结论：使用 Cron-Worker-V1 进行轮询调度。",
+        content_preview=f"{stale_topic_header}\n- 当前结论：使用 Cron-Worker-V1 进行轮询调度。",
         rrf_score=0.06,
         created_at=_utc(48),
     )
@@ -119,18 +123,18 @@ def test_p1_rerank_cannot_overturn_topic_v2_freshness_guard(monkeypatch):
         created_at=_utc(1),
     )
 
-    scored = [superseded_qa, stale_legacy_topic, fresh_topic, active_qa]
+    scored = [superseded_qa, stale_topic, fresh_topic, active_qa]
     guard = apply_topic_v2_ranking_guard(scored, query="现在定时任务采用什么方案？")
-    assert set(guard["demoted_sids"]) == {"qa_10", "topic_legacy_cron"}
+    assert set(guard["demoted_sids"]) == {"qa_10", "topic_tv2_old_cron_10"}
 
-    # Simulate Rerank returning higher cosine for stale legacy & superseded QA than active hits!
+    # Simulate Rerank returning higher cosine for stale topic & superseded QA than active hits!
     for h in scored:
-        if h.source_id in ("qa_10", "topic_legacy_cron"):
+        if h.source_id in ("qa_10", "topic_tv2_old_cron_10"):
             h.cosine = 0.99
         else:
             h.cosine = 0.72
     reranked_raw = sorted(scored, key=lambda h: -h.cosine)
-    assert reranked_raw[0].source_id in ("qa_10", "topic_legacy_cron")
+    assert reranked_raw[0].source_id in ("qa_10", "topic_tv2_old_cron_10")
 
     enforced = enforce_topic_v2_post_rerank_order(
         reranked_raw,
@@ -143,7 +147,7 @@ def test_p1_rerank_cannot_overturn_topic_v2_freshness_guard(monkeypatch):
         "qa_20",
     }
     assert enforced_ids.index("qa_20") < enforced_ids.index("qa_10")
-    assert enforced_ids.index("topic_tv2_sched_20") < enforced_ids.index("topic_legacy_cron")
+    assert enforced_ids.index("topic_tv2_sched_20") < enforced_ids.index("topic_tv2_old_cron_10")
 
 
 # ---------------------------------------------------------------------------
@@ -156,10 +160,16 @@ def test_p1_cross_topic_isolation_and_scoped_yin_note_demotion():
     dossiers, _ = consolidator.consolidate_qa_stream(
         [
             {
+                "id": 90,
+                "timestamp": _utc(96),
+                "question": "数据库连接池最初用什么？",
+                "answer": "早期采用 DirectConn-V0 直连模式。",
+            },
+            {
                 "id": 100,
                 "timestamp": _utc(72),
-                "question": "数据库连接池采用什么？",
-                "answer": "PostgreSQL 使用 PgBouncer 连接池。",
+                "question": "数据库连接池现在采用什么？",
+                "answer": "正式废弃 DirectConn-V0，改为 PgBouncer 连接池。",
             },
             {
                 "id": 200,
@@ -170,7 +180,7 @@ def test_p1_cross_topic_isolation_and_scoped_yin_note_demotion():
         ]
     )
     topic_a = next(d for d in dossiers if d.last_evidence_qa_id == 100)
-    topic_b = next(d for d in dossiers if d.last_evidence_qa_id == 200)
+    assert 90 in topic_a.superseded_qa_ids()
 
     hit_topic_a = rp_mod.RecallHit(
         source_id=f"topic_{topic_a.topic_id}",
@@ -184,9 +194,9 @@ def test_p1_cross_topic_isolation_and_scoped_yin_note_demotion():
     hit_qa_100 = rp_mod.RecallHit(
         source_id="qa_100",
         kind="qa",
-        title="数据库连接池采用什么？",
-        content="PostgreSQL 使用 PgBouncer 连接池。",
-        content_preview="PostgreSQL 使用 PgBouncer 连接池。",
+        title="数据库连接池现在采用什么？",
+        content="正式废弃 DirectConn-V0，改为 PgBouncer 连接池。",
+        content_preview="正式废弃 DirectConn-V0，改为 PgBouncer 连接池。",
         rrf_score=0.048,
         created_at=_utc(72),
     )
@@ -212,21 +222,40 @@ def test_p1_cross_topic_isolation_and_scoped_yin_note_demotion():
         source_id="note:v_db_old",
         kind="note",
         title="数据库连接池旧观察笔记",
-        content="早期观察：PostgreSQL 暂未部署 PgBouncer 连接池。",
-        content_preview="早期观察：PostgreSQL 暂未部署 PgBouncer 连接池。",
+        content="早期观察：PostgreSQL 暂未部署 PgBouncer 连接池，沿用 DirectConn-V0。",
+        content_preview="早期观察：PostgreSQL 暂未部署 PgBouncer 连接池，沿用 DirectConn-V0。",
         rrf_score=0.047,
-        created_at=_utc(120),
+        created_at=_utc(90),
+        source_qa_range="[90,95)",
+    )
+    hit_unlinked_note = rp_mod.RecallHit(
+        source_id="note:v_unlinked",
+        kind="note",
+        title="数据库监控观察笔记",
+        content="PostgreSQL PgBouncer 指标采集正常。",
+        content_preview="PostgreSQL PgBouncer 指标采集正常。",
+        rrf_score=0.046,
+        created_at=_utc(90),
+        source_qa_range=None,
     )
 
-    scored = [hit_topic_a, hit_qa_100, hit_qa_200, hit_unrelated_yin, hit_related_stale_note]
+    scored = [
+        hit_topic_a,
+        hit_qa_100,
+        hit_qa_200,
+        hit_unrelated_yin,
+        hit_related_stale_note,
+        hit_unlinked_note,
+    ]
     guard = apply_topic_v2_ranking_guard(scored, query="PostgreSQL PgBouncer 连接池现在配置如何？")
 
     assert guard["demoted_topics"] == 0, "Topic A must NOT be demoted by unrelated QA 200"
     assert hit_topic_a.rrf_score == 0.050
     assert "yin:v1" not in guard["demoted_sids"], "Unrelated long-term yin must NOT be demoted"
     assert hit_unrelated_yin.rrf_score == 0.049
-    assert "note:v_db_old" in guard["demoted_sids"], "Related stale note mentioning PgBouncer MUST be demoted"
+    assert "note:v_db_old" in guard["demoted_sids"], "Stale note with explicit superseded source_qa_range MUST be demoted"
     assert hit_related_stale_note.rrf_score < hit_topic_a.rrf_score
+    assert "note:v_unlinked" not in guard["demoted_sids"], "Note without explicit supersession provenance must NOT be demoted by keywords"
 
 
 # ---------------------------------------------------------------------------
@@ -704,8 +733,9 @@ def test_p1_2_same_platform_distinct_subtopics_not_demoted():
     guard = apply_topic_v2_ranking_guard(scored, query="PostgreSQL Docker Hermes 当前配置")
     assert guard["demoted_topics"] == 0, f"Shared platform name must not cross-demote distinct subtopics: {guard}"
 
-    # Verify a newer QA in the SAME subtopic (PostgreSQL 连接池) still marks t_pg_pool stale!
-    scored_same_subtopic = [
+    # Verify recall NEVER guesses topic membership from unconsolidated QAs via keywords:
+    # both Topic V2 and the unconsolidated newer QA stay un-demoted until LLM establishes supersession.
+    scored_unconsolidated = [
         scored[0],
         rp_mod.RecallHit(
             source_id="qa_250",
@@ -717,8 +747,11 @@ def test_p1_2_same_platform_distinct_subtopics_not_demoted():
             created_at=_utc(1),
         ),
     ]
-    guard_same = apply_topic_v2_ranking_guard(scored_same_subtopic, query="PostgreSQL 连接池现在用什么？")
-    assert guard_same["demoted_topics"] == 1
+    guard_unconsolidated = apply_topic_v2_ranking_guard(
+        scored_unconsolidated, query="PostgreSQL 连接池现在用什么？"
+    )
+    assert guard_unconsolidated["demoted_topics"] == 0
+    assert "qa_250" not in guard_unconsolidated["demoted_sids"]
 
 
 def test_p1_3_first_time_legacy_migration_reembeds_before_stamping_fingerprint(tmp_path):
@@ -812,14 +845,21 @@ def test_p2_1_newer_note_not_demoted_by_older_topic_v2():
     dossiers, _ = consolidator.consolidate_qa_stream(
         [
             {
+                "id": 40,
+                "timestamp": "2026-11-10T08:00:00Z",
+                "question": "日志采集最初用什么？",
+                "answer": "早期使用 Syslog-V0 采集日志。",
+            },
+            {
                 "id": 50,
                 "timestamp": "2026-11-20T08:00:00Z",
                 "question": "日志采集方案？",
-                "answer": "采用 Fluentd-Agent 采集容器日志。",
-            }
+                "answer": "正式废弃 Syslog-V0，改为 Fluentd-Agent 采集容器日志。",
+            },
         ]
     )
     topic = dossiers[0]
+    assert 40 in topic.superseded_qa_ids()
     scored = [
         rp_mod.RecallHit(
             source_id=f"topic_{topic.topic_id}",
@@ -838,15 +878,17 @@ def test_p2_1_newer_note_not_demoted_by_older_topic_v2():
             content_preview="观察结论：Fluentd-Agent 已在边缘集群灰度替换为 Vector。",
             rrf_score=0.049,
             created_at="2026-11-27T09:00:00Z",
+            source_qa_range="[40,60)",
         ),
         rp_mod.RecallHit(
             source_id="note:v_older",
             kind="note",
             title="旧日志采集观察",
-            content="早期观察：Fluentd-Agent 正在测试中。",
-            content_preview="早期观察：Fluentd-Agent 正在测试中。",
+            content="早期观察：Syslog-V0 正在测试中。",
+            content_preview="早期观察：Syslog-V0 正在测试中。",
             rrf_score=0.048,
             created_at="2026-11-15T09:00:00Z",
+            source_qa_range="[40,45)",
         ),
     ]
     guard = apply_topic_v2_ranking_guard(scored, query="日志采集方案现在怎样？")
@@ -997,10 +1039,17 @@ def test_r3_p1_1_plain_english_and_cjk_subtopics_do_not_cross_demote():
                 "question": "Python 用户认证采用什么方案？",
                 "answer": "Python 用户认证采用独立令牌验证机制。",
             },
+            {
+                "id": 320,
+                "timestamp": _utc(30),
+                "question": "人工智能 OPC 社区建设的目标是什么？",
+                "answer": "人工智能 OPC 社区建设聚焦开源生态与开发者协作。",
+            },
         ]
     )
     t_pg = next(d for d in dossiers if d.last_evidence_qa_id == 300)
     t_py = next(d for d in dossiers if d.last_evidence_qa_id == 310)
+    t_ai = next(d for d in dossiers if d.last_evidence_qa_id == 320)
 
     scored_cross = [
         rp_mod.RecallHit(
@@ -1039,25 +1088,124 @@ def test_r3_p1_1_plain_english_and_cjk_subtopics_do_not_cross_demote():
             rrf_score=0.047,
             created_at=_utc(1),
         ),
-    ]
-    guard_cross = apply_topic_v2_ranking_guard(scored_cross, query="PostgreSQL Python 当前配置")
-    assert guard_cross["demoted_topics"] == 0, f"Plain English/CJK generic words caused false cross-demotion: {guard_cross}"
-
-    # Verify same sub-topic with >=2 concrete domain terms ("connection" + "pool") still marks stale.
-    scored_same = [
-        scored_cross[0],
         rp_mod.RecallHit(
-            source_id="qa_450",
+            source_id=f"topic_{t_ai.topic_id}",
+            kind="topic",
+            title=t_ai.title,
+            content=t_ai.render_current_body(include_header=True),
+            content_preview=t_ai.render_current_body(include_header=True)[:500],
+            rrf_score=0.051,
+            created_at=_utc(30),
+        ),
+        rp_mod.RecallHit(
+            source_id="qa_420",
             kind="qa",
-            title="PostgreSQL connection pool tuning?",
-            content="PostgreSQL connection pool sizing upgraded to 64 max workers.",
-            content_preview="PostgreSQL connection pool sizing upgraded to 64 max workers.",
-            rrf_score=0.042,
+            title="人工智能模型部署架构怎么选？",
+            content="人工智能模型部署采用多卡推理集群与动态批处理。",
+            content_preview="人工智能模型部署采用多卡推理集群与动态批处理。",
+            rrf_score=0.046,
             created_at=_utc(1),
         ),
     ]
-    guard_same = apply_topic_v2_ranking_guard(scored_same, query="PostgreSQL connection pool")
-    assert guard_same["demoted_topics"] == 1
+    guard_cross = apply_topic_v2_ranking_guard(scored_cross, query="PostgreSQL Python 人工智能 当前配置")
+    assert guard_cross["demoted_topics"] == 0, f"Unrelated topics must NEVER cross-demote: {guard_cross}"
+
+    # Verify LLM-driven evolution (Python 认证 Session -> JWT) uses explicit claim_id + superseded_qas
+    # rather than read-side lexical overlap guessing.
+    llm_calls: list[dict] = []
+
+    def _auth_llm(messages):
+        payload = json.loads(messages[-1]["content"])
+        llm_calls.append(payload)
+        if payload["qa_id"] == 501:
+            return json.dumps(
+                {
+                    "action": "create",
+                    "target_topic_id": "",
+                    "topic_title": "Python 认证方案",
+                    "update_type": "add",
+                    "claim_text": "Python 认证使用 Session",
+                    "replaces_text": "",
+                    "reason": "",
+                    "keywords": ["Python", "认证", "Session"],
+                },
+                ensure_ascii=False,
+            )
+        cand = payload["candidate_topics"][0]
+        old_cid = cand["active_claims"][0]["claim_id"]
+        return json.dumps(
+            {
+                "action": "attach",
+                "target_topic_id": cand["topic_id"],
+                "topic_title": "Python 认证方案",
+                "update_type": "evolve",
+                "claim_text": "Python 认证改用 JWT",
+                "replaces_claim_ids": [old_cid],
+                "replaces_text": "Session",
+                "reason": "无状态扩展需求",
+                "keywords": ["Python", "认证", "JWT"],
+            },
+            ensure_ascii=False,
+        )
+
+    llm_consolidator = TopicConsolidatorV2(embed_fn=_embed, llm_fn=_auth_llm)
+    auth_dossiers, auth_rep = llm_consolidator.consolidate_qa_stream(
+        [
+            {
+                "id": 501,
+                "timestamp": _utc(48),
+                "question": "Python 认证用什么？",
+                "answer": "Python 认证使用 Session。",
+            },
+            {
+                "id": 502,
+                "timestamp": _utc(1),
+                "question": "Python 认证方案有调整吗？",
+                "answer": "我们决定改成 JWT 认证。",
+            },
+        ]
+    )
+    assert len(auth_dossiers) == 1
+    assert auth_rep.superseded_claims == 1
+    auth_topic = auth_dossiers[0]
+    assert auth_topic.active_qa_ids() == [502]
+    assert auth_topic.superseded_qa_ids() == [501]
+    assert any("JWT" in c.text for c in auth_topic.current_claims)
+    assert any("Session" in s.text for s in auth_topic.superseded_claims)
+
+    scored_auth = [
+        rp_mod.RecallHit(
+            source_id=f"topic_{auth_topic.topic_id}",
+            kind="topic",
+            title=auth_topic.title,
+            content=auth_topic.render_current_body(include_header=True),
+            content_preview=auth_topic.render_current_body(include_header=True)[:500],
+            rrf_score=0.050,
+            created_at=_utc(1),
+        ),
+        rp_mod.RecallHit(
+            source_id="qa_501",
+            kind="qa",
+            title="Python 认证用什么？",
+            content="Python 认证使用 Session。",
+            content_preview="Python 认证使用 Session。",
+            rrf_score=0.055,
+            created_at=_utc(48),
+        ),
+        rp_mod.RecallHit(
+            source_id="qa_502",
+            kind="qa",
+            title="Python 认证方案有调整吗？",
+            content="我们决定改成 JWT 认证。",
+            content_preview="我们决定改成 JWT 认证。",
+            rrf_score=0.052,
+            created_at=_utc(1),
+        ),
+    ]
+    guard_auth = apply_topic_v2_ranking_guard(scored_auth, query="Python 认证现在用什么？")
+    assert guard_auth["demoted_sids"] == ["qa_501"]
+    assert scored_auth[1].rrf_score < scored_auth[0].rrf_score
+    assert scored_auth[1].rrf_score < scored_auth[2].rrf_score
 
 
 def test_r3_p1_2_real_recall_note_and_yin_propagate_created_at_and_protect_newer(monkeypatch):
@@ -1068,18 +1216,20 @@ def test_r3_p1_2_real_recall_note_and_yin_propagate_created_at_and_protect_newer
     ts_topic = "2026-11-20T08:00:00Z"
     ts_newer = datetime(2026, 11, 27, 9, 0, tzinfo=timezone.utc)
 
-    # 1. Verify _merge_observation_note_hits propagates created_at onto RecallHit
+    # 1. Verify _merge_observation_note_hits propagates created_at AND source_qa_range onto RecallHit
     merged_hits = rp_mod._merge_observation_note_hits(
         [
-            (101, "v_new", "日志采集边缘集群已灰度切换到 Vector", 0.92, ts_newer),
-            (100, "v_old", "日志采集早期仍在评估方案", 0.85, ts_old_note),
+            (101, "v_new", "日志采集边缘集群已灰度切换到 Vector", 0.92, ts_newer, "[40,60)"),
+            (100, "v_old", "日志采集早期仍在评估方案", 0.85, ts_old_note, "[40,45)"),
         ],
         [],
         limit=5,
     )
     by_sid = {h.source_id: h for h in merged_hits}
     assert by_sid["note:v_new"].created_at == ts_newer.isoformat()
+    assert by_sid["note:v_new"].source_qa_range == "[40,60)"
     assert by_sid["note:v_old"].created_at == ts_old_note.isoformat()
+    assert by_sid["note:v_old"].source_qa_range == "[40,45)"
 
     # 2. Verify yin_pool.search_yin propagates created_at
     class _YinCur:
@@ -1108,9 +1258,10 @@ def test_r3_p1_2_real_recall_note_and_yin_propagate_created_at_and_protect_newer
     assert yin_res[0]["created_at"] == ts_newer.isoformat()
 
     # 3. End-to-end recall_pool -> real apply_topic_v2_ranking_guard (NO hand-built RecallHits)
+    # Also validates P2-1 fix: tz-aware TIMESTAMPTZ created_at applies real UTC half-life decay cleanly.
     topic_header = (
         '<!-- topic_v2:{"v":2,"last_qa":50,"last_at":"2026-11-20T08:00:00Z",'
-        '"active_qas":[50],"superseded_qas":[],"kws":["Fluentd-Agent","日志采集"]} -->'
+        '"active_qas":[50],"superseded_qas":[40]} -->'
     )
 
     class _FakeTopicCur:
@@ -1127,8 +1278,8 @@ def test_r3_p1_2_real_recall_note_and_yin_propagate_created_at_and_protect_newer
             q = " ".join(str(sql).split()).lower()
             if "from observation_notes" in q:
                 self._rows = [
-                    (101, "v_new", "日志采集边缘集群已切换 Fluentd-Agent 灰度替代方案", 0.88, ts_newer),
-                    (100, "v_old", "早期观察日志采集使用 Fluentd-Agent", 0.86, ts_old_note),
+                    (101, "v_new", "日志采集边缘集群已切换 Fluentd-Agent 灰度替代方案", 0.88, ts_newer, "[40,60)"),
+                    (100, "v_old", "早期观察日志采集使用 Syslog-V0", 0.86, ts_old_note, "[40,45)"),
                 ]
             elif "from yin_paragraphs" in q:
                 self._rows = [("y_20261127", "logging", "Fluentd-Agent 日志采集近期实践记录", 0.89, ts_newer)]
@@ -1320,3 +1471,62 @@ def test_r3_p2_3_state_dir_file_lock_fails_closed_on_contention(tmp_path: Path):
             except Exception:
                 pass
         holder.close()
+
+
+def test_r4_p2_1_tz_aware_note_applies_utc_half_life_decay(monkeypatch):
+    """P2-1: TIMESTAMPTZ created_at on observation notes must not raise TypeError in time decay."""
+    now_utc = datetime.now(timezone.utc)
+    ts_fresh = now_utc - timedelta(days=1)
+    ts_old = now_utc - timedelta(days=90)
+
+    class _Cur:
+        def __init__(self):
+            self._rows = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            q = " ".join(str(sql).split()).lower()
+            if "from observation_notes" in q:
+                # Give the older note a slightly higher raw cosine so ONLY working half-life decay
+                # can push the fresher tz-aware note above the 90-day-old tz-aware note.
+                self._rows = [
+                    (201, "v_old_tz", "部署观察笔记：早期策略", 0.90, ts_old, None),
+                    (202, "v_fresh_tz", "部署观察笔记：最新策略", 0.88, ts_fresh, None),
+                ]
+            else:
+                self._rows = []
+
+        def fetchall(self):
+            return list(self._rows)
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            pass
+
+    class _Pg:
+        def _connect(self):
+            return _Conn()
+
+    monkeypatch.setattr(rp_mod, "_fetch_observation_child_candidates", lambda cur, emb_str, lim: [])
+    results, _meta = rp_mod.recall_pool(
+        "部署策略",
+        pg=_Pg(),
+        q_emb=_embed("部署策略"),
+        include_keyword=False,
+        include_topic=False,
+        include_yin=False,
+        include_notes=True,
+        limit=5,
+        config={"prefetch": {"topic_v2_mode": True, "half_life_days": 30}},
+    )
+    by_sid = {h.source_id: h for h in results}
+    assert by_sid["note:v_fresh_tz"].rrf_score > by_sid["note:v_old_tz"].rrf_score
+    assert results[0].source_id == "note:v_fresh_tz"

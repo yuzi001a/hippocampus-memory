@@ -250,7 +250,7 @@ class _AblationFakeCursor:
         if "from observation_notes" in q_low and "embedding <=>" in q_low:
             q_vec = _parse_vec(p[0] if p else [])
             lim = int(p[-1]) if p and isinstance(p[-1], int) else 10
-            by_day: dict[str, tuple[float, int, str, str, datetime]] = {}
+            by_day: dict[str, tuple[float, int, str, str, datetime, Any]] = {}
             for n in self._store.observation_notes:
                 emb = n.get("embedding")
                 if emb is None:
@@ -258,12 +258,22 @@ class _AblationFakeCursor:
                 cos = _cosine(q_vec, emb)
                 dt = n.get("created_at")
                 day_key = dt.strftime("%Y-%m-%d") if isinstance(dt, datetime) else str(dt or "")[:10]
-                cand = (cos, int(n["id"]), str(n.get("version") or ""), str(n.get("content") or ""), dt)
+                cand = (
+                    cos,
+                    int(n["id"]),
+                    str(n.get("version") or ""),
+                    str(n.get("content") or ""),
+                    dt,
+                    n.get("source_qa_range"),
+                )
                 prev = by_day.get(day_key)
                 if prev is None or cand[0] > prev[0]:
                     by_day[day_key] = cand
             ordered = sorted(by_day.values(), key=lambda x: (str(x[4] or ""), x[0]), reverse=True)
-            self._rows = [(nid, ver, content, cos, dt) for cos, nid, ver, content, dt in ordered[: max(lim, 0)]]
+            self._rows = [
+                (nid, ver, content, cos, dt, qrange)
+                for cos, nid, ver, content, dt, qrange in ordered[: max(lim, 0)]
+            ]
             return
 
         # yin_paragraphs vector/keyword lookup
@@ -442,7 +452,14 @@ def _make_topic(
     }
 
 
-def _make_note(nid: int, days_ago: int, version: str, content: str) -> dict[str, Any]:
+def _make_note(
+    nid: int,
+    days_ago: int,
+    version: str,
+    content: str,
+    *,
+    source_qa_range: str | None = None,
+) -> dict[str, Any]:
     now = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
     dt = now - timedelta(days=days_ago)
     return {
@@ -450,6 +467,7 @@ def _make_note(nid: int, days_ago: int, version: str, content: str) -> dict[str,
         "version": version,
         "content": content,
         "created_at": dt,
+        "source_qa_range": source_qa_range,
         "embedding": embed_text(content),
     }
 
@@ -542,6 +560,7 @@ def build_scenarios() -> list[AblationScenario]:
             2,
             "v_obs_stale",
             f"近期观察总结（{title}）：延续此前结论，目前重点维护 {token_a}，相关实践继续围绕 {token_a} 展开。",
+            source_qa_range="[1,3)",
         )
         yin = _make_yin(title, f"工作基线中 {title} 长期沿用 {token_a}。")
         scenarios.append(
@@ -694,7 +713,13 @@ def build_scenarios() -> list[AblationScenario]:
             f"习惯档案记录：{title}一直采用 {old_rule}，尚未感知新纠正。",
             [title, old_rule],
         )
-        note = _make_note(1, 2, "v_corr", f"观察笔记记录：用户在{title}方面倾向 {old_rule}。")
+        note = _make_note(
+            1,
+            2,
+            "v_corr",
+            f"观察笔记记录：用户在{title}方面倾向 {old_rule}。",
+            source_qa_range="[1,2)",
+        )
         yin = _make_yin(title, f"长期互动基线：{title}保持 {old_rule}。")
         scenarios.append(
             AblationScenario(

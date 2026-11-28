@@ -18,9 +18,15 @@ Design goals (see docs/DESIGN-PHILOSOPHY.md):
          embeddings are recomputed from active state only.
   4. Read-side freshness & supersession guard (``apply_topic_v2_ranking_guard``):
        - Parses and strips ``<!-- topic_v2:... -->`` metadata before prompt injection.
-       - Demotes legacy/stale topics whose ``last_qa`` trails recalled raw QA IDs.
-       - On current-state queries, demotes ``superseded_qas``, stale ``note``/``yin``,
-         and breaks stale-vs-current QA ties via recency without hiding unique old facts.
+       - Enforces LLM-established explicit relations ONLY (zero read-side keyword or
+         bigram topic-overlap guessing):
+           * On current-state queries, demotes ``qa`` hits in persisted ``superseded_qas``,
+             Topic V2 dossiers whose ``active_qas`` were superseded by another dossier, and
+             derived ``note``/``yin`` hits whose explicit ``source_qa_range`` overlaps
+             ``superseded_qas`` (unless created after the superseding topic update).
+           * Preserves any memory lacking explicit supersession provenance (fail-safe:
+             never suppress valid long-term memory based on shared words).
+           * Breaks non-superseded QA ties via recency without hiding unique old facts.
        - On retrospective ``why did we drop X`` queries, preserves raw historical QA
          evidence and suppresses recency decay.
 """
@@ -92,57 +98,6 @@ _PROBLEM_HINT_RE = re.compile(
 _ASCII_CODE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+|[A-Za-z0-9_]{3,}")
 _ZH_WORD_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 
-_ASSOC_STOPWORDS = frozenset(
-    {
-        "什么", "怎么", "如何", "为何", "为什么", "现在", "目前", "当前", "以前", "之前",
-        "早期", "原来", "之后", "后来", "已经", "决定", "确认", "正式", "唯一", "全面",
-        "彻底", "方案", "策略", "问题", "情况", "东西", "系统", "默认", "进行", "可以",
-        "需要", "应该", "必须", "不要", "禁止", "不再", "使用", "采用", "改为", "改用",
-        "升级", "切换", "替换", "放弃", "淘汰", "废止", "废弃", "停用", "下线", "因为",
-        "因此", "所以", "如果", "但是", "然后", "通过", "基于", "关于", "对于", "结论",
-        "历史", "记录", "证据", "观察", "笔记", "主题", "当初", "原因",
-        "the", "and", "for", "with", "from", "that", "this", "what", "why", "how",
-        "use", "using", "used", "now", "currently", "current", "new", "old", "plan",
-    }
-)
-
-_GENERIC_PLATFORM_TOKENS = frozenset(
-    {
-        "postgresql", "postgres", "mysql", "sqlite", "redis", "docker", "kubernetes", "k8s",
-        "python", "node", "nodejs", "linux", "windows", "macos", "openai", "anthropic",
-        "minimax", "deepseek", "hermes", "github", "git", "http", "https", "json", "yaml",
-        "sql", "api", "sdk", "cli", "mcp", "llm", "agent", "model", "server", "client",
-        "cloud", "aws", "gcp", "azure", "react", "vue", "typescript", "javascript", "rust",
-        "golang", "java", "kafka", "nginx", "prometheus", "grafana", "v3core", "v3",
-    }
-)
-
-_GENERIC_EN_UMBRELLA = frozenset(
-    {
-        "database", "databases", "system", "systems", "service", "services", "project", "projects",
-        "module", "modules", "config", "configs", "configuration", "setting", "settings",
-        "data", "file", "files", "code", "user", "users", "account", "accounts",
-        "app", "apps", "application", "applications", "tool", "tools", "plugin", "plugins",
-        "task", "tasks", "error", "errors", "issue", "issues", "problem", "problems",
-        "feature", "features", "change", "changes", "update", "updates", "version", "versions",
-        "test", "tests", "dev", "prod", "production", "env", "environment",
-        "manager", "worker", "handler", "layer", "store", "storage", "core", "base",
-        "default", "common", "general", "custom", "local", "remote", "web", "info",
-        "note", "notes", "memory", "memories", "topic", "topics", "rule", "rules",
-        "mode", "plan", "option", "options", "choice", "selected", "preferred", "solution",
-    }
-)
-
-_GENERIC_CJK_UMBRELLA = frozenset(
-    {
-        "数据", "据库", "项目", "服务", "代码", "插件", "模块", "工具", "平台", "容器",
-        "环境", "接口", "模型", "架构", "文件", "目录", "应用", "工程", "开发", "技术",
-        "运行", "管理", "设置", "参数", "功能", "消息", "内容", "逻辑", "流程",
-        "用户", "团队", "人员", "账号", "角色", "信息", "状态", "方式", "模式",
-        "策略", "规则", "业务", "需求", "文档", "页面", "客户", "户端", "务端",
-    }
-)
-
 _TRIVIAL_NOISE_WORD = (
     r"(?:好的|收到|谢谢|感谢|明白(?:了)?|了解(?:了)?|嗯嗯?|哈哈+|哦哦?|行|没问题|ok|okay|thanks|thank you|thx|got it|cool|nice|hi|hello|你好)"
 )
@@ -153,18 +108,19 @@ _TRIVIAL_NOISE_RE = re.compile(
 
 _PHASE1_SYSTEM_PROMPT = (
     "你是长期记忆系统中的两阶段主题整理器（Phase 1）。\n"
-    "给定一条新对话 QA 与向量检索得到的 Top-K 候选主题摘要，请输出严格 JSON（不要 Markdown 代码块）：\n"
+    "给定一条新对话 QA 与向量检索得到的 Top-K 候选主题摘要（含 active_claims），请输出严格 JSON（不要 Markdown 代码块）：\n"
     "{\n"
     '  "action": "attach" | "create" | "skip",\n'
     '  "target_topic_id": "若 attach 填候选 topic_id，否则留空",\n'
     '  "topic_title": "简短主题名",\n'
     '  "update_type": "add" | "problem" | "evolve" | "correct" | "historical_note",\n'
     '  "claim_text": "当前生效的简洁结论，仅写新状态，不要把已废弃旧方案写进来",\n'
+    '  "replaces_claim_ids": ["若 evolve/correct，可选填被替代的旧 claim_id 列表"],\n'
     '  "replaces_text": "若 update_type 为 evolve/correct/historical_note，填写被替代或已下线的旧方案标识",\n'
     '  "reason": "变更/替代/下线原因",\n'
     '  "keywords": ["关键词1", "关键词2"]\n'
     "}\n"
-    "规则：1) 发生 A->B 演进或纠正时必须标为 evolve/correct 并填 replaces_text；\n"
+    "规则：1) 发生 A->B 演进或纠正时必须标为 evolve/correct，优先填写 replaces_claim_ids 并填 replaces_text；\n"
     "2) 回溯历史下线原因时标为 historical_note，不得污染当前结论；\n"
     "3) claim_text 只陈述真实明确信息，不杜撰；\n"
     "4) 若当前 QA 只是零碎上下文或子模块代号、缺乏独立主题价值，优先 attach 到最相关的候选主题或 skip，避免拆出碎小主题。"
@@ -213,84 +169,6 @@ def _extract_tokens(text: str) -> set[str]:
             for i in range(len(run) - 1):
                 tokens.add(run[i : i + 2])
     return tokens
-
-
-_CAMEL_IDENT_RE = re.compile(r"[a-z][A-Z]|[A-Z]{2,}[a-z]")
-
-
-def _is_concrete_identifier(raw_tok: str) -> bool:
-    """True only for concrete component/version/code identifiers, never plain nouns."""
-    if any(ch in raw_tok for ch in "-_."):
-        return True
-    if any(ch.isdigit() for ch in raw_tok):
-        return True
-    if _CAMEL_IDENT_RE.search(raw_tok):
-        return True
-    return False
-
-
-def _extract_association_terms(
-    text: str, extra_keywords: Sequence[str] = ()
-) -> tuple[set[str], set[str], set[str]]:
-    """Return ``(specific_terms, platform_terms, domain_terms)`` for scoped topic matching.
-
-    Only versioned/hyphenated/CamelCase identifiers (e.g. ``PgBouncer``, ``WAL-G``,
-    ``Cron-Worker-V1``) qualify as ``specific_terms``. Plain English domain words (e.g.
-    ``connection``, ``pool``, ``backup``) enter ``domain_terms`` alongside CJK sub-topic
-    bigrams so shared generic words like ``database`` or ``用户`` never trigger false overlap.
-    """
-    raw = str(text or "")
-    specific: set[str] = set()
-    platform: set[str] = set()
-    domain: set[str] = set()
-
-    def _classify_ascii(raw_tok: str) -> None:
-        tok_low = raw_tok.strip().lower()
-        if len(tok_low) < 2 or tok_low in _ASSOC_STOPWORDS or tok_low in _GENERIC_EN_UMBRELLA:
-            return
-        if tok_low in _GENERIC_PLATFORM_TOKENS:
-            platform.add(tok_low)
-        elif _is_concrete_identifier(raw_tok):
-            specific.add(tok_low)
-        else:
-            domain.add(tok_low)
-
-    for tok in _ASCII_CODE_TOKEN_RE.findall(raw):
-        _classify_ascii(tok)
-
-    for kw in extra_keywords:
-        ks = str(kw or "").strip()
-        if len(ks) < 2 or ks.lower() in _ASSOC_STOPWORDS:
-            continue
-        if re.search(r"[A-Za-z0-9]", ks):
-            _classify_ascii(ks)
-        else:
-            for run in _ZH_WORD_RUN_RE.findall(ks):
-                for i in range(len(run) - 1):
-                    bg = run[i : i + 2]
-                    if bg not in _ASSOC_STOPWORDS and bg not in _GENERIC_CJK_UMBRELLA:
-                        domain.add(bg)
-
-    for run in _ZH_WORD_RUN_RE.findall(raw):
-        for i in range(len(run) - 1):
-            bg = run[i : i + 2]
-            if bg not in _ASSOC_STOPWORDS and bg not in _GENERIC_CJK_UMBRELLA:
-                domain.add(bg)
-    return specific, platform, domain
-
-
-def _has_topic_overlap(
-    terms_a: tuple[set[str], set[str], set[str]],
-    terms_b: tuple[set[str], set[str], set[str]],
-) -> bool:
-    """Return True when two texts share a concrete component identifier or >=2 concrete domain terms."""
-    spec_a, _plat_a, dom_a = terms_a
-    spec_b, _plat_b, dom_b = terms_b
-    if spec_a & spec_b:
-        return True
-    if len(dom_a & dom_b) >= 2:
-        return True
-    return False
 
 
 @dataclass
@@ -481,6 +359,7 @@ class Phase1Note:
     keywords: list[str]
     evidence_qa_id: int
     timestamp: str
+    replaces_claim_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -495,9 +374,8 @@ class ConsolidationReport:
 
 
 def encode_topic_v2_header(dossier: TopicDossier) -> str:
-    """Encode compact freshness + lineage metadata under ``TopicRecall``'s 500-char slice."""
+    """Encode compact freshness + explicit lineage metadata under ``TopicRecall``'s 500-char slice."""
     sup_all = dossier.superseded_qa_ids()[-32:]
-    kws = [str(k).strip()[:16] for k in dossier.keywords[:4] if str(k).strip()]
     payload: dict[str, Any] = {
         "v": 2,
         "last_qa": int(dossier.last_evidence_qa_id),
@@ -505,12 +383,7 @@ def encode_topic_v2_header(dossier: TopicDossier) -> str:
         "active_qas": dossier.active_qa_ids()[-8:],
         "superseded_qas": sup_all,
     }
-    if kws:
-        payload["kws"] = kws
     encoded = f"<!-- topic_v2:{json.dumps(payload, separators=(',', ':'), ensure_ascii=False)} -->"
-    if len(encoded) > 460 and "kws" in payload:
-        payload.pop("kws", None)
-        encoded = f"<!-- topic_v2:{json.dumps(payload, separators=(',', ':'), ensure_ascii=False)} -->"
     while len(encoded) > 460 and len(payload["superseded_qas"]) > 12:
         payload["superseded_qas"] = payload["superseded_qas"][-max(12, len(payload["superseded_qas"]) // 2):]
         encoded = f"<!-- topic_v2:{json.dumps(payload, separators=(',', ':'), ensure_ascii=False)} -->"
@@ -939,6 +812,11 @@ class TopicConsolidatorV2:
                 "topic_id": d.topic_id,
                 "title": d.title,
                 "summary": d.summary,
+                "active_claims": [
+                    {"claim_id": c.claim_id, "text": c.text}
+                    for c in d.current_claims[:8]
+                    if c.text
+                ],
                 "keywords": d.keywords[:8],
                 "similarity": round(score, 4),
             }
@@ -1002,6 +880,12 @@ class TopicConsolidatorV2:
                 target_id = ""
 
         kws = [str(k).strip() for k in (data.get("keywords") or []) if str(k).strip()]
+        raw_rep_ids = data.get("replaces_claim_ids")
+        rep_ids = (
+            tuple(str(cid).strip() for cid in raw_rep_ids if str(cid).strip())
+            if isinstance(raw_rep_ids, (list, tuple))
+            else ()
+        )
         return Phase1Note(
             action=action,
             target_topic_id=target_id,
@@ -1013,6 +897,7 @@ class TopicConsolidatorV2:
             keywords=kws,
             evidence_qa_id=qa_id,
             timestamp=ts,
+            replaces_claim_ids=rep_ids,
         )
 
     def _distill_deterministic(
@@ -1169,23 +1054,27 @@ class TopicConsolidatorV2:
 
         if note.update_type in ("evolve", "correct"):
             new_cid = f"c_{note.evidence_qa_id}_{len(target.current_claims) + len(target.superseded_claims) + 1}"
+            replaces_id_set = {cid.strip() for cid in note.replaces_claim_ids if cid.strip()}
             old_low = note.replaces_text.strip().lower()
             old_clean = re.sub(r"[（(][^）)]*[）)]", "", old_low).strip()
             old_codes = [c.lower() for c in _ASCII_CODE_TOKEN_RE.findall(note.replaces_text)]
             old_terms = [t for t in dict.fromkeys([old_low, old_clean, *old_codes]) if len(t) >= 2]
-            old_assoc = _extract_association_terms(f"{note.replaces_text} {note.reason}", old_codes)
-            new_assoc = _extract_association_terms(note.claim_text, note.keywords)
-            kept_claims: list[TopicClaim] = []
-            for claim in target.current_claims:
+            matched_indices: set[int] = set()
+            for idx, claim in enumerate(target.current_claims):
                 c_low = claim.text.lower()
-                is_superseded = any(term in c_low for term in old_terms)
-                if not is_superseded and claim.kind in ("legacy_seed", "problem"):
-                    claim_assoc = _extract_association_terms(claim.text)
-                    if old_assoc[0] or old_assoc[1] or old_assoc[2]:
-                        is_superseded = _has_topic_overlap(claim_assoc, old_assoc)
-                    elif not old_terms:
-                        is_superseded = _has_topic_overlap(claim_assoc, new_assoc)
-                if is_superseded:
+                if claim.claim_id and claim.claim_id in replaces_id_set:
+                    matched_indices.add(idx)
+                elif old_terms and any(term in c_low for term in old_terms):
+                    matched_indices.add(idx)
+            # If the LLM explicitly evolved/corrected this dossier and no specific claim matched,
+            # supersede unparsed pre-V2 legacy_seed blobs belonging to this exact dossier.
+            if not matched_indices and not replaces_id_set:
+                for idx, claim in enumerate(target.current_claims):
+                    if claim.kind == "legacy_seed":
+                        matched_indices.add(idx)
+            kept_claims: list[TopicClaim] = []
+            for idx, claim in enumerate(target.current_claims):
+                if idx in matched_indices:
                     target.superseded_claims.append(
                         SupersededClaim(
                             text=claim.text,
@@ -1381,6 +1270,70 @@ def enforce_topic_v2_post_rerank_order(
     return active_group + demoted_group
 
 
+_INT8RANGE_RE = re.compile(r"^\s*([\[(])\s*(-?\d+)?\s*,\s*(-?\d+)?\s*([\])])\s*$")
+
+
+def _qa_ids_in_source_range(qa_range: Any, qa_ids: set[int]) -> set[int]:
+    """Return subset of ``qa_ids`` explicitly contained in a PG INT8RANGE / tuple / set."""
+    if not qa_range or not qa_ids:
+        return set()
+    if isinstance(qa_range, str):
+        s = qa_range.strip()
+        if not s or s.lower() == "empty":
+            return set()
+        m = _INT8RANGE_RE.match(s)
+        if not m:
+            return set()
+        lo_inc = m.group(1) == "["
+        lo = int(m.group(2)) if m.group(2) is not None else None
+        hi = int(m.group(3)) if m.group(3) is not None else None
+        hi_inc = m.group(4) == "]"
+        matched: set[int] = set()
+        for qid in qa_ids:
+            if lo is not None and (qid < lo if lo_inc else qid <= lo):
+                continue
+            if hi is not None and (qid > hi if hi_inc else qid >= hi):
+                continue
+            matched.add(qid)
+        return matched
+    # psycopg2 NumericRange (or duck-typed range object; exclude str methods via callable check)
+    if (
+        hasattr(qa_range, "lower")
+        and hasattr(qa_range, "upper")
+        and not callable(qa_range.lower)
+        and not callable(qa_range.upper)
+    ):
+        if getattr(qa_range, "isempty", False):
+            return set()
+        lo = qa_range.lower
+        hi = qa_range.upper
+        lo_inc = bool(getattr(qa_range, "lower_inc", True))
+        hi_inc = bool(getattr(qa_range, "upper_inc", False))
+        matched = set()
+        for qid in qa_ids:
+            if lo is not None and (qid < lo if lo_inc else qid <= lo):
+                continue
+            if hi is not None and (qid > hi if hi_inc else qid >= hi):
+                continue
+            matched.add(qid)
+        return matched
+    if isinstance(qa_range, (set, frozenset)):
+        return {int(q) for q in qa_range if isinstance(q, int)} & qa_ids
+    if isinstance(qa_range, (tuple, list)):
+        if len(qa_range) == 2 and all(x is None or isinstance(x, int) for x in qa_range):
+            lo, hi = qa_range
+            matched = set()
+            for qid in qa_ids:
+                if lo is not None and qid < lo:
+                    continue
+                if hi is not None and qid >= hi:
+                    continue
+                matched.add(qid)
+            return matched
+        return {int(q) for q in qa_range if isinstance(q, int)} & qa_ids
+    return set()
+
+
 def apply_topic_v2_ranking_guard(
     scored: list[Any],
     *,
@@ -1388,7 +1341,14 @@ def apply_topic_v2_ranking_guard(
     trace: Any = None,
     probe_fn: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Enforce read-side freshness, watermark check, and A->B supersession in ``scored``.
+    """Enforce read-side freshness and explicit LLM-established supersession in ``scored``.
+
+    Design invariant:
+      - Topic membership and supersession are established by the LLM during consolidation
+        and persisted as explicit QA IDs (``active_qas``, ``superseded_qas``) and derived
+        provenance ranges (``observation_notes.source_qa_range``).
+      - Recall NEVER guesses topic membership via keyword/bigram overlap. Memories without
+        explicit supersession provenance remain un-demoted (fail-safe).
 
     Mutates ``hit.content``, ``hit.content_preview`` (stripping internal ``topic_v2`` headers),
     and ``hit.rrf_score`` in place prior to final score sorting. Returns guard metadata
@@ -1396,33 +1356,29 @@ def apply_topic_v2_ranking_guard(
     """
     is_hist = is_historical_trace_query(query)
     topic_meta: dict[str, dict[str, Any] | None] = {}
-    topic_terms: dict[str, tuple[set[str], set[str], set[str]]] = {}
-    qa_entries: list[tuple[int, str, datetime | None, tuple[set[str], set[str], set[str]]]] = []
+    qa_ids_seen: list[int] = []
     qa_timestamps: dict[str, datetime] = {}
 
     for hit in scored:
         kind = getattr(hit, "kind", "")
         sid = str(getattr(hit, "source_id", "") or "")
-        title = str(getattr(hit, "title", "") or "")
         raw_body = str(getattr(hit, "content", "") or getattr(hit, "content_preview", "") or "")
         if kind == "topic":
             meta = parse_topic_v2_header(raw_body)
             topic_meta[sid] = meta
-            clean_full = strip_topic_v2_header(raw_body) if meta is not None else raw_body
             if meta is not None:
+                clean_full = strip_topic_v2_header(raw_body)
                 hit.content = clean_full
                 hit.content_preview = clean_full[:500]
-            extra_kws = list(meta.get("kws") or []) if isinstance(meta, dict) else []
-            topic_terms[sid] = _extract_association_terms(f"{title}\n{clean_full}", extra_kws)
         elif kind == "qa":
             qid = _parse_qa_id(sid)
             dt = _parse_iso_ts(getattr(hit, "created_at", ""))
             if dt is not None:
                 qa_timestamps[sid] = dt
             if qid is not None:
-                qa_entries.append((qid, sid, dt, _extract_association_terms(f"{title}\n{raw_body}")))
+                qa_ids_seen.append(qid)
 
-    max_qa_id = max((qid for qid, _, _, _ in qa_entries), default=0)
+    max_qa_id = max(qa_ids_seen, default=0)
     latest_qa_ts = max(qa_timestamps.values(), default=None)
     earliest_qa_ts = min(qa_timestamps.values(), default=None)
     qa_span_days = (
@@ -1431,63 +1387,62 @@ def apply_topic_v2_ranking_guard(
         else 0.0
     )
 
-    superseded_qa_ids: set[int] = set()
-    fresh_topic_sids: set[str] = set()
-    fresh_topic_info: list[tuple[datetime | None, tuple[set[str], set[str], set[str]]]] = []
-    stale_topic_sids: set[str] = set()
-
-    # First pass: classify Topic V2 hits against overlapping QAs only (prevents global cross-topic demotion).
     hit_dt_by_sid = {
         str(getattr(hit, "source_id", "") or ""): _parse_iso_ts(getattr(hit, "created_at", ""))
         for hit in scored
         if getattr(hit, "kind", "") == "topic"
     }
-    for sid, meta in topic_meta.items():
-        if meta is not None and int(meta.get("v") or 0) == 2:
-            last_qa = int(meta.get("last_qa") or 0)
-            t_terms = topic_terms.get(sid, (set(), set(), set()))
-            has_newer_related_qa = any(
-                qid > last_qa and _has_topic_overlap(t_terms, q_terms)
-                for qid, _, _, q_terms in qa_entries
-            )
-            for qid in (meta.get("superseded_qas") or []):
-                try:
-                    superseded_qa_ids.add(int(qid))
-                except (TypeError, ValueError):
-                    pass
-            if has_newer_related_qa:
-                stale_topic_sids.add(sid)
-            else:
-                fresh_topic_sids.add(sid)
-                ft_dt = _parse_iso_ts(meta.get("last_at", "")) or hit_dt_by_sid.get(sid)
-                fresh_topic_info.append((ft_dt, t_terms))
 
-    # Second pass: legacy topics without Topic V2 metadata are stale only when overlapping
-    # fresh Topic V2 dossiers or recalled QA evidence in the same batch.
+    # Collect explicit LLM-confirmed supersession relations from Topic V2 headers.
+    superseded_qa_ids: set[int] = set()
+    superseded_qa_by_topic: dict[str, set[int]] = {}
+    superseded_qa_ts: dict[int, datetime | None] = {}
+    topic_active_qas: dict[str, set[int]] = {}
+
     for sid, meta in topic_meta.items():
-        if meta is not None and int(meta.get("v") or 0) == 2:
+        if meta is None or int(meta.get("v") or 0) != 2:
             continue
-        t_terms = topic_terms.get(sid, (set(), set(), set()))
-        overlaps_fresh_topic = any(
-            _has_topic_overlap(t_terms, topic_terms.get(fsid, (set(), set(), set())))
-            for fsid in fresh_topic_sids
-        )
-        overlaps_recalled_qa = any(_has_topic_overlap(t_terms, q_terms) for _, _, _, q_terms in qa_entries)
-        if max_qa_id > 0 and (overlaps_fresh_topic or overlaps_recalled_qa):
+        t_dt = _parse_iso_ts(meta.get("last_at", "")) or hit_dt_by_sid.get(sid)
+        act_set: set[int] = set()
+        for qid in (meta.get("active_qas") or []):
+            try:
+                act_set.add(int(qid))
+            except (TypeError, ValueError):
+                pass
+        topic_active_qas[sid] = act_set
+
+        sup_set: set[int] = set()
+        for qid in (meta.get("superseded_qas") or []):
+            try:
+                iq = int(qid)
+            except (TypeError, ValueError):
+                continue
+            sup_set.add(iq)
+            superseded_qa_ids.add(iq)
+            prev_dt = superseded_qa_ts.get(iq)
+            if t_dt is not None and (prev_dt is None or t_dt > prev_dt):
+                superseded_qa_ts[iq] = t_dt
+            elif iq not in superseded_qa_ts:
+                superseded_qa_ts[iq] = None
+        superseded_qa_by_topic[sid] = sup_set
+
+    # A Topic V2 dossier is stale ONLY when another Topic V2 dossier explicitly superseded
+    # one of its active evidence QAs. Never demote any topic via keyword guessing or global max_qa_id.
+    fresh_topic_sids: set[str] = set()
+    stale_topic_sids: set[str] = set()
+    for sid, meta in topic_meta.items():
+        if meta is None or int(meta.get("v") or 0) != 2:
+            continue
+        act_set = topic_active_qas.get(sid, set())
+        other_sup = set().union(
+            *(s for other_sid, s in superseded_qa_by_topic.items() if other_sid != sid)
+        ) if superseded_qa_by_topic else set()
+        if act_set and (act_set & other_sup):
             stale_topic_sids.add(sid)
+        else:
+            fresh_topic_sids.add(sid)
 
-    # Build evolved topic/QA term sets for scoped note/yin demotion (prevents demoting unrelated yin/note).
-    active_qa_terms: list[tuple[datetime | None, tuple[set[str], set[str], set[str]]]] = [
-        (dt, q_terms)
-        for qid, _, dt, q_terms in qa_entries
-        if qid not in superseded_qa_ids
-    ]
-    superseded_specific_terms: set[str] = set()
-    for qid, _, _, q_terms in qa_entries:
-        if qid in superseded_qa_ids:
-            superseded_specific_terms.update(q_terms[0])
-
-    # First, adjust non-demoted QA recency tie-breaks on current-state queries (lag-window protection).
+    # First, adjust non-demoted QA recency tie-breaks on current-state queries (pure timestamp recency).
     qa_recency_adjusted = 0
     if not is_hist and len(qa_timestamps) >= 2 and qa_span_days >= 3.0 and latest_qa_ts is not None:
         for hit in scored:
@@ -1507,7 +1462,7 @@ def apply_topic_v2_ranking_guard(
                 if probe_fn is not None and trace is not None:
                     probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_qa_recency")
 
-    # Compute the lowest score among fresh active candidates so every demoted hit is pushed below it.
+    # Compute the lowest score among fresh active candidates so every explicitly demoted hit sorts below it.
     fresh_active_scores: list[float] = []
     for hit in scored:
         kind = getattr(hit, "kind", "")
@@ -1534,7 +1489,7 @@ def apply_topic_v2_ranking_guard(
     for hit in scored:
         kind = getattr(hit, "kind", "")
         sid = str(getattr(hit, "source_id", "") or "")
-        if kind == "topic" and sid in stale_topic_sids:
+        if kind == "topic" and sid in stale_topic_sids and not is_hist:
             hit.rrf_score = _cap_demoted_score(float(hit.rrf_score), 0.25, min_fresh_score)
             demoted_topics += 1
             demoted_sids.add(sid)
@@ -1549,36 +1504,23 @@ def apply_topic_v2_ranking_guard(
                 if probe_fn is not None and trace is not None:
                     probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_freshness_guard")
         elif kind in ("note", "yin") and not is_hist:
+            # Explicit provenance ONLY: demote iff source_qa_range explicitly covers a
+            # superseded QA AND the note was not regenerated after the superseding topic update.
+            hit_range = getattr(hit, "source_qa_range", None)
+            matched_sup = _qa_ids_in_source_range(hit_range, superseded_qa_ids)
+            if not matched_sup:
+                continue
             dt = _parse_iso_ts(getattr(hit, "created_at", ""))
-            derived_text = (
-                f"{getattr(hit, 'title', '') or ''}\n"
-                f"{getattr(hit, 'content', '') or getattr(hit, 'content_preview', '') or ''}"
-            )
-            derived_terms = _extract_association_terms(derived_text)
-            if dt is not None:
-                overlaps_fresh_topic = any(
-                    _has_topic_overlap(derived_terms, ft_terms)
-                    and ft_dt is not None
-                    and dt <= ft_dt
-                    for ft_dt, ft_terms in fresh_topic_info
-                )
-                overlaps_newer_qa = any(
-                    _has_topic_overlap(derived_terms, q_terms)
-                    and q_dt is not None
-                    and dt < q_dt
-                    for q_dt, q_terms in active_qa_terms
-                )
-                cites_superseded = bool(derived_terms[0] & superseded_specific_terms)
-                should_demote = overlaps_fresh_topic or overlaps_newer_qa or cites_superseded
-            else:
-                # Unknown timestamp: fail safe and keep unless citing a superseded concrete identifier.
-                should_demote = bool(derived_terms[0] & superseded_specific_terms)
-            if should_demote:
-                hit.rrf_score = _cap_demoted_score(float(hit.rrf_score), 0.25, min_fresh_score)
-                demoted_derived += 1
-                demoted_sids.add(sid)
-                if probe_fn is not None and trace is not None:
-                    probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_freshness_guard")
+            sup_dts = [superseded_qa_ts[q] for q in matched_sup if superseded_qa_ts.get(q) is not None]
+            latest_sup_dt = max(sup_dts) if sup_dts else None
+            if dt is not None and latest_sup_dt is not None and dt > latest_sup_dt:
+                # Derived note was regenerated AFTER the superseding evolution — preserve it.
+                continue
+            hit.rrf_score = _cap_demoted_score(float(hit.rrf_score), 0.25, min_fresh_score)
+            demoted_derived += 1
+            demoted_sids.add(sid)
+            if probe_fn is not None and trace is not None:
+                probe_fn(trace, "score", sid, "temporal", hit.rrf_score, operation="topic_v2_freshness_guard")
 
     return {
         "is_historical": is_hist,

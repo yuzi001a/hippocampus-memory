@@ -10,7 +10,7 @@ import logging
 import math
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from .types import RecallHit
 from ._deadline import (
@@ -2014,7 +2014,7 @@ def _fetch_observation_child_candidates(cur, emb_str: str, limit: int) -> list:
         cur.execute(
             "SELECT c.observation_id, n.version, n.content, n.created_at, "
             " 1 - (c.embedding <=> %s::vector) AS cosine, "
-            " c.source_sha256, c.representation_version "
+            " c.source_sha256, c.representation_version, n.source_qa_range "
             "FROM observation_embedding_chunks c "
             "JOIN observation_notes n ON n.id = c.observation_id "
             "WHERE c.embedding IS NOT NULL AND n.embedding IS NOT NULL "
@@ -2050,9 +2050,11 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
     _cap = max(int(limit or 0), 3)
     _cands: list[dict] = []
     _created: dict[tuple, object] = {}
+    _qa_ranges: dict[tuple, object] = {}
     for _row in parent_rows or []:
         _nid, _ver, _content, _cos = _row[0], _row[1], _row[2], _row[3]
         _ts = _row[4] if len(_row) > 4 else None
+        _qrange = _row[5] if len(_row) > 5 else None
         try:
             _sim = float(_cos) if _cos is not None else float("-inf")
         except (TypeError, ValueError):
@@ -2062,10 +2064,13 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             "cosine": _sim, "content": _content or "", "kind": "parent",
         })
         _created.setdefault((_nid, _ver), _ts)
+        if _qrange is not None:
+            _qa_ranges.setdefault((_nid, _ver), _qrange)
     for _row in child_rows or []:
         try:
             _cid, _cver, _ccontent = _row[0], _row[1], _row[2]
             _cts, _ccos, _csha, _crep = _row[3], _row[4], _row[5], _row[6]
+            _cqrange = _row[7] if len(_row) > 7 else None
         except (IndexError, TypeError, ValueError):
             continue
         if not (_ccontent or ""):
@@ -2090,6 +2095,8 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             "cosine": _csim, "content": _ccontent or "", "kind": "child",
         })
         _created.setdefault((_cid, _cver), _cts)
+        if _cqrange is not None:
+            _qa_ranges.setdefault((_cid, _cver), _cqrange)
 
     if _merge_hits is not None:
         _merged = _merge_hits(_cands)
@@ -2190,6 +2197,7 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
         _ver = _e.get("observation_version")
         _full = _e.get("content") or ""
         _ts_val = _created.get((_e.get("observation_id"), _ver))
+        _qrange_val = _qa_ranges.get((_e.get("observation_id"), _ver))
         _created_str = (
             _ts_val.isoformat()
             if hasattr(_ts_val, "isoformat")
@@ -2206,6 +2214,7 @@ def _merge_observation_note_hits(parent_rows, child_rows, *, limit: int) -> list
             rrf_score=0.0,
             kind="note",
             created_at=_created_str,
+            source_qa_range=_qrange_val,
         ))
     return _out
 
@@ -3808,7 +3817,7 @@ def recall_pool(
                     with conn.cursor() as cur:
                         cur.execute(
                             "SELECT DISTINCT ON (created_at::date) id, version, content, "
-                            " 1 - (embedding <=> %s::vector) AS cosine, created_at "
+                            " 1 - (embedding <=> %s::vector) AS cosine, created_at, source_qa_range "
                             " FROM observation_notes WHERE embedding IS NOT NULL "
                             " ORDER BY created_at::date DESC, embedding <=> %s::vector LIMIT %s",
                             (emb_str, emb_str, max(limit, 3)),
@@ -4070,7 +4079,11 @@ def recall_pool(
             try:
                 cat_str = hit.created_at.replace("Z", "+00:00")
                 card_time = datetime.fromisoformat(cat_str)
-                age_days = max(0, (datetime.now() - card_time).days)
+                if card_time.tzinfo is None:
+                    card_time = card_time.replace(tzinfo=timezone.utc)
+                else:
+                    card_time = card_time.astimezone(timezone.utc)
+                age_days = max(0, (datetime.now(timezone.utc) - card_time).days)
                 decay = math.exp(-age_days / half_life)
                 hit.rrf_score = round(hit.rrf_score * max(decay, 0.05), 6)
                 # A2 (G6B Slice B): record the temporal half-life decay
