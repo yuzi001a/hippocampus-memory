@@ -5015,10 +5015,12 @@ class V3Core:
                             except Exception:
                                 pass
                         if rowcount > 0 and qa_id:
+                            _use_sp = getattr(conn, "autocommit", None) is not True
                             _sp_created = False
                             try:
-                                cur.execute("SAVEPOINT tv2_late_requeue")
-                                _sp_created = True
+                                if _use_sp:
+                                    cur.execute("SAVEPOINT tv2_late_requeue")
+                                    _sp_created = True
                                 cur.execute(
                                     "UPDATE public.topic_v2_state "
                                     "SET reprocess_qa_ids = CASE "
@@ -5030,7 +5032,8 @@ class V3Core:
                                     "WHERE state_key = 'default' AND last_qa_id >= %s",
                                     (int(qa_id), int(qa_id), int(qa_id)),
                                 )
-                                cur.execute("RELEASE SAVEPOINT tv2_late_requeue")
+                                if _sp_created:
+                                    cur.execute("RELEASE SAVEPOINT tv2_late_requeue")
                             except Exception:
                                 if _sp_created:
                                     try:
