@@ -9,6 +9,7 @@ If you are new to the project, do **not** start with milestone files such as `B0
 | Goal | Read |
 | --- | --- |
 | Understand what Hippocampus is | [WHY_HIPPOCAMPUS.md](WHY_HIPPOCAMPUS.md) |
+| Understand the full design philosophy & 15 principles | [DESIGN-PHILOSOPHY.md](DESIGN-PHILOSOPHY.md) |
 | See what is supported today | [STATUS.md](STATUS.md) |
 | Install the core | [INSTALL.md](INSTALL.md) / [INSTALL.zh-CN.md](INSTALL.zh-CN.md) |
 | Import existing Hermes / DSH / pi history | [IMPORT.md](IMPORT.md) |
@@ -25,7 +26,9 @@ If you are new to the project, do **not** start with milestone files such as `B0
 ## Product and design
 
 - [WHY_HIPPOCAMPUS.md](WHY_HIPPOCAMPUS.md) — project motivation and design philosophy.
+- [DESIGN-PHILOSOPHY.md](DESIGN-PHILOSOPHY.md) — complete design philosophy, 15 core principles, non-goals, and PR review benchmark.
 - [ARCHITECTURE-OVERVIEW.md](ARCHITECTURE-OVERVIEW.md) — core architecture.
+- [TOPIC-V2-ARCHITECTURE.md](TOPIC-V2-ARCHITECTURE.md) — default-on two-phase structured topic consolidation & freshness guard (`prefetch.topic_v2_mode`).
 - [COMPARISON.md](COMPARISON.md) / [COMPARISON.zh-CN.md](COMPARISON.zh-CN.md) — how Hippocampus differs from other memory approaches.
 - [COST.md](COST.md) — provider/cost considerations.
 - [PRIVACY-DATA-FLOW.md](PRIVACY-DATA-FLOW.md) — what can leave the machine and under which configuration.

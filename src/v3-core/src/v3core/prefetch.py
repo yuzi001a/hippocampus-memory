@@ -248,6 +248,9 @@ def prefetch(query: str, limit: int = 5, config=None,
         dual = pf_cfg_obj.dual_path
         rrf_k = pf_cfg_obj.rrf_k
         include_msg_vec = pf_cfg_obj.include_message_vector
+        include_topic = getattr(pf_cfg_obj, "include_topic", True)
+        include_yin = getattr(pf_cfg_obj, "include_yin", True)
+        include_notes = getattr(pf_cfg_obj, "include_notes", True)
         rerank_cfg = cfg.rerank.to_legacy_dict() if cfg.rerank else {}
         cfg_for_pool = cfg  # 传入 V3Config 即可, recall_pool 内部读 half_life
     elif isinstance(cfg, dict):
@@ -255,12 +258,18 @@ def prefetch(query: str, limit: int = 5, config=None,
         dual = pf_cfg.get("dual_path", True)
         rrf_k = pf_cfg.get("rrf_k", 60)
         include_msg_vec = pf_cfg.get("include_message_vector", True)
+        include_topic = pf_cfg.get("include_topic", True)
+        include_yin = pf_cfg.get("include_yin", True)
+        include_notes = pf_cfg.get("include_notes", True)
         rerank_cfg = cfg.get("storage", {}).get("rerank", {}) or {}
         cfg_for_pool = cfg
     else:
         dual = True
         rrf_k = 60
         include_msg_vec = True
+        include_topic = True
+        include_yin = True
+        include_notes = True
         rerank_cfg = {}
         cfg_for_pool = None
 
@@ -295,6 +304,9 @@ def prefetch(query: str, limit: int = 5, config=None,
         "include_keyword": include_keyword,
         "include_card_vector": include_card_vector,
         "include_message_vector": include_message_vector,
+        "include_topic": bool(include_topic),
+        "include_yin": bool(include_yin),
+        "include_notes": bool(include_notes),
     }
     if max_chars is not None:
         engine_kwargs["max_chars"] = max_chars

@@ -3,15 +3,15 @@
 
 设计要点:
 - 攒批触发: 复制 maybe_compress 骨架 (debounce + import_lock + 后台线程 + alive-check)
-- 读新 QA 范围 (id > 上次游标) + 召回候选主题 (TopicMatcher)
-- 单次 LLM 调用 (M3) 双输出 JSON: note + topic_updates
-- 写 observation_notes 表 + topics 表双更新 (note_ref / last_observer_ts / summary / body)
+- 读新 QA 范围 (id > 上次游标) + 召回候选主题 (只读 PG topics)
+- 单次 LLM 调用 (M3) 产出观察笔记
+- 单一写入者边界: observer 仅写 observation_notes；public.topics / topic_entries 由 Topic V2 负责
 - 失败不抛, 静默记日志, 下次自动重试
 - 所有配置 (endpoint / key / batch_size / model 调参) 走 config.yaml, 不硬编码
 
 复用点 (按 phase2_task_spec.md):
 1. compression_trigger.maybe_compress() 骨架 — debounce/import_lock/alive-check/PG DSN
-2. topic_refine.TopicMatcher.match(text) — 候选主题召回
+2. TopicMatcher.match(text) — 候选主题召回
 3. compression_engine._get_runtime_config() + _resolve_llm_api_key() — 配置 + key
 4. phase0_m3_length_test.py call_m3() + _strip_think + _parse_json_lenient
 
@@ -385,7 +385,7 @@ _DEFAULT_OBSERVER_CONFIG: dict[str, Any] = {
     "base_url": None,             # None → 用 llm.base_url
     "temperature": 0.3,           # 与 phase0 一致
     "candidate_top_k": 5,         # TopicMatcher 返回前 N
-    "candidate_threshold": 0.40,  # MATCH_LOW = 0.40 (topic_refine.py)
+    "candidate_threshold": 0.40,  # legacy MATCH_LOW threshold
     # ---- v4 当轮快照 + 事件时间窗口 ----
     "prompt_note_min_chars": 1500,    # 兜底下限, 真正用软引导
     "prompt_note_max_chars": 8000,    # 正常目标/自动时间拆批触发线, 不是原子 QA 死亡线
@@ -2120,6 +2120,7 @@ def _recall_candidates(
     try:
         from .config import resolve_config
         from .embedding import call_embedding, safe_embed_cfg
+        from .topic_v2 import strip_topic_v2_header
 
         cfg_obj = resolve_config()
         # 阶段1 (2026-08-20): 唯一构造入口 — safe_embed_cfg 工厂.
@@ -2146,7 +2147,7 @@ def _recall_candidates(
                 for tid, title, body, cosine in cur.fetchall():
                     sim = float(cosine or 0)
                     if sim >= threshold:
-                        out.append({"topic_id": tid, "title": title or "", "body": body or "", "sim": round(sim, 4)})
+                        out.append({"topic_id": tid, "title": title or "", "body": strip_topic_v2_header(body or ""), "sim": round(sim, 4)})
             return out
 
         if pool is not None:
@@ -2163,7 +2164,7 @@ def _recall_candidates(
                     for tid, title, body, cosine in cur.fetchall():
                         sim = float(cosine or 0)
                         if sim >= threshold:
-                            out.append({"topic_id": tid, "title": title or "", "body": body or "", "sim": round(sim, 4)})
+                            out.append({"topic_id": tid, "title": title or "", "body": strip_topic_v2_header(body or ""), "sim": round(sim, 4)})
             finally:
                 lease.close()
             return out
@@ -2206,7 +2207,7 @@ def _recall_candidates(
                 for tid, title, body, cosine in cur.fetchall():
                     sim = float(cosine or 0)
                     if sim >= threshold:
-                        out.append({"topic_id": tid, "title": title or "", "body": body or "", "sim": round(sim, 4)})
+                        out.append({"topic_id": tid, "title": title or "", "body": strip_topic_v2_header(body or ""), "sim": round(sim, 4)})
         finally:
             conn.close()
         return out
@@ -2842,210 +2843,6 @@ def _backfill_note_embedding(pg, note_id: int, content: str,
         raise
 
 
-def _mark_topic_updates_pending(pg, note_id: int, updates: list[dict[str, Any]]) -> None:
-    """对抗审查修复 (2026-08-07): topic_updates 应用失败后把原始数据存进 note.links。
-
-    标记形态: {"kind": "topic_updates_pending", "data": [...], "ts": ...}
-    补偿任务扫描 links 含此标记的 note, 重放 topic_updates。
-    """
-    import json as _json
-    import time as _t
-    with pg.cursor() as cur:
-        cur.execute(
-            "SELECT links::text FROM observation_notes WHERE id=%s", (note_id,)
-        )
-        row = cur.fetchone()
-        links = []
-        if row and row[0]:
-            try:
-                links = _json.loads(row[0])
-                if not isinstance(links, list):
-                    links = []
-            except Exception:
-                links = []
-        links.append({
-            "kind": "topic_updates_pending",
-            "data": updates,
-            "ts": _t.time(),
-        })
-        cur.execute(
-            "UPDATE observation_notes SET links=%s::jsonb WHERE id=%s",
-            (_json.dumps(links, ensure_ascii=False), note_id),
-        )
-    pg.commit()
-
-
-def _link_entries_by_vector(pg, topics_table: str, topic_id: str,
-                            qa_rows: list[dict[str, Any]],
-                            note_id: int, threshold: float = 0.55,
-                            embed_cfg: dict | None = None) -> int:
-    """2026-08-07 方案A: 代码向量匹配把本段 QA 原文挂到主题卡 entries。
-
-    用 topic 的 embedding 与本段 QA 的 embedding 算 cosine,
-    命中 (≥ threshold) 的 QA 原文 INSERT 到 topic_entries —
-    补上观察者从不写 entry 的断链 (设计文档要求保留 topic_entries 回链)。
-
-    qa_rows: [{"id", "question", "answer"}, ...] — 观察者/冷启动本段 QA。
-    source 格式: obs:{note_id}:vector:{cos:.2f} (matched_by 可验证)。
-    返回挂载条数。失败抛异常由调用方捕获 (不阻塞主流程)。
-
-    embed_cfg: 可选 — ``build_embed_cfg(cfg)`` 工厂结果. 传了 embed_cfg 必须有合法
-    fingerprint, 写到 topic_entries.embed_model 列 (混库检查).
-    未传 embed_cfg → 自动尝试 ``resolve_config + safe_embed_cfg``.
-    """
-    if not qa_rows or not topic_id:
-        return 0
-    conn = pg._connect() if hasattr(pg, "_connect") else pg
-    if conn is None:
-        return 0
-    import json as _json
-    import numpy as _np
-    # 1. 取 topic embedding
-    with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT embedding::text FROM {topics_table} WHERE topic_id=%s AND embedding IS NOT NULL",
-            (topic_id,),
-        )
-        row = cur.fetchone()
-        if not row or not row[0]:
-            return 0
-        topic_emb = _np.array(_json.loads(row[0]), dtype=_np.float32)
-    # 2. 本段 QA embedding (批量取)
-    qa_ids = [int(q["id"]) for q in qa_rows if q.get("id")]
-    if not qa_ids:
-        return 0
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, question, answer, embedding::text FROM qa_pairs "
-            "WHERE id = ANY(%s) AND embedding IS NOT NULL",
-            (qa_ids,),
-        )
-        qa_emb_rows = cur.fetchall()
-    if not qa_emb_rows:
-        return 0
-    # 3. cosine 匹配 + 挂载
-    t_norm = float(_np.linalg.norm(topic_emb))
-    if t_norm < 1e-10:
-        return 0
-    # 阶段1.5 (2026-08-20): 解析 fingerprint — embed_cfg 优先; 否则尝试 safe_embed_cfg 工厂.
-    fp = ""
-    try:
-        if embed_cfg is not None:
-            from .embedding import safe_embed_cfg as _sec
-            # 不重复 factory 校验 — 直接信任传入 cfg
-            fp = (embed_cfg or {}).get("_fingerprint") or ""
-        if not fp:
-            from .config import resolve_config as _rc
-            from .embedding import safe_embed_cfg as _sec
-            _cfg = _rc()
-            _ec = _sec(_cfg)
-            if _ec is not None:
-                fp = _ec.get("_fingerprint") or ""
-    except Exception:
-        fp = ""
-    if not fp:
-        raise ValueError(
-            "_link_entries_by_vector: 缺 fingerprint — 调式应传 embed_cfg 或 "
-            "保证 resolve_config 返回的 embed 配置完整"
-        )
-    linked = 0
-    for qid, q, a, emb_str in qa_emb_rows:
-        if not emb_str:
-            continue
-        qa_emb = _np.array(_json.loads(emb_str), dtype=_np.float32)
-        qa_norm = float(_np.linalg.norm(qa_emb))
-        if qa_norm < 1e-10:
-            continue
-        cos = float(_np.dot(topic_emb, qa_emb) / (t_norm * qa_norm))
-        if cos < threshold:
-            continue
-        # 2026-08-22 G1B: 单条 QA 直挂 — 带证据链回链 source_qa_id=qa_pairs.id,
-        # 并原样复用该 QA 已有 embedding (零 embedding API 调用)。
-        # 生产库缺 source_qa_id 列时: 先 rollback 再剥列降级 (可观测 warning),
-        # entry 本体仍写入, 绝不让事务死在 InFailedSqlTransaction。
-        source = f"obs:{note_id}:vector:{cos:.2f}"
-        _cols = ["topic_id", "question", "answer", "source", "seq", "timestamp"]
-        _vals: list = [topic_id, (q or "")[:2000], (a or "")[:4000], source,
-                       topic_id]
-        _ph = ["%s", "%s", "%s", "%s",
-               "(SELECT COALESCE(MAX(seq), 0) + 1 FROM topic_entries WHERE topic_id = %s)",
-               "NOW()"]
-        if fp:
-            _cols += ["embedding", "embed_model"]
-            _ph += ["%s::vector", "%s"]
-            _vals += [emb_str, fp]
-        _cols.append("source_qa_id")
-        _ph.append("%s")
-        _vals.append(int(qid))
-        # 2026-08-22 G1B e2e 修正: timestamp 列用 NOW() 字面占位, 不占 %s 参数位 —
-        # 占位符数必须与参数数严格相等, 否则 psycopg2 报
-        # "not all arguments converted during string formatting"。
-
-        def _entry_sql(cols: list, ph: list) -> str:
-            return (
-                "\n                        INSERT INTO topic_entries (\n                            "
-                + ", ".join(cols)
-                + "\n                        )\n                        VALUES (\n                            "
-                + ", ".join(ph)
-                + "\n                        )\n                        ON CONFLICT DO NOTHING"
-            )
-
-        try:
-            for _attempt in range(3):
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute(_entry_sql(_cols, _ph), tuple(_vals))
-                    break
-                except Exception as _e_ins:
-                    from .pg_store import _is_undefined_column_error
-                    if not _is_undefined_column_error(_e_ins):
-                        raise
-                    # 2026-08-22: 先 rollback 再降级 — 防 InFailedSqlTransaction 死 fallback.
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    # 2026-08-22 e2e 修正: 真 PG 报错文本会内嵌完整失败 SQL(含全部列名),
-                    # 子串匹配会误中其它列 — 必须只认 column "X" 引用形态。
-                    import re as _re
-                    _quoted = set(_re.findall(
-                        r'column "([a-z_0-9]+)"', str(_e_ins).lower()))
-                    _missing = next(
-                        (c for c in ("embed_model", "source_qa_id")
-                         if c in _cols and c in _quoted),
-                        None,
-                    )
-                    if _missing is None:
-                        raise
-                    logger.warning(
-                        "observer._link_entries_by_vector: topic_entries 缺 %s 列, "
-                        "降级不写该列 (已先 rollback): %s",
-                        _missing, _safe_err(_e_ins)[:120],
-                    )
-                    # 2026-08-22 e2e 修正: vals 按"消耗 %s 的顺序"与 ph 对齐, 不与列下标
-                    # 一一对应 (seq 子查询自带一个 %s、timestamp 用 NOW() 不占位)。
-                    # 剥列 = 删 cols[i] / ph[i], 并从 vals 删掉该列占位符绑定的值 —
-                    # 其下标 = 删除前 ph[0..i-1] 里 %s 的个数。
-                    _ci = _cols.index(_missing)
-                    _vi = sum(p.count("%s") for p in _ph[:_ci])
-                    del _cols[_ci]
-                    del _ph[_ci]
-                    del _vals[_vi]
-            conn.commit()
-            linked += 1
-        except Exception as e:
-            logger.warning("observer: entry 挂载失败 (topic=%s qa=%s): %s",
-                           topic_id, qid, _safe_err(e)[:100])
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-    if linked:
-        logger.info("observer: 主题卡 %s 向量匹配挂载 %d 条 entries (阈值 %.2f)",
-                    topic_id, linked, threshold)
-    return linked
-
-
 def _filter_keywords(tags):
     """2026-08-15: keywords 代码过滤兜底 (模型无关 — 不赌 LLM 遵从性)
     规则: 中文 2-8 字 / 英文 1-3 词; 超长丢弃; 去重; 上限 12"""
@@ -3144,474 +2941,6 @@ def _fact_refs_from_text(fact_text: str, qa_rows: list[Any] | None) -> tuple[lis
         if qi not in ids:
             ids.append(qi)
     return ids, (f":qa={','.join(str(i) for i in ids)}" if len(ids) > 1 else "")
-
-
-def _apply_topic_updates(
-    pg,
-    note_id: int,
-    updates: list[dict[str, Any]],
-    cfg: dict[str, Any] | None = None,
-    qa_rows: list[dict[str, Any]] | None = None,
-) -> list[str]:
-    """应用 topic_updates 到 PG topics 表 + 双写 sqlite topic_blocks。
-
-    | action | topic_id        | 处理                                  |
-    |--------|-----------------|---------------------------------------|
-    | create | 空 / 新 id      | INSERT 新主题, note_ref 链回观察笔记   |
-    | update | 现有 id         | 追加 body / 更新 summary / note_ref    |
-
-    2026-08-07 方案A: qa_rows 非空时, 每条 topic 写完后做代码向量匹配,
-    把本段 QA 原文挂到 topic_entries (matched_by=vector, source=obs:{note_id}:vector) —
-    补上观察者从不写 entry 的断链 (设计文档要求保留 topic_entries 回链)。
-
-    失败不抛 — 单条 update 失败不影响其他条目。
-
-    v4.1 (2026-08-19): 返 list[str] of successfully applied topic_ids (create + update 都收集)。
-    调用方 (_observe_worker 第 10 步) 用此 list 合并进 note.links 的 kind=topics,
-    修复"候选为空但 topic_updates create 成功后, note links 不含新建 topic_id"的断链。
-    失败分支 (TopicStore 加载失败 / 单条 update 异常) 跳过该 topic_id, 不进返回列表。
-    """
-    applied_ids: list[str] = []
-    topics_table = str(cfg.get("topics_table", "topics")) if cfg else "topics"
-    # 延迟 import, 避免 daemon 线程 sys.path 状态依赖
-    try:
-        from .topic_store import TopicStore
-    except Exception as e:
-        logger.warning("observer: 加载 TopicStore 失败, topic_updates 全跳: %s",
-                       _safe_err(e)[:120])
-        return applied_ids
-    try:
-        _topic_db = str(cfg.get("topic_store_db", "")) if cfg else ""
-        _tt = str(cfg.get("topics_table", "topics")) if cfg else "topics"
-        _strict = bool(cfg.get("topic_store_strict", True)) if cfg else True
-        if _topic_db:
-            store = TopicStore(db_path=_topic_db, topics_table=_tt, strict_pg=_strict)
-        else:
-            store = TopicStore(topics_table=_tt, strict_pg=_strict)
-    except Exception as e:
-        logger.warning("observer: 连接 TopicStore sqlite 失败, topic_updates 全跳: %s",
-                       _safe_err(e)[:120])
-        return applied_ids
-
-    note_ref = f"obs://{note_id}"
-
-    # ────────────────────────────────────────────────────────────────────
-    # 2026-08-19 (eval_v2 entries embedding 缺位修复):
-    # 观察者 new_facts 拆条事实级 entry 之前漏传 embedding, 32/55 条 NULL 全是
-    # source='obs:fact:{note_id}'。修复: 不为每条 fact 新增 embedding API 调用;
-    # 而是按本批 qa_rows 的 qa_pairs.embedding 复用 — 一次 PG 批量 SELECT,
-    # 解析每条 fact 文本里的 [#N] / [ #N ] 引用 (N 是本批 QA 局部 1-based 序号,
-    # 与 prompt "QA #1, #2, ..." 对齐), 把对应 QA 的 emb_str 直接传给
-    # store.add_entry(..., embedding=...) — 既不新增 API 调用, 也不写 NULL。
-    # 解析不到或对应 QA embedding 缺位的事实: 严格模式 (strict_pg=True, 生产默认)
-    # 下跳过该 entry (避免"写了没向量"的断链残留), 仅 warning + 累计计数;
-    # 非严格模式仍可写入 NULL 兼容 (旧 schema 不报错), 但同样 warning + 累计。
-    # ────────────────────────────────────────────────────────────────────
-    _qa_emb_by_local: dict[int, Any] = {}  # local 1-based ordinal → raw emb_str (or list)
-    _fact_unresolved_total: int = 0        # 总 unresolvable 计数 (跨所有 updates)
-    _fact_unresolved_examples: list[str] = []  # 头 5 条 unresolvable fact 文本 (审计用)
-    if qa_rows:
-        try:
-            _qa_id_list = [int(q["id"]) for q in qa_rows if q.get("id") is not None]
-            _local_idx_by_qa_id: dict[int, int] = {}
-            for _local_i, _qrow in enumerate(qa_rows, 1):
-                try:
-                    _local_idx_by_qa_id[int(_qrow["id"])] = _local_i
-                except Exception:
-                    continue
-            # 一次 PG 批量取本批 qa 全部 embedding (text 形态, 与 _link_entries_by_vector 同源)
-            _pg_conn_qa = pg._connect() if hasattr(pg, "_connect") else pg
-            with _pg_conn_qa.cursor() as _cur_qa:
-                _cur_qa.execute(
-                    "SELECT id, embedding::text FROM qa_pairs "
-                    "WHERE id = ANY(%s) AND embedding IS NOT NULL",
-                    (_qa_id_list,),
-                )
-                for _qid, _emb_text in _cur_qa.fetchall():
-                    _local_i = _local_idx_by_qa_id.get(int(_qid))
-                    if _local_i is None:
-                        continue
-                    _qa_emb_by_local[_local_i] = _emb_text
-        except Exception as _e_qaemb:
-            logger.warning(
-                "observer: 批量读 qa_pairs.embedding 失败, fact entries 将全部走 NULL embedding "
-                "(非致命, _link_entries_by_vector 也会受影响): %s",
-                _safe_err(_e_qaemb)[:120],
-            )
-
-    # ────────────────────────────────────────────────────────────────────
-    # 2026-08-20 (eval_v2 fact entry embed_cfg 缺位修复 v4.2):
-    # 之前 store.add_entry(..., embedding=_fact_emb) 没传 embed_cfg, 导致 PG
-    # ``_add_entry_pg._resolve_embed_cfg`` fail-closed 抛 ValueError, 而观察者内层
-    # ``except Exception`` 把这条 ValueError 降级为 warning + 静默吞掉, 结果
-    # topic_entries.embed_model 列永远 NULL, 形成"embedding 断链残留"。
-    #
-    # 修复: 在 per-update 循环前, 按本批 cfg 经唯一工厂构造一次 embed_cfg
-    # (与 topic_store.upsert_topic line 218-219 同款路径 —
-    # safe_embed_cfg(resolve_config())). 工厂抛 ValueError 必须原样冒泡, 严禁
-    # 静默降级; 工厂返 None (没配 embed) 时, embed_cfg 留 None, 让内层
-    # _resolve_embed_cfg 继续按既有 fail-closed 契约抛 — 任何"伪造 cfg 占位
-    # 让 add_entry 通过"的路径都禁止. 一次构造, 整个调用复用 — 不在
-    # per-fact 循环里重复构造 (避免额外开销).
-    # ────────────────────────────────────────────────────────────────────
-    embed_cfg: dict | None = None
-    try:
-        from .config import resolve_config as _rc_for_embed
-        from .embedding import safe_embed_cfg as _sec_for_embed
-        embed_cfg = _sec_for_embed(_rc_for_embed())
-    except ValueError:
-        # 配置契约错误 — 必须原样冒泡, 严禁吞掉伪装成 disabled.
-        raise
-    except Exception as _e_embedcfg:
-        # resolve_config 自身故障 (无 hermes home / yaml 损坏等): 降级为 None,
-        # 让 _resolve_embed_cfg 继续按 fail-closed 路径执行 (有 embedding → 抛).
-        logger.debug(
-            "observer: safe_embed_cfg(resolve_config()) 解析失败, embed_cfg=None: %s",
-            _safe_err(_e_embedcfg)[:120],
-        )
-        embed_cfg = None
-
-    # 单条 fact 文本里解析最近一个 [#N] / [ #N ] 引用; 多引用取第一个。
-    # 兼容空格, 不区分全/半角, 不区分中英括号 — 与 prompt 内嵌风格保持一致。
-    _CITATION_RE = re.compile(r"\[\s*#\s*(\d+)\s*\]")
-
-    def _resolve_fact_embedding(fact_text: str) -> tuple[Any | None, str | None]:
-        """从 fact 文本解析 [#N] 引用, 返回 (emb_value, reason_if_none).
-
-        reason_if_none 仅在 emb_value 为 None 时填充, 用于审计与 warning 提示:
-          - "no_citation" — 文本里没有 [#N]
-          - "out_of_range" — N 超出本批 qa_rows 范围
-          - "missing_embedding" — 引用 QA 在 qa_pairs 里 embedding 为 NULL
-          - "no_qa_rows" — 调用方未传 qa_rows
-        失败时不抛 — caller 走"skip + warning + 累计计数"路径。
-        """
-        if not qa_rows:
-            return None, "no_qa_rows"
-        m = _CITATION_RE.search(fact_text or "")
-        if not m:
-            return None, "no_citation"
-        try:
-            n = int(m.group(1))
-        except Exception:
-            return None, "no_citation"
-        if n < 1 or n > len(qa_rows):
-            return None, "out_of_range"
-        emb = _qa_emb_by_local.get(n)
-        if emb is None:
-            return None, "missing_embedding"
-        return emb, None
-
-    def _resolve_fact_refs(fact_text: str) -> tuple[list[int], str]:
-        return _fact_refs_from_text(fact_text, qa_rows)
-
-    for upd in updates:
-        if not isinstance(upd, dict):
-            continue
-        action = (upd.get("action") or "").strip().lower()
-        title = (upd.get("title") or "").strip()[:200]
-        summary = (upd.get("summary") or "").strip()[:500]
-        new_facts = (upd.get("new_facts") or "").strip()[:8000]
-        _fact_items_all = [f.strip() for f in re.split(r'[\n；;]+', new_facts) if f.strip()]
-        _facts_for_entries: list[str] | None = None
-        tags = upd.get("tags") or []
-        if not isinstance(tags, list):
-            tags = []
-        topic_id_in = (upd.get("topic_id") or "").strip()
-
-        if not title:
-            logger.warning("observer: 跳过一条 topic_update (title 空): %s",
-                           json.dumps(upd, ensure_ascii=False)[:200])
-            continue
-
-        try:
-            if action == "update" and topic_id_in:
-                # 现有主题: 读旧 body（2026-08-06: 改 PG 读 — SQLite 双写断链只剩 80 张,
-                # 读 SQLite 找不到 → 误转 create → 制造重复卡）; PG 无则转 create
-                old_body = ""
-                old_summary = ""
-                old_title = ""
-                _found = False
-                if pg is not None:
-                    try:
-                        _conn_pg = pg._connect() if hasattr(pg, "_connect") else pg
-                        with _conn_pg.cursor() as _cur:
-                            _cur.execute(
-                                f"SELECT body, summary, title FROM {topics_table} WHERE topic_id=%s",
-                                (topic_id_in,),
-                            )
-                            _row = _cur.fetchone()
-                            if _row:
-                                old_body = _row[0] or ""
-                                old_summary = _row[1] or ""
-                                old_title = _row[2] or ""
-                                _found = True
-                    except Exception:
-                        _found = False
-                if not _found:
-                    cur = store.conn.execute(
-                        "SELECT body, summary FROM topic_blocks WHERE id=?",
-                        (topic_id_in,),
-                    ).fetchone()
-                    if cur:
-                        old_body = cur[0] or ""
-                        old_summary = cur[1] or ""
-                        _found = True
-                if _found:
-                    # 2026-11-12 追加前去重: body 是滚动累积的, LLM 每轮会把上一版印里
-                    # 已经写过的事实换个说法再给一遍; 直 append 会在 3000 字上限以内
-                    # 反复堆同一件事 (实测某卡 13 段里 2 段同义)。这里按归一化后
-                    # 子串包含拦截"完全相同 + 轻微改写", 拿不准的一律保留。
-                    _facts_to_add = _dedupe_facts(old_body, _fact_items_all)
-                    _facts_for_entries = _facts_to_add
-                    _new_body = (old_body + "\n\n" + "\n".join(_facts_to_add)).strip() if _facts_to_add else old_body
-                    # 2026-08-12 v2 修正: body 追加限量 — 第二轮事实级改造发现 new_facts 全追加
-                    # 导致单卡膨胀 (6975字) 超注入预算 4000 → 截断 → 关键事实不可见 (conv-26 75%→64%)
-                    # 小粒度主题卡覆盖更好 (对照组 31 卡 45.8% vs 实验组 23 卡 44.1%)
-                    if len(_new_body) > 3000:
-                        # body 超限: 不追加, 事实只走 entries (chain 链路), 保持小粒度
-                        appended = old_body
-                        _new_body = old_body
-                    else:
-                        appended = _new_body
-                    new_summary = summary or old_summary
-                    # 2026-11-13 标题锁定: 每轮 update 都把模型当轮写的 title 覆盖回去,
-                    # 实测一张卡会被后来讨论的子话题改名 (「Honcho 本地部署与插件接入」
-                    # → 「本地消息上限评估与调整」), 卡名从此只代表最后一轮。
-                    # 建卡时定名, update 不改名 — 除非模型显式给 rename (本版未开放)。
-                    _kept_title = _title_for_update(old_title, title)
-                    store.upsert_topic(
-                        title=_kept_title,
-                        summary=new_summary,
-                        body=appended[:16000],
-                        keywords=_filter_keywords(tags),
-                        topic_id=topic_id_in,
-                        pg_conn=pg,
-                    )
-                    applied_ids.append(str(topic_id_in))
-                else:
-                    # topic_id 没找到 → 转 create
-                    action = "create"
-            if action == "create":
-                tid = store.upsert_topic(
-                    title=title,
-                    summary=summary,
-                    body=new_facts[:16000],
-                    keywords=_filter_keywords(tags),
-                    pg_conn=pg,
-                )
-                topic_id_in = tid
-                # v4.1 (2026-08-19): create 成功也必须 append 进 applied_ids,
-                # 否则 worker 拿不到新建 topic_id, note.links 永远漏回链 —
-                # 与 update 分支行 1439 的语义对齐 (失败分支不在这里, 由外层 except 跳过)。
-                applied_ids.append(str(tid))
-        except ValueError:
-            raise
-        except Exception as e:
-            logger.warning("observer: 单条 topic_update 失败(不影响其他): %s",
-                           _safe_err(e)[:120])
-            continue
-
-        # 在 PG topics 表上更新 note_ref + last_observer_ts (不管 create 还是 update 都标)
-        if topic_id_in:
-            # 2026-08-12: new_facts 逐条结构化落 topic_entries (事实级检索, 源 obs:fact)
-            # 之前只追加 body 文本 — body 注入被 [:300] 截断, 事实在 body 中后段不可见;
-            # 结构化 entry 让事实可被 topic_entries 链路召回。
-            # 2026-08-19: 同时把 QA embedding 复用过来 — 见上面 _qa_emb_by_local 准备段。
-            # 解析不到引用的事实走"skip + warning + 累计计数"; strict_pg 下绝不静默
-            # 写 NULL embedding (避免断链残留); 非 strict 模式下允许 NULL 但仍记录。
-            if (new_facts or '').strip():
-                # 2026-11-12: update 分支已做过追加前去重 — 已写进 body 的事实不再重复落
-                # entry, 否则同一件事会既在 body 又在 entries 里各来一遍。
-                _fact_items = (_facts_for_entries if _facts_for_entries is not None
-                               else _fact_items_all)
-                for _fi in _fact_items[:20]:
-                    _fact_emb, _reason = _resolve_fact_embedding(_fi)
-                    if _fact_emb is None:
-                        # 不可解析 — 不写 entry, 累计计数与示例, 留待审计
-                        _fact_unresolved_total += 1
-                        if len(_fact_unresolved_examples) < 5:
-                            _fact_unresolved_examples.append(
-                                f"[{_reason}] {_fi[:80]}"
-                            )
-                        continue
-                    # 2026-11-12: 把 [#N] 引用落成可核实来源 —
-                    # 单引用写 source_qa_id, 多引用写 source 后缀 :qa=a,b (不伪造单一来源)
-                    _fact_ids, _ref_suffix = _resolve_fact_refs(_fi)
-                    try:
-                        store.add_entry(
-                            topic_id_in,
-                            source=f'obs:fact:{note_id}{_ref_suffix}',
-                            question=_fi[:300],
-                            answer='',
-                            source_qa_id=(_fact_ids[0] if len(_fact_ids) == 1 else None),
-                            pg_conn=pg,
-                            embedding=_fact_emb,
-                            embed_cfg=embed_cfg,
-                        )
-                    except ValueError:
-                        raise
-                    except Exception as _e_fact:
-                        logger.warning(
-                            "observer: fact entry 写入失败 (topic=%s, fact=%r): %s",
-                            topic_id_in, _fi[:60], _safe_err(_e_fact)[:100],
-                        )
-                        try:
-                            pg.rollback()
-                        except Exception:
-                            pass
-            try:
-                with pg.cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE {topics_table}
-                        SET note_ref = COALESCE(note_ref, %s),
-                            last_observer_ts = NOW()
-                        WHERE topic_id = %s
-                        """.format(topics_table=topics_table),
-                        (note_ref, topic_id_in),
-                    )
-                pg.commit()
-            except Exception as e:
-                logger.warning("observer: 更新 topics.note_ref 失败(非致命): %s",
-                               _safe_err(e)[:120])
-                try:
-                    pg.rollback()
-                except Exception:
-                    pass
-
-            # 2026-08-07 方案A: 代码向量匹配挂 entry (观察者从不写 entry 的断链修复)
-            # 每条 topic 写成功后, 用 topic embedding 匹配本段 QA 原文, 命中挂 topic_entries。
-            # 失败不阻塞 — 单条挂载异常仅 warning (后续可由补盲脚本覆盖)。
-            if qa_rows:
-                try:
-                    _link_entries_by_vector(
-                        pg, topics_table, topic_id_in, qa_rows, note_id,
-                    )
-                except ValueError:
-                    # embedding/fingerprint 配置错误必须暴露，不能静默跳过 entry 写入。
-                    raise
-                except Exception as e:
-                    logger.warning("observer: entry 向量匹配失败(非致命): %s",
-                                   _safe_err(e)[:120])
-                    try:
-                        pg.rollback()
-                    except Exception:
-                        pass
-
-
-    # 整个 _apply_topic_updates 结束时, 把本批 fact unresolved 总数汇总打印一次 —
-    # strict_pg 生产模式下 unresolved > 0 表示这一批 fact entries 有缺失, 留待审计。
-    if _fact_unresolved_total > 0:
-        logger.warning(
-            "observer: fact entries unresolved=%d (note_id=%s, examples=%r) — "
-            "fact 来源缺失 embedding, 已跳过该 entry; strict_pg 下绝不静默写 NULL",
-            _fact_unresolved_total, note_id, _fact_unresolved_examples,
-        )
-
-    return applied_ids
-
-
-# ────────────────────────────────────────────────────────────
-# 种子压缩 — phase7 日终压缩步骤
-#
-# 设计: 完整印 → 种子印 (500-800 字硬约束). 完整印存到 observation_notes.content,
-#       种子印存到同一条 links JSONB 数组 ({kind:"seed", content:...}).
-# 下次观察时: 优先从上次 links 抽种子印作为 prev_note, 失败 fallback 完整印.
-#
-# 借鉴 phase6 SEED_COMPRESS_PROMPT, 验证基线 6 月 10 天 9/10 稳定.
-# ────────────────────────────────────────────────────────────
-
-SEED_COMPRESS_PROMPT = """你是记忆观察者。今天是 {current_date}。给定今天的完整印（可能很长），压缩成**种子印**（500-800 字，硬约束）——供明天作为输入上下文。
-
-种子印必须包含：
-1. **关键决策**（决策是记忆的锚，不能丢，含 [#N] 来源）
-2. **进行中状态**（未完事项、待验证、下一步）
-3. **主题指针**（主题用 [t_xxxx] 引用，不展开细节）
-4. **关键操作知识**（路径/命令/端口，一行一个）
-5. **淡化**：已完结的细节、过程描述省略
-
-【今天的完整印】
-{full_note}
-
-输出：纯文本种子印，不要 JSON，500-800 字。"""
-
-
-def _seed_compress(
-    full_note: str,
-    cfg: dict[str, Any],
-    api_key: str,
-    *,
-    thinking: str = "disabled",
-    reasoning_split: bool = True,
-    timeout: int = 300,
-    seed_min: int = 500,
-    seed_max: int = 800,
-    max_completion_tokens: int = 4096,
-    temperature: float = 0.3,
-    dry_run: bool = False,
-) -> str | None:
-    """调 M3 把完整印压成种子印 (500-800 字).
-
-    Args:
-        full_note: 完整印正文
-        cfg: 已合并的 runtime + observer cfg (含 base_url/model/proxy)
-        api_key: LLM api_key
-        thinking/reasoning_split: phase0e 定案参数
-        timeout: 种子压缩超时
-        seed_min/seed_max: 字数硬约束 (500-800)
-        max_completion_tokens: 4096 比主 M3 小 (种子印短)
-        temperature: 0.3 与 phase0 一致
-        dry_run: True 时直接返回 None 不调 LLM
-
-    Returns:
-        种子印文本 (500-800 字附近), 失败返 None (失败时 caller fallback 完整印).
-    """
-    if dry_run:
-        logger.info("observer: SEED DRY-RUN — 跳过 M3 种子压缩")
-        return None
-    if not full_note or len(full_note) < seed_min:
-        # 完整印太短, 不压; 直接返 None (caller fallback 完整印做下一轮输入)
-        logger.info(
-            "observer: SEED — 完整印 %d 字 < 种子下限 %d, 跳过压缩",
-            len(full_note), seed_min,
-        )
-        return None
-    # prompt 可配置化: config.yaml prompts.observer_seed 可覆盖 (默认回落内置)
-    from .config import _resolve_prompt as _cfg_prompt
-    _seed_prompt = _cfg_prompt(cfg, "observer_seed", SEED_COMPRESS_PROMPT)
-    prompt = _seed_prompt.format(
-        full_note=full_note[:30000],
-        current_date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-    )
-    result = call_m3(
-        cfg, api_key, prompt,
-        max_completion_tokens=max_completion_tokens,
-        thinking=thinking,
-        reasoning_split=reasoning_split,
-        timeout=timeout,
-    )
-    if "error" in result:
-        logger.warning(
-            "observer: SEED 压缩失败(用完整印 fallback): %s",
-            result["error"][:200],
-        )
-        return None
-    seed_text = (result.get("text", "") or "").strip()
-    if not seed_text:
-        logger.warning("observer: SEED 压缩返空, fallback 完整印")
-        return None
-    # 字数轻度校验: 超上限截, 不够下限也返 (caller 也容忍)
-    if len(seed_text) > seed_max * 2:
-        # 极罕见: M3 输出过长, 截到 2x 上限保留多一点信息
-        seed_text = seed_text[: seed_max * 2]
-    logger.info(
-        "observer: SEED 完成 %d 字 (seed_min=%d seed_max=%d, prompt_tokens=%s latency=%.1fs)",
-        len(seed_text),
-        seed_min, seed_max,
-        (result.get("usage") or {}).get("prompt_tokens", "?"),
-        result.get("latency", 0.0),
-    )
-    return seed_text
 
 
 def _extract_prev_seed(links_jsonb: Any) -> str | None:
@@ -4750,13 +4079,6 @@ def _observe_worker(
         "prompt_note_max_chars",
         cfg.get("observer_note_max_chars", 8000),
     ))
-    # v4 (2026-08-18): seed_compress_enabled 默认 False — 种子压缩链路已退役
-    # (token 净亏 + 信息有损, 防膨胀靠 E1 每天定时 + 膨胀触发); 显式 True 仍
-    # 允许 legacy branch 走种子压缩, 显式 False 继续关闭 — 不删除 legacy 代码。
-    seed_enabled = bool(cfg.get("seed_compress_enabled", False))
-    seed_min = int(cfg.get("observer_seed_min_chars", 500))
-    seed_max = int(cfg.get("observer_seed_max_chars", 800))
-    seed_max_completion_tokens = int(cfg.get("seed_max_completion_tokens", 4096))
     dry_run = bool(dry_run)
     # v4 第二轮 (2026-08-20): snapshot_window_days / snapshot_max_chars 配置
     # 仍读取保留兼容 (用户 config.yaml 里这些 key 不报错), 但**主链路不再消费**
@@ -6148,164 +5470,13 @@ def _observe_worker(
                 pass
             return
 
-        # 10. 应用 topic_updates (单条失败不影响整体)
-        # v4.1 (2026-08-19): _apply_topic_updates 返成功应用的 topic_id 列表。
-        # 合并进 note.links 的 kind=topics.topic_ids (候选 + 新建 ∪, 去重保序),
-        # 修复"候选为空但 topic_updates create 成功后, note 不回链新建 topic"的断链。
-        # 失败补偿语义 (topic_updates_pending) 完整保留: 异常分支仍调
-        # _mark_topic_updates_pending, 不破坏既有契约。
-        applied_topic_ids: list[str] = []
+        # Topic V2 owns public.topics / topic_entries (single-writer rule).
+        # Observer only persists observation_notes and never mutates topics.
         if topic_updates:
-            try:
-                _applied = _apply_topic_updates(
-                    pg, new_note_id, topic_updates, cfg=cfg,
-                    qa_rows=[
-                        {"id": int(r[0]), "question": r[3] or "", "answer": r[4] or ""}
-                        for r in rows
-                    ] if rows else None,
-                )
-                if isinstance(_applied, list):
-                    applied_topic_ids = [str(t) for t in _applied if t]
-                    if applied_topic_ids:
-                        topics_mutated = True
-            except Exception as e:
-                logger.warning("observer: topic_updates 应用失败(非致命): %s",
-                               _safe_err(e)[:120])
-                try:
-                    pg.rollback()
-                except Exception:
-                    pass
-                # 2026-08-07 对抗审查修复: topic_updates 失败不能静默丢 —
-                # 把原始 topic_updates 存进 note.links (pending 标记),
-                # 由补偿任务/补盲脚本扫描重放, 避免"写印成功但主题索引永久缺失"。
-                try:
-                    _mark_topic_updates_pending(pg, new_note_id, topic_updates)
-                except Exception as e2:
-                    logger.warning("observer: 写 topic_updates pending 标记失败: %s",
-                                   _safe_err(e2)[:120])
-
-            # v4.1: 把 applied_topic_ids 合并进 note.links 的 kind=topics.topic_ids
-            # 仅在 applied_topic_ids 非空时写 — 避免无意义的 UPDATE links (防 pg 写盘抖动)。
-            # 注: 异常分支也会执行这段 (但 applied_topic_ids=[] 不会发 SQL, 无副作用)。
-            if applied_topic_ids:
-                try:
-                    with pg.cursor() as cur:
-                        cur.execute(
-                            "SELECT links FROM observation_notes WHERE id=%s",
-                            (new_note_id,),
-                        )
-                        _row = cur.fetchone()
-                        _links = []
-                        if _row and _row[0]:
-                            try:
-                                _links = _row[0] if isinstance(_row[0], list) else json.loads(_row[0])
-                                if not isinstance(_links, list):
-                                    _links = []
-                            except Exception:
-                                _links = []
-                        # 找 kind=topics link — 合并 topic_ids (候选 ∪ 新建, 去重保序)
-                        _merged = False
-                        for _lk in _links:
-                            if isinstance(_lk, dict) and _lk.get("kind") == "topics":
-                                    _existing_ids = _lk.get("topic_ids") or []
-                                    if not isinstance(_existing_ids, list):
-                                        _existing_ids = []
-                                    _seen = set()
-                                    _new_ids: list[str] = []
-                                    for _tid in list(_existing_ids) + list(applied_topic_ids):
-                                        _tid = str(_tid)
-                                        if _tid and _tid not in _seen:
-                                            _seen.add(_tid)
-                                            _new_ids.append(_tid)
-                                    _lk["topic_ids"] = _new_ids
-                                    _merged = True
-                                    break
-                        if not _merged:
-                            _links.append({
-                                "kind": "topics",
-                                "topic_ids": list(applied_topic_ids),
-                            })
-                        cur.execute(
-                            "UPDATE observation_notes SET links=%s::jsonb WHERE id=%s",
-                            (json.dumps(_links, ensure_ascii=False), new_note_id),
-                        )
-                    pg.commit()
-                    logger.info(
-                        "observer: 回写 note id=%s 的 links.topic_ids (新增 %d 个 topic_id)",
-                        new_note_id, len(applied_topic_ids),
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "observer: 回写 note.links.topic_ids 失败(非致命, 新建 topic 已写入 topics 表): %s",
-                        _safe_err(e)[:120],
-                    )
-                    try:
-                        pg.rollback()
-                    except Exception:
-                        pass
-
-        # 2026-08-06: 种子压缩已退役（token 净亏 + 信息有损 — 防膨胀靠 E1）。
-        # 下一轮观察直接读完整印 (见 prev_text 读取)。此段保留仅作历史注释。
-        if seed_enabled and not dry_run:
-            try:
-                seed_text = _seed_compress(
-                    full_note=note_content,
-                    cfg=merged,  # 已在 #6 步合并好 (含 model/base_url/proxy/temperature)
-                    api_key=api_key,
-                    thinking=thinking,
-                    reasoning_split=reasoning_split,
-                    timeout=300,
-                    seed_min=seed_min,
-                    seed_max=seed_max,
-                    max_completion_tokens=seed_max_completion_tokens,
-                    temperature=temperature,
-                    dry_run=False,
-                )
-                if seed_text:
-                    # UPDATE links 追加 seed (不再用 _write_observation_note 二写,
-                    # 避免 prev_id/created_at 重置)
-                    try:
-                        with pg.cursor() as cur:
-                            cur.execute(
-                                """
-                                UPDATE {notes_table}
-                                SET links = COALESCE(links, '[]'::jsonb) || %s::jsonb
-                                WHERE id = %s
-                                """.format(notes_table=notes_table),
-                                (
-                                    json.dumps(
-                                        [{
-                                            "kind": "seed",
-                                            "version": version,
-                                            "content": seed_text,
-                                            "char_count": len(seed_text),
-                                        }],
-                                        ensure_ascii=False,
-                                    ),
-                                    new_note_id,
-                                ),
-                            )
-                        pg.commit()
-                        logger.info(
-                            "observer: 种子印 %d 字追加到 obs_note id=%s 的 links",
-                            len(seed_text), new_note_id,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "observer: 种子印 UPDATE links 失败(种子已压缩但未持久化, "
-                            "下一轮 fallback 完整印): %s",
-                            _safe_err(e)[:120],
-                        )
-                        try:
-                            pg.rollback()
-                        except Exception:
-                            pass
-            except Exception as e:
-                logger.warning(
-                    "observer: 种子压缩链路异常(整段跳过): %s",
-                    _safe_err(e)[:120],
-                )
-                # seed_text 保持 None, 不阻塞主流程
+            logger.debug(
+                "observer: ignoring %d model topic_updates (topics owned by Topic V2)",
+                len(topic_updates),
+            )
 
         # 12. 推进游标 (写到 PG 成功后才推, 写失败下次重试同范围)
         _save_cursor(last_qa_id_now, cfg)
@@ -6361,10 +5532,8 @@ def _observe_worker(
             logger.warning("保存 known_sessions 失败(下次可能略多触发): %s",
                            _safe_err(e)[:120])
         logger.info(
-            "observer: 写入 obs_note id=%s (%d 字, %d 个 topic_updates, seed=%s), 游标推进到 %d",
-            new_note_id, len(note_content), len(topic_updates),
-            f"{len(seed_text)}字" if seed_text else "无(fallback)",
-            last_qa_id_now,
+            "observer: 写入 obs_note id=%s (%d 字), 游标推进到 %d",
+            new_note_id, len(note_content), last_qa_id_now,
         )
     finally:
         try:

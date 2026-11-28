@@ -3544,125 +3544,103 @@ class V3Core:
 
     # ── 手帐 ──
 
+    @staticmethod
+    def _is_topic_v2_enabled(cfg: Any) -> bool:
+        if cfg is None:
+            return True
+        if isinstance(cfg, dict):
+            return bool((cfg.get("prefetch") or {}).get("topic_v2_mode", True))
+        pf = getattr(cfg, "prefetch", None)
+        if pf is not None:
+            return bool(getattr(pf, "topic_v2_mode", True))
+        return True
 
+    def consolidate_topics_v2(
+        self,
+        *,
+        dry_run: bool = False,
+        batch_limit: int = 100,
+        use_llm: bool = True,
+        embed_fn=None,
+        llm_fn=None,
+    ) -> dict:
+        """Incrementally consolidate new PG QA rows into Topic V2 dossiers."""
+        import threading as _threading
+        from .config import _resolve_data_dir
+        from .embedding import DURABLE_WRITE_EMBED_POLICY
+        from .topic_v2 import consolidate_pg_incremental, make_gateway_llm_fn
 
+        lock = getattr(self, "_topic_v2_lock", None)
+        if lock is None:
+            lock = _threading.Lock()
+            self._topic_v2_lock = lock
 
+        cfg = getattr(self, "_config", None) or getattr(self, "config", None)
+        pg = getattr(self, "_pg", None) or getattr(self, "pg", None)
+        if pg is None:
+            return {"skipped": True, "reason": "no_pg"}
 
+        eff_embed_fn = embed_fn
+        if eff_embed_fn is None:
+            embed_cfg = safe_embed_cfg(cfg) if cfg is not None else None
+            if embed_cfg is None:
+                return {"skipped": True, "reason": "no_embedding"}
+            eff_embed_fn = (
+                lambda text: call_embedding(
+                    str(text or ""), embed_cfg, policy=DURABLE_WRITE_EMBED_POLICY
+                )
+                or []
+            )
 
+        eff_llm_fn = llm_fn
+        if eff_llm_fn is None and use_llm:
+            try:
+                eff_llm_fn = make_gateway_llm_fn(cfg)
+            except Exception:
+                eff_llm_fn = None
 
-
-
+        state_dir = _resolve_data_dir(cfg)
+        with lock:
+            result = consolidate_pg_incremental(
+                pg,
+                embed_fn=eff_embed_fn,
+                llm_fn=eff_llm_fn,
+                state_dir=state_dir,
+                dry_run=bool(dry_run),
+                batch_limit=max(int(batch_limit or 100), 1),
+            )
+        if not dry_run and int(result.get("upserted_topics") or 0) > 0:
+            try:
+                self._notify_topic_recall_invalidation()
+            except Exception as e:
+                logger.warning("consolidate_topics_v2 on_topics_commit 失败 (非阻塞): %s", _safe_err(e)[:100])
+        return result
 
     def _on_live_flush(self, items: list):
-        """LiveBuffer 刷入 PG 后的回调 — 触发轻量主题匹配.
+        """LiveBuffer 刷入 PG 后的回调 — 触发 Topic V2 增量巩固.
 
         Bound to V3Core (not LiveBuffer). TopicRecallCache.invalidate runs only
-        after the pool lease / direct connection is fully released.
+        after PG commit succeeds inside consolidate_topics_v2.
         """
         if not items:
             return
-        mutated = False
+        cfg_v2 = getattr(self, "_config", None) or getattr(self, "config", None)
+        if not self._is_topic_v2_enabled(cfg_v2):
+            return
+        import threading as _threading
+
+        lock = getattr(self, "_topic_v2_lock", None)
+        if lock is None:
+            lock = _threading.Lock()
+            self._topic_v2_lock = lock
+        if getattr(lock, "locked", lambda: False)():
+            return
         try:
-            from .topic_store import TopicStore
-            from .event_adapter import SessionEvents, QAEvent
-            from .topic_refine import SessionTracker, TopicMatcher, refine_turn
-            from .config import _resolve_data_dir
-            import os as _os
-            import time as _time
-
-            cfg = self.config
-            db_path = str(_resolve_data_dir(cfg) / "v3_topic_full.db")
-            if not _os.path.exists(db_path):
-                return
-
-            _embed_cfg = safe_embed_cfg(cfg)
-            lb_pg = getattr(self, "_pg", None)
-
-            def _do_refine(pg_conn):
-                nonlocal mutated
-                store = TopicStore(db_path, pg_conn=pg_conn)
-                try:
-                    tracker = SessionTracker(store)
-                    matcher = TopicMatcher(store, embed_cfg=_embed_cfg, pg_conn=pg_conn)
-
-                    # 持久化 match_history 跨多次 _on_live_flush 调用
-                    if not hasattr(self, "_refine_mh"):
-                        self._refine_mh = {}
-
-                    # 从 items 中按 session_id 分组构建 SessionEvents
-                    # items 是 (session_id, msg_id, content, role) 元组，刚刷入 PG
-                    from collections import defaultdict
-                    sessions_data = defaultdict(list)
-                    for item in items:
-                        if len(item) >= 4:
-                            sessions_data[item[0]].append(item)
-
-                    for sid, sess_items in sessions_data.items():
-                        try:
-                            qa_pairs = []
-                            for it in sess_items:
-                                qa_pairs.append(QAEvent(
-                                    role=it[3] or "", content=(it[2] or "")[:1000],
-                                    timestamp=_time.time(),
-                                ))
-                            if len(qa_pairs) < 3:
-                                continue
-                            session = SessionEvents(
-                                session_id=sid, source="live_buffer",
-                                qa_pairs=qa_pairs, turn_count=len(qa_pairs),
-                            )
-                            result = refine_turn(session, tracker, matcher, self._refine_mh)
-                            if result == "match":
-                                mutated = True
-                        except ValueError:
-                            raise
-                        except Exception as e:
-                            logger.warning("_on_live_flush refine_turn error: %s", _safe_err(e)[:100])
-                finally:
-                    try:
-                        store.close()
-                    except Exception as e:
-                        logger.warning("_on_live_flush store.close error: %s", _safe_err(e)[:100])
-
-            if lb_pg is not None:
-                try:
-                    with _lease_pg_store(lb_pg) as pg_conn:
-                        _do_refine(pg_conn)
-                except Exception as e:
-                    logger.warning("_on_live_flush PG lease failed (proceed fallback/SQLite): %s", _safe_err(e)[:100])
-            else:
-                # 兜底: 仅当没有 lb_pg 时新建独立直连 (并负责物理关闭)
-                pg_conn = None
-                try:
-                    if cfg and hasattr(cfg, "pg") and cfg.pg:
-                        import psycopg2
-                        pg_conn = psycopg2.connect(
-                            host=cfg.pg.host, port=cfg.pg.port,
-                            dbname=cfg.pg.database, user=cfg.pg.user,
-                            password=cfg.pg.password,
-                        )
-                except Exception as e:
-                    logger.warning("_on_live_flush PG connect failed (proceed SQLite-only): %s", _safe_err(e)[:100])
-                    pg_conn = None
-
-                try:
-                    _do_refine(pg_conn)
-                finally:
-                    if pg_conn is not None:
-                        try:
-                            pg_conn.close()
-                        except Exception:
-                            pass
-
-            if mutated:
-                try:
-                    self._notify_topic_recall_invalidation()
-                except Exception as e:
-                    logger.warning("_on_live_flush on_topics_commit 失败 (非阻塞): %s", _safe_err(e)[:100])
+            self.consolidate_topics_v2(dry_run=False, batch_limit=20)
         except ValueError:
             raise
         except Exception as e:
-            logger.warning("_on_live_flush 整体失败: %s", _safe_err(e)[:100])
+            logger.warning("_on_live_flush topic_v2 consolidation error: %s", _safe_err(e)[:100])
 
     def _enqueue_live_message_status(self, session_id: str, msg_id: str,
                                      content: str, role: str, turn_id: str,

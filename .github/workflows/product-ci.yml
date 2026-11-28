@@ -285,7 +285,15 @@ jobs:
               tests/test_p0a_late_assistant_derivation.py \
               tests/test_serve_tool_profile_scoping.py \
               tests/test_recall_pool_premise_deadline.py \
-              tests/test_schema_packaged_parity.py
+              tests/test_topic_v2.py \
+              tests/test_topic_ablation_bench.py \
+              tests/test_embedding_policy_guard.py \
+              tests/test_schema_packaged_parity.py \
+              tests/test_observer_e1_decoupling_and_gateway.py \
+              tests/test_e1_output_budget.py \
+              tests/test_e1_identity_length_retry.py \
+              tests/test_e1_generated_context_contract.py \
+              tests/test_e1_identity_block_boundary.py
 
       - name: focused-tests-g5b-evaluator
         working-directory: src/v3-core
@@ -367,3 +375,75 @@ jobs:
       - name: pi-adapter-tests
         working-directory: packages/pi-adapter
         run: node --test "tests/*.test.mjs"
+
+  isolated-pg-topic-v2:
+    name: isolated-pg-topic-v2 (pg16+pgvector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: v3test
+          POSTGRES_PASSWORD: v3test_disposable_ci
+          POSTGRES_DB: v3test_isolated
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd="pg_isready -U v3test -d v3test_isolated"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: cache-pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: product-ci-pg-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('src/v3-core/pyproject.toml') }}
+          restore-keys: |
+            product-ci-pg-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-
+
+      - name: pip-install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pytest>=8,<10" "pyyaml>=6"
+          python -m pip install -e ./src/v3-core
+
+      - name: bootstrap-isolated-pg-idempotent
+        run: |
+          python src/v3-core/scripts/bootstrap_alpha_db.py --dsn "host=127.0.0.1 port=55432 dbname=v3test_isolated user=v3test password=v3test_disposable_ci"
+          python src/v3-core/scripts/bootstrap_alpha_db.py --dsn "host=127.0.0.1 port=55432 dbname=v3test_isolated user=v3test password=v3test_disposable_ci"
+
+      - name: isolated-pg-topic-v2-tests
+        working-directory: src/v3-core
+        env:
+          V3CORE_PG_PASSWORD: ""
+          OPENAI_API_KEY: ""
+          OPENAI_API_BASE: ""
+          V3_LLM_API_KEY: ""
+          V3_LLM_BASE_URL: ""
+          V3CORE_PG_HOST: ""
+          V3CORE_PG_PORT: ""
+          V3CORE_PG_DB: ""
+          V3CORE_PG_USER: ""
+          V3_LLM_PROVIDER: ""
+          V3CORE_TEST_MODE: ""
+          V3CORE_CONFIG: ""
+          HIPPOCAMPUS_TOPIC_V2_TEST_DSN: "host=127.0.0.1 port=55432 dbname=v3test_isolated user=v3test password=v3test_disposable_ci"
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src \
+            python -m pytest -v --no-header \
+              -p no:cacheprovider \
+              tests/test_topic_v2_pg_integration.py \
+              tests/test_observer_e1_pg_integration.py

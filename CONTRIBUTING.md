@@ -19,10 +19,11 @@ If you're a trial user:
 
 If you're evaluating the engine itself:
 
-1. Read [`docs/ARCHITECTURE-OVERVIEW.md`](docs/ARCHITECTURE-OVERVIEW.md).
-2. Read [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
+1. Read [`docs/DESIGN-PHILOSOPHY.md`](docs/DESIGN-PHILOSOPHY.md) for the project's core principles and boundaries.
+2. Read [`docs/ARCHITECTURE-OVERVIEW.md`](docs/ARCHITECTURE-OVERVIEW.md).
+3. Read [`docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md`](docs/PUBLIC_ALPHA_SUPPORTED_SURFACE.md)
    for the supported-surface contract.
-3. Skim [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) for the
+4. Skim [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md) for the
    items the alpha does **not** close.
 
 ## 2. Repository layout
@@ -34,6 +35,7 @@ hippocampus-memory/
 ├── SECURITY.md                    ← security disclosure policy
 ├── CHANGELOG.md                   ← user-facing changes
 ├── docs/                          ← user-facing documentation
+│   ├── DESIGN-PHILOSOPHY.md
 │   ├── INSTALL.md
 │   ├── CONFIGURATION.md
 │   ├── BACKUP-RESTORE.md
@@ -97,6 +99,20 @@ The alpha cut is **not** accepting broad code contributions. Specifically:
 If you want to propose a new feature, file a GitHub issue marked
 `feature-request`. New features are not part of the v0.1-alpha
 supported-surface promise.
+
+### Design & PR Review Gate (The 3 Questions)
+
+Any proposed architecture change, module addition, or PR should be evaluated
+against [`docs/DESIGN-PHILOSOPHY.md`](docs/DESIGN-PHILOSOPHY.md) (the 15 core
+principles) and answer these three benchmark questions:
+
+1. Does it help the agent inherit the past more faithfully? (它是否让 Agent 更好地继承了过去？)
+2. Does it make memory more accurate and controllable rather than polluting current judgment? (它是否让记忆变得更准确、更可控，而不是更容易污染当前判断？)
+3. Does it keep memory owned by the user and portable across models, hosts, and devices? (它是否让这套记忆真正属于用户，并且能够跨模型、跨宿主、跨设备延续？)
+
+Changes that cannot answer these questions — or that push agent reasoning,
+silent source mutation, or model/vendor lock-in into `v3-core` — should not be
+merged without explicit philosophical justification.
 
 ## 5. Coding conventions (for small fixes only)
 

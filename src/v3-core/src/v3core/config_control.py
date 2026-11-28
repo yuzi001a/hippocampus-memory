@@ -1463,7 +1463,7 @@ class ConfigControlService:
         if isinstance(tkg, Mapping) and "enabled" in tkg:
             toggles["tkg.enabled"] = bool(tkg.get("enabled"))
         if isinstance(prefetch, Mapping):
-            for k in ("enabled", "dual_path", "include_message_vector"):
+            for k in ("enabled", "dual_path", "include_message_vector", "topic_v2_mode"):
                 if k in prefetch:
                     toggles[f"prefetch.{k}"] = bool(prefetch.get(k))
 
@@ -1874,7 +1874,8 @@ class ConfigControlService:
         """Flip one of the supported toggles.
 
         Supported: ``e1.enabled``, ``tkg.enabled``, ``prefetch.enabled``,
-        ``prefetch.dual_path``, ``prefetch.include_message_vector``.
+        ``prefetch.dual_path``, ``prefetch.include_message_vector``,
+        ``prefetch.topic_v2_mode``.
         """
         if not isinstance(value, bool):
             raise ConfigValidationError([ConfigIssue(
@@ -1926,7 +1927,7 @@ def _parse_toggle_path(name: str) -> tuple[tuple[str, ...], str]:
             message=(
                 f"unknown toggle {name!r}; supported: e1.enabled, "
                 "tkg.enabled, prefetch.enabled, prefetch.dual_path, "
-                "prefetch.include_message_vector"
+                "prefetch.include_message_vector, prefetch.topic_v2_mode"
             ),
         )])
     parent = (parts[0],)
@@ -1937,6 +1938,7 @@ def _parse_toggle_path(name: str) -> tuple[tuple[str, ...], str]:
         (("prefetch",), "enabled"),
         (("prefetch",), "dual_path"),
         (("prefetch",), "include_message_vector"),
+        (("prefetch",), "topic_v2_mode"),
     }:
         raise ConfigValidationError([ConfigIssue(
             field=name,
@@ -1945,7 +1947,7 @@ def _parse_toggle_path(name: str) -> tuple[tuple[str, ...], str]:
             message=(
                 f"unknown toggle {name!r}; supported: e1.enabled, "
                 "tkg.enabled, prefetch.enabled, prefetch.dual_path, "
-                "prefetch.include_message_vector"
+                "prefetch.include_message_vector, prefetch.topic_v2_mode"
             ),
         )])
     return parent, field
